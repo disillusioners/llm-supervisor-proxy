@@ -165,9 +165,9 @@ func newQuotaScopeEnv(t *testing.T, chain []layeredChainModel, walledCredIDs map
 	cfg := newTestConfigSnapshot(modelIDs[0])
 	cfg.ModelsConfig = resolver
 	cfg.UpstreamSkipCache = skipcache.New()
-	cfg.UpstreamSkipCacheTTL = 60 * time.Second
+	cfg.UpstreamSkipCacheTTL = skipcache.DefaultTTL
 	cfg.ModelSkipCache = modelcache.New()
-	cfg.ModelSkipCacheTTL = 30 * time.Minute
+	cfg.ModelSkipCacheTTL = modelcache.DefaultTTL
 	cfg.StreamDeadline = 5 * time.Second
 	cfg.MaxGenerationTime = 10 * time.Second
 
@@ -217,8 +217,8 @@ func TestQuotaMintScope_TokenPlanAccountWallRotatesToHealthyCredential(t *testin
 	if !ok {
 		t.Fatal("the walled credential has no cooldown row — the account body must mint at the credential layer")
 	}
-	if d := time.Until(until); d < 14*time.Minute || d > 16*time.Minute {
-		t.Fatalf("credential cooldown = %v, want ~15m (the quota-class cooldown)", d)
+	if d := time.Until(until); d < credentiallb.DefaultQuotaCooldown-time.Minute || d > credentiallb.DefaultQuotaCooldown+time.Minute {
+		t.Fatalf("credential cooldown = %v, want ~%v (the quota-class cooldown)", d, credentiallb.DefaultQuotaCooldown)
 	}
 	// The UPSTREAM layer demoted the walled account as well (the
 	// account body's marks live at the credential + upstream layers).
@@ -288,8 +288,8 @@ func TestQuotaMintScope_AllCredentialsWalled_NoModelSuppression(t *testing.T) {
 	if !ok {
 		t.Fatal("the rotated-away account has no credential-layer cooldown row")
 	}
-	if d := time.Until(until); d < 14*time.Minute || d > 16*time.Minute {
-		t.Fatalf("credential cooldown = %v, want ~15m (the quota-class cooldown)", d)
+	if d := time.Until(until); d < credentiallb.DefaultQuotaCooldown-time.Minute || d > credentiallb.DefaultQuotaCooldown+time.Minute {
+		t.Fatalf("credential cooldown = %v, want ~%v (the quota-class cooldown)", d, credentiallb.DefaultQuotaCooldown)
 	}
 }
 
@@ -432,7 +432,7 @@ func TestQuotaMintScope_PerCredentialQuotaRotationRegression(t *testing.T) {
 	if !ok {
 		t.Fatal("the walled credential has no cooldown row")
 	}
-	if d := time.Until(until); d < 14*time.Minute || d > 16*time.Minute {
-		t.Fatalf("credential cooldown = %v, want ~15m (the quota-class cooldown, not the 60s rate-limit one)", d)
+	if d := time.Until(until); d < credentiallb.DefaultQuotaCooldown-time.Minute || d > credentiallb.DefaultQuotaCooldown+time.Minute {
+		t.Fatalf("credential cooldown = %v, want ~%v (the quota-class cooldown, not the %v rate-limit one)", d, credentiallb.DefaultQuotaCooldown, credentiallb.DefaultCooldown)
 	}
 }

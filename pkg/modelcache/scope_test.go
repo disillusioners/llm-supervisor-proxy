@@ -84,7 +84,7 @@ func TestClassifyScope_UndistinguishableBodiesAreUnknown(t *testing.T) {
 	}
 	// The unknown scope must never mark — the gate refuses it.
 	c := New()
-	scope, modelMarked := ApplyScopedWall(c, "m1", "upstream connection reset by peer", 30*time.Minute, time.Now())
+	scope, modelMarked := ApplyScopedWall(c, "m1", "upstream connection reset by peer", DefaultTTL, time.Now())
 	if scope != ScopeUnknown {
 		t.Fatalf("scope = %v, want ScopeUnknown", scope)
 	}
@@ -103,7 +103,7 @@ func TestApplyScopedWall_AccountScopedBodiesNeverMark(t *testing.T) {
 	now := time.Now()
 	for _, body := range observedAccountBodies {
 		c := New()
-		scope, modelMarked := ApplyScopedWall(c, "m1", body, 30*time.Minute, now)
+		scope, modelMarked := ApplyScopedWall(c, "m1", body, DefaultTTL, now)
 		if modelMarked {
 			t.Errorf("ApplyScopedWall(%q) marked the model layer, want no mark (account body)", body)
 		}
@@ -128,7 +128,7 @@ func TestApplyScopedWall_ModelScopedBodyMarks(t *testing.T) {
 
 	now := time.Now()
 	c := New()
-	scope, modelMarked := ApplyScopedWall(c, "m1", "Usage limit reached for 5 hour "+marker, 30*time.Minute, now)
+	scope, modelMarked := ApplyScopedWall(c, "m1", "Usage limit reached for 5 hour "+marker, DefaultTTL, now)
 	if scope != ScopeModel {
 		t.Fatalf("scope = %v, want ScopeModel", scope)
 	}
@@ -139,7 +139,7 @@ func TestApplyScopedWall_ModelScopedBodyMarks(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a live model mark")
 	}
-	if d := until.Sub(now); d < 29*time.Minute || d > 31*time.Minute {
+	if d := until.Sub(now); d < DefaultTTL-time.Minute || d > DefaultTTL+time.Minute {
 		t.Fatalf("mark window = %v, want ~30m (the configured knob)", d)
 	}
 }
@@ -155,7 +155,7 @@ func TestApplyScopedWall_ModelScopedBodyRespectsKnobCap(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	c := New()
 	body := "Usage limit reached for 5 hour " + marker + ". Reset at " + now.Add(5*time.Hour).Format("2006-01-02 15:04:05")
-	scope, modelMarked := ApplyScopedWall(c, "m1", body, 30*time.Minute, now)
+	scope, modelMarked := ApplyScopedWall(c, "m1", body, DefaultTTL, now)
 	if scope != ScopeModel || !modelMarked {
 		t.Fatalf("scope = %v, modelMarked = %v; want ScopeModel/true", scope, modelMarked)
 	}
@@ -163,7 +163,7 @@ func TestApplyScopedWall_ModelScopedBodyRespectsKnobCap(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a live model mark")
 	}
-	want := now.Add(30 * time.Minute)
+	want := now.Add(DefaultTTL)
 	if !until.Equal(want) {
 		t.Fatalf("until = %v, want %v (the knob caps the parsed reset)", until, want)
 	}
@@ -178,13 +178,13 @@ func TestApplyScopedWall_ReportsTheRealPostState(t *testing.T) {
 	now := time.Now()
 	// (a) refused body, no mark live → false.
 	c := New()
-	if _, modelMarked := ApplyScopedWall(c, "m1", observedAccountBodies[0], 30*time.Minute, now); modelMarked {
+	if _, modelMarked := ApplyScopedWall(c, "m1", observedAccountBodies[0], DefaultTTL, now); modelMarked {
 		t.Fatal("modelMarked = true with no mark live")
 	}
 	// (b) refused body, a mark ALREADY live → the real post-state is
 	// true (the cache holds a model mark for the key).
 	c.Mark("m1", 10*time.Minute)
-	if _, modelMarked := ApplyScopedWall(c, "m1", observedAccountBodies[0], 30*time.Minute, now); !modelMarked {
+	if _, modelMarked := ApplyScopedWall(c, "m1", observedAccountBodies[0], DefaultTTL, now); !modelMarked {
 		t.Fatal("modelMarked = false while a model mark is live — the return must be the cache's real post-state")
 	}
 }

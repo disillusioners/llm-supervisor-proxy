@@ -229,11 +229,11 @@ func TestAnthropicQuotaClass_TokenPlanBodySeedsQuotaCooldown(t *testing.T) {
 	d := time.Until(until)
 	// The quota class: ~15m. Assert the CLASS WINDOW (>10m), not a
 	// loose "a row exists".
-	if d < 10*time.Minute {
-		t.Fatalf("credential cooldown = %v, want the QUOTA class (~15m) — a Token-Plan body is account exhaustion, not a per-minute throttle", d)
+	if d < credentiallb.DefaultQuotaCooldown-time.Minute {
+		t.Fatalf("credential cooldown = %v, want the QUOTA class (~%v) — a Token-Plan body is account exhaustion, not a per-minute throttle", d, credentiallb.DefaultQuotaCooldown)
 	}
-	if d > 20*time.Minute {
-		t.Fatalf("credential cooldown = %v, want the QUOTA class (~15m)", d)
+	if d > credentiallb.DefaultQuotaCooldown+5*time.Minute {
+		t.Fatalf("credential cooldown = %v, want the QUOTA class (~%v)", d, credentiallb.DefaultQuotaCooldown)
 	}
 
 	// MINT-SCOPE (the branch's other half): an ACCOUNT-scoped body
@@ -280,10 +280,10 @@ func TestAnthropicQuotaClass_PlainRateLimitSeedsShortCooldown(t *testing.T) {
 	// Retry-After header is sent by the stub). Assert the CLASS
 	// WINDOW (<5m), not a loose "a row exists".
 	if d > 5*time.Minute {
-		t.Fatalf("credential cooldown = %v, want the RATE-LIMIT class (~60s) — a plain throttle is not account exhaustion", d)
+		t.Fatalf("credential cooldown = %v, want the RATE-LIMIT class (~%v) — a plain throttle is not account exhaustion", d, credentiallb.DefaultCooldown)
 	}
-	if d < 10*time.Second {
-		t.Fatalf("credential cooldown = %v, want the RATE-LIMIT class (~60s)", d)
+	if d < credentiallb.DefaultCooldown/2 {
+		t.Fatalf("credential cooldown = %v, want the RATE-LIMIT class (~%v)", d, credentiallb.DefaultCooldown)
 	}
 }
 
