@@ -933,6 +933,66 @@ func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
 			}
 		})
 	}
+
+	// Chain-rule subtest: a chat model whose fallback_chain names a
+	// DECISION-lane group must be rejected at the API boundary (B3).
+	t.Run("chain_rule_chat_model_references_decision_group", func(t *testing.T) {
+		// Seed a decision group in the mock store.
+		seedStack := func() (*modelTestServer, *httptest.Server) {
+			ts := newModelTestServer()
+			addDecisionCreds(ts)
+			addDecisionGroupMembers(ts)
+			g := decisionGroupBase()
+			g.ID = "decision-group-1"
+			if err := ts.mockModels.AddModel(g); err != nil {
+				t.Fatalf("seed decision group: %v", err)
+			}
+			return ts, ts.serve()
+		}
+
+		chainSubstr := "fallback_chain must not reference the decision-lane group"
+
+		// --- POST arm ---
+		_, postSrv := seedStack()
+		defer postSrv.Close()
+		postBody := `{
+			"id": "chat-with-decision-chain",
+			"name": "Chat With Decision Chain",
+			"enabled": true,
+			"kind": "chat",
+			"fallback_chain": ["decision-group-1"]
+		}`
+		postStatus, postErr := postDecisionModel(t, postSrv.URL, postBody)
+		if postStatus != http.StatusBadRequest {
+			t.Errorf("POST: status = %d, want 400; err=%q", postStatus, postErr)
+		} else if !strings.Contains(postErr, chainSubstr) {
+			t.Errorf("POST: err %q does not contain %q", postErr, chainSubstr)
+		}
+
+		// --- PUT arm (seed the chat model first) ---
+		putTS, putSrv := seedStack()
+		defer putSrv.Close()
+		seedChat := models.ModelConfig{
+			ID: "chat-with-decision-chain", Name: "Chat With Decision Chain",
+			Enabled: true, Kind: models.KindChat,
+		}
+		if err := putTS.mockModels.AddModel(seedChat); err != nil {
+			t.Fatalf("seed chat model: %v", err)
+		}
+		putBody := `{
+			"id": "chat-with-decision-chain",
+			"name": "Chat With Decision Chain",
+			"enabled": true,
+			"kind": "chat",
+			"fallback_chain": ["decision-group-1"]
+		}`
+		putStatus, putErr := putDecisionModel(t, putSrv.URL, "chat-with-decision-chain", putBody)
+		if putStatus != http.StatusBadRequest {
+			t.Errorf("PUT: status = %d, want 400; err=%q", putStatus, putErr)
+		} else if !strings.Contains(putErr, chainSubstr) {
+			t.Errorf("PUT: err %q does not contain %q", putErr, chainSubstr)
+		}
+	})
 }
 
 // TestKindRules_Parity_KindImmutability — ADR-1's guard asserted at
