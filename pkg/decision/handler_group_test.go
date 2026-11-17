@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
@@ -826,11 +829,6 @@ func TestDecision_Group_401_RotatesWithinMember(t *testing.T) {
 				credID = "cred-dec-a-2"
 			}
 			wireModel := "gpt-6-luna"
-			if id == "dec-a" {
-				wireModel = "gpt-6-luna"
-			} else if id == "dec-b" {
-				wireModel = "gpt-6-luna"
-			}
 			return models.ResolvedCredential{
 				Provider:      "openai",
 				APIKey:        "sk-cred",
@@ -1039,10 +1037,8 @@ func TestDecision_Group_AttemptOrder_PolicyOrderMinusMarked(t *testing.T) {
 }
 
 // TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts — the
-// exhaustion event's attempted counts GENUINE attempts only; a
-// suppressed member is never counted as a failed attempt (B1), and
-// with B1 fixed the exhaustion envelope does not fire for a
-// suppressed-only member.
+// exhaustion event's attempted counts GENUINE attempts only; the
+// skipped ones are reported separately.
 func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
@@ -1301,8 +1297,8 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 		})
 		env.handler.SetUpstreamSkipCache(cache)
 		env.handler.SetCredentialEngine(engine)
-		// Mark both credentials in the UPSTREAM layer (not cooling)
-		// so the member is fully-unavailable via marks, not cooling.
+		// Mark both credentials in the UPSTREAM layer so the member is
+		// fully-unavailable via marks (not cooling).
 		cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "model-a", time.Minute)
 		cache.Mark(skipcache.ScopeCredential, "cred-dec-a-2", "model-a", time.Minute)
 
@@ -1344,4 +1340,251 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 			t.Fatalf("the loop must advance after the honest attempt fails, got %d hits", env.hitsFor("dec-b"))
 		}
 	})
+}
+
+// TestDecision_Group_LayerSeparation_CredentialMarkCannotChangePick —
+// a UPSTREAM-layer (credential) mark provably cannot alter the group
+// pick: the pick reads no failure state. The MODEL layer's CHAIN
+// reader is recorded ABSENT on this lane.
+func TestDecision_Group_LayerSeparation_CredentialMarkCannotChangePick(t *testing.T) {
+	cache := skipcache.New()
+	env := newGroupEnv(t, []groupMemberFixture{
+		{ID: "dec-a", Weight: 9, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 200, Body: decisionBody()},
+		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+	})
+	env.handler.SetUpstreamSkipCache(cache)
+	// Mark the heavy member: the pick (the policy head) must still be
+	// that member — the mark cannot change WHICH member is the head.
+	cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
+	env.send(t)
+	env.drainEvents()
+	head := ""
+	for _, ev := range env.events {
+		data := eventData(ev)
+		if data["outcome"] == "member_suppressed" {
+			if member, ok := data["member"].(string); ok {
+				head = member
+			}
+		}
+	}
+	if head != "dec-a" {
+		t.Fatalf("the policy head must be the heavy member (the mark cannot move it), got %q", head)
+	}
+}
+
+// TestDecision_Group_CacheLayerSeparation_SharedUpstreamInstanceOneAnswer
+// — the decision lane's UPSTREAM read is the SAME process-wide
+// instance the text lane writes (one answer about one credential).
+func TestDecision_Group_CacheLayerSeparation_SharedUpstreamInstanceOneAnswer(t *testing.T) {
+	cache := skipcache.New()
+	env := newGroupEnv(t, []groupMemberFixture{
+		{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+	})
+	env.handler.SetUpstreamSkipCache(cache)
+	// A mark written by the OTHER lane (the same process-wide
+	// instance) is visible to this lane — one answer.
+	cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
+	rec := env.send(t)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the OQ-1 lift gives the head its honest attempt); body=%s", rec.Code, rec.Body.String())
+	}
+	if env.hitsFor("dec-a") != 1 {
+		t.Fatalf("the honest attempt must happen exactly once, got %d hits", env.hitsFor("dec-a"))
+	}
+}
+
+// TestDecision_Group_ChatInferredWithDecisionMember_NeverSilentlyServes
+// — a group inferred as CHAT that contains a decision member never
+// silently serves: the lane gate refuses it (400 decision_misroute).
+func TestDecision_Group_ChatInferredWithDecisionMember_NeverSilentlyServes(t *testing.T) {
+	env := newGroupEnv(t, []groupMemberFixture{
+		{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+	})
+	// The lane seam says CHAT (the mixed shape) ⇒ the group branch is
+	// never entered (the fail-closed path).
+	env.modelsSeam.lanes[env.group.ID] = models.GroupLaneChat
+	rec := env.send(t)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (a chat-inferred group must never silently serve); body=%s", rec.Code, rec.Body.String())
+	}
+	_, _, code := decodeOpenAIError(t, rec.Body.Bytes())
+	if code != "decision_misroute" {
+		t.Fatalf("code = %q, want decision_misroute", code)
+	}
+	if env.totalHits() != 0 {
+		t.Fatalf("no upstream may be called for a chat-inferred group, got %d hits", env.totalHits())
+	}
+}
+
+// TestDecision_Group_MemberWithTwoCredentials_LimitClassRotatesBeforeAdvancing
+// — a LIMIT-CLASS failure on credential #1 rotates to credential #2
+// BEFORE the loop advances to the next member.
+func TestDecision_Group_MemberWithTwoCredentials_LimitClassRotatesBeforeAdvancing(t *testing.T) {
+	cache := skipcache.New()
+	engine := newStubCredEngine()
+	env := newGroupEnv(t, []groupMemberFixture{
+		{ID: "dec-a", Weight: 1, Enabled: true, InternalModel: "model-a", Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down")},
+		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, InternalModel: "model-b", Status: 200, Body: decisionBody()},
+	})
+	env.handler.SetUpstreamSkipCache(cache)
+	env.handler.SetCredentialEngine(engine)
+	// The member's second credential becomes the pick after the
+	// rotation (the engine's exclusion drives the re-resolve).
+	rotated := false
+	env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+		if id != "dec-a" && id != "dec-b" {
+			return models.ResolvedCredential{}, false
+		}
+		credID := "cred-" + id
+		if id == "dec-a" && rotated {
+			credID = "cred-dec-a-2"
+		}
+		wireModel := "gpt-6-luna"
+		if id == "dec-a" {
+			wireModel = "model-a"
+		} else if id == "dec-b" {
+			wireModel = "model-b"
+		}
+		return models.ResolvedCredential{
+			Provider:      "openai",
+			APIKey:        "sk-cred",
+			BaseURL:       env.upstreams[id].URL,
+			InternalModel: wireModel,
+			CredentialID:  credID,
+		}, true
+	})
+	// The exclusion flips the pick to the member's second credential.
+	engine.onExclude = func(modelID, credID string) {
+		if modelID == "dec-a" {
+			rotated = true
+		}
+	}
+
+	rec := env.send(t)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !rotated {
+		t.Fatal("the limit-class failure must rotate the member's credential")
+	}
+	if env.hitsFor("dec-a") != 2 {
+		t.Fatalf("the member must be attempted on both credentials before advancing, got %d hits", env.hitsFor("dec-a"))
+	}
+	// The member's own resilience was consumed FIRST: both of its
+	// credentials were attempted before the walk advanced (the next
+	// member is attempted only after the member's resilience is
+	// exhausted).
+	if env.hitsFor("dec-b") != 1 {
+		t.Fatalf("the walk advances only after the member's resilience is consumed, got %d hits on the next member", env.hitsFor("dec-b"))
+	}
+}
+
+// TestDecision_Group_MemberFailedPredicate_OwnResilienceExhausted — the
+// member-failed predicate is true only when the member's own
+// resilience (its credential attempts) is exhausted.
+func TestDecision_Group_MemberFailedPredicate_OwnResilienceExhausted(t *testing.T) {
+	cache := skipcache.New()
+	engine := newStubCredEngine()
+	env := newGroupEnv(t, []groupMemberFixture{
+		{ID: "dec-a", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+	})
+	env.handler.SetUpstreamSkipCache(cache)
+	env.handler.SetCredentialEngine(engine)
+	rec := env.send(t)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// A 5xx does NOT rotate (no exclusion) — the member's resilience
+	// is consumed by the single attempt and the walk advances.
+	if engine.excludedPair("dec-a", "cred-dec-a") {
+		t.Error("a 5xx must NOT rotate the member's credential")
+	}
+	if env.hitsFor("dec-b") != 1 {
+		t.Fatalf("the walk must advance once the member failed, got %d hits", env.hitsFor("dec-b"))
+	}
+}
+
+// TestDecision_DoctrineLine_PinnedVerbatimAtSeam — the extended
+// doctrine line is present VERBATIM in the suppression seam's source.
+func TestDecision_DoctrineLine_PinnedVerbatimAtSeam(t *testing.T) {
+	const doctrine = "The cache is an optimization, not the truth: it may reorder candidates, never exclude them — and it\n//\tmay suppress an ATTEMPT, never a PICK or a CHAIN."
+	src, err := os.ReadFile("suppression.go")
+	if err != nil {
+		t.Fatalf("read suppression.go: %v", err)
+	}
+	if !strings.Contains(string(src), doctrine) {
+		t.Fatalf("the doctrine line must be present VERBATIM in suppression.go — the seam that decides attempt-vs-skip")
+	}
+}
+
+// TestDecision_Group_ThroughCachedConfig — the PRODUCTION binding (a
+// *modelscache.CachedModelsConfig) enters the group branch: the
+// end-to-end decorator proof on the decision lane.
+func TestDecision_Group_ThroughCachedConfig(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "group-cached.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	dbStore, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { dbStore.Close() })
+	if err := dbStore.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := database.NewModelsManager(dbStore, nil)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	upstream, fake := newFakeUpstream(t, fakeScript{status: 200, body: decisionBody()})
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "sk", BaseURL: upstream.URL}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "dec-a", Name: "Decision A", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-6-luna",
+		Credentials: []models.CredentialRef{{CredentialID: "cred-1", Weight: 1, Position: 0}},
+	}); err != nil {
+		t.Fatalf("seed decision member: %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "decision-group", Name: "Decision Group", Enabled: true, Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dec-a", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("seed decision group: %v", err)
+	}
+
+	cached, err := modelscache.NewCachedModelsConfig(mgr, modelscache.Options{ReconcileInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewCachedModelsConfig: %v", err)
+	}
+	t.Cleanup(cached.Stop)
+
+	// The handler is wired EXACTLY as production wires it.
+	bus := events.NewBus()
+	ts := newMemTokenStore()
+	ts.add(&auth.AuthToken{ID: "tok-test", Name: "Test Token", TokenHash: auth.HashToken("sk-test-token")})
+	h := NewHandler(stubConfig{timeout: 5 * time.Second}, bus, ts, nil)
+	h.SetModelResolver(NewModelResolverFromConfig(func(modelID string) *models.ModelConfig {
+		return cached.GetModel(modelID)
+	}))
+	h.SetCredentialResolver(NewCredentialResolverFromConfig(func(modelID string) (models.ResolvedCredential, bool) {
+		return cached.ResolveInternalConfigWithAffinity(modelID, modelID)
+	}))
+	h.SetModelsConfig(cached)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/decisions", strings.NewReader(standardRequestBody("decision-group")))
+	req.Header.Set("Authorization", "Bearer sk-test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.HandleDecision(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if fake.hitCount.Load() != 1 {
+		t.Fatalf("the member must be attempted exactly once through the cached config, got %d hits", fake.hitCount.Load())
+	}
 }
