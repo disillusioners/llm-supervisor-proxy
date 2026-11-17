@@ -284,6 +284,52 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
     });
   });
 
+  // V1 — the FE half of ADR-15's T5 set-equality pin.
+  //
+  // "NO vocabulary change" must be PINNED, not asserted: the rendered
+  // provider surface is exactly the decision vocabulary
+  // {openai, typesafe, openrouter} (order-insensitive — the
+  // order-sensitive pin above stays green) and it is DISJOINT from the
+  // credential vocabulary. A credential provider leaking into the
+  // decision surface would be a vocabulary change.
+  describe('decision provider vocabulary — set equality (T5 FE half)', () => {
+    it('V1 — the rendered provider surface is exactly the decision vocabulary and disjoint from the credential vocabulary', () => {
+      const { container } = render(
+        <DecisionModelForm
+          mode="add"
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      const providerSelect = container.querySelector(
+        '[data-testid="decision-form-provider-select"]',
+      ) as HTMLSelectElement;
+      expect(providerSelect).not.toBeNull();
+      const opts = Array.from(providerSelect.querySelectorAll('option')).map((o) => o.value);
+      // Set equality (order-insensitive).
+      expect(new Set(opts)).toEqual(new Set(['openai', 'typesafe', 'openrouter']));
+      // Disjoint from the credential vocabulary.
+      const credentialVocabulary = [
+        'minimax',
+        '9router',
+        'azure',
+        'zhipu',
+        'zai',
+        'grok',
+        'deepseek',
+        'opencode',
+        'opencode-go',
+        'lightllm',
+        'anthropic',
+        'gemini',
+      ];
+      for (const provider of credentialVocabulary) {
+        expect(opts).not.toContain(provider);
+      }
+    });
+  });
+
   describe('client-side validation (mirroring ImgGen C-10..C-13)', () => {
     it('empty name blocks submit and surfaces "Display Name is required"', async () => {
       const onSave = vi.fn();

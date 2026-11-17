@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, GroupModel, GroupMember } from '../../types';
+import type { Model, GroupModel, GroupMember, GroupLane } from '../../types';
 import { GroupMemberEditor } from './GroupMemberEditor';
+import { inferGroupLane } from './groupLane';
 
 // Hard-coded group-only fields (load-balance-groups / plan §6.2, G1 +
 // G7). These are NEVER form state — they are constants stamped on the
@@ -15,6 +16,32 @@ import { GroupMemberEditor } from './GroupMemberEditor';
 //                                        (remove-external-upstream).
 const HARDCODED_KIND = 'group' as const;
 const HARDCODED_INTERNAL = true as const;
+
+// ── Lane-aware copy ────────────────────────────────────────────────────────
+// ONE component, TWO lanes (the ruling's contract 26 — never a fork).
+// The chat-lane strings are the historical text BYTE-FOR-BYTE
+// (ADR-9 / AC-R12: this release must not change text-lane behaviour);
+// the decision-lane strings drop the promises that are false on that
+// lane — there is NO fallback chain and NO racing engine there
+// (ADR-11 OQ-2 / OQ-3 option (a)), so a member's resilience is
+// per-credential attempts WITHIN the member.
+const SHADOW_TARGET_MISSING: Record<GroupLane, string> = {
+  chat: 'does not exist (must reference an existing chat-kind model)',
+  decision: 'does not exist (must reference an existing decision-kind model)',
+};
+
+const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
+  chat: 'Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.',
+  decision: 'Decision group — kind: group · internal: true · backup-only members are recourse-tier candidates (served only after every default member has failed). No fallback chain and no racing on this lane.',
+};
+
+// The lane-consistency block message — it NAMES THE OTHER SURFACE so the
+// operator is routed to the right tab (the FE's lane split is a cached,
+// client-side inference, so a group can be mis-filed for a while).
+const LANE_GUARD_MESSAGE: Record<GroupLane, string> = {
+  chat: 'This is a decision group — edit it under Decision Models → Group.',
+  decision: 'This is a chat group — edit it under Group Models.',
+};
 
 // Wire payload emitted by the form on submit (mirrors the BE Model DTO
 // group fields — pkg/ui/server.go Model struct). The hook layer stamps
@@ -46,11 +73,25 @@ interface GroupModelFormProps {
   // the canonical `coding[coding]` day-1 onboarding shape. Form
   // pre-fill convenience ONLY: the operator still presses Add.
   wrapTarget?: Model | null;
-  // Chat-kind models only (the parent filters the useModels() list).
-  // Feeds BOTH the member picker and the shadow-target picker — G3/G8
-  // only ever accept chat-kind targets, so a single filtered list is
-  // the correct source for both.
-  chatModels: Model[];
+  // Which lane this group belongs to. REQUIRED (not defaulted): a
+  // defaulted lane would let a call site silently fall back to 'chat'
+  // and render a chat-only picker for a decision group — a visible but
+  // confusing failure. A missed call site is a compile error.
+  lane: GroupLane;
+  // The models OF THIS LANE (the parent picks the feed: chat-kind rows
+  // for the chat lane, the server-prefiltered ?kind=decision list for
+  // the decision lane). Feeds BOTH the member picker and the
+  // shadow-target picker — G3/G8 only ever accept a target of the
+  // group's own lane, so a single filtered list is the correct source
+  // for both.
+  laneModels: Model[];
+  // model_id → kind index over the CURRENT model rows — the SAME
+  // index the parent builds for the client-side lane split. The
+  // lane-consistency guard uses it to infer the STORED group's lane
+  // with the same helper the split uses (so the guard and the split
+  // can never disagree). Optional: absent, the guard falls back to the
+  // conservative member-membership rule.
+  kindIndex?: Map<string, string>;
   // The current group list — needed for the client-side G8 dual-claim
   // scan (no OTHER enabled group may claim the same shadow_model_id).
   groups: GroupModel[];
@@ -117,7 +158,9 @@ export function GroupModelForm({
   mode,
   initialData,
   wrapTarget,
-  chatModels,
+  lane,
+  laneModels,
+  kindIndex,
   groups,
   onSave,
   onCancel,
@@ -134,6 +177,7 @@ export function GroupModelForm({
     id?: string;
     members?: string;
     shadow_model_id?: string;
+    lane?: string;
   }>({});
 
   // Re-hydrate when initialData / wrapTarget change (tab switches
@@ -186,9 +230,72 @@ export function GroupModelForm({
         }
       }
     }
-    // G8 client-side mirror (target half): exists, chat-kind (the
-    // picker only offers chat rows, but a stale edit value can
-    // reference a deleted/never-chat model), not the group's own ID,
+    // NEW — the lane-consistency guard (edit mode only).
+    //
+    // The FE's lane split is a CACHED, client-side inference, so a
+    // group can be mis-filed into the wrong tab. Editing it there
+    // would rewrite its members to the other lane's models — a LEGAL
+    // write under the widened rules, so the server cannot detect it.
+    // The guard closes that hole at the FE, cheaply, without a BE
+    // change. It is defence-in-depth: the server's own lane checks
+    // still decide every write.
+    //
+    // The stored group's lane is computed with the SAME helper the
+    // parent uses for the split (inferGroupLane), so the guard and the
+    // split can never disagree.
+    //   - kindIndex supplied → block ONLY when the stored lane is
+    //     KNOWN and differs from this form's lane. An UNKNOWN lane
+    //     (mixed or unresolvable members) is NOT blocked: it is the
+    //     row the operator most needs to REPAIR, and blocking it
+    //     would leave delete + recreate as the only path.
+    //   - kindIndex absent → the conservative fallback: a stored
+    //     member that is not one of this lane's models means the
+    //     stored group belongs to the other lane.
+    if (mode === 'edit' && initialData) {
+      const storedMembers = initialData.members ?? [];
+      let blocked = false;
+      if (kindIndex) {
+        const storedLane = inferGroupLane(initialData, kindIndex);
+        blocked = storedLane !== null && storedLane !== lane;
+      } else {
+        blocked = storedMembers.some(
+          (m) => m.model_id !== '' && !laneModels.some((lm) => lm.id === m.model_id),
+        );
+      }
+      if (blocked) {
+        nextErrors.lane = LANE_GUARD_MESSAGE[lane];
+      }
+    }
+
+    // NEW — the homogeneity mirror (the DECISION lane only).
+    //
+    // The picker makes a mixed member list unconstructible, but a
+    // PRE-EXISTING mixed list (a stale row left over from an edit of
+    // a group on the other lane, or a retyped member) would still be
+    // savable through this form. The server's write-time homogeneity
+    // rule rejects it — this mirror surfaces the reason before the
+    // round trip.
+    //
+    // LANE-GATED (ADR-9 / AC-R12): the text lane's behaviour is
+    // byte-untouched by this release, so the mirror only fires on the
+    // decision lane.
+    if (!nextErrors.lane && lane === 'decision' && nextErrors.members === undefined) {
+      // A member of the decision lane must be a DECISION-KIND model of
+      // this lane's feed — the same rule the picker filters on (minus
+      // the enabled clause: an inactive decision model is still
+      // decision-KIND, so this mirror is about the member's KIND, not
+      // its servability).
+      const foreign = fields.members.find(
+        (m) => m.model_id !== '' && !laneModels.some((lm) => lm.id === m.model_id && lm.kind === 'decision'),
+      );
+      if (foreign) {
+        nextErrors.members = `Member ${foreign.model_id} is not a decision-kind model`;
+      }
+    }
+
+    // G8 client-side mirror (target half): exists, of this lane's kind
+    // (the picker only offers lane rows, but a stale edit value can
+    // reference a deleted/never-lane model), not the group's own ID,
     // and not dual-claimed by another ENABLED group. Self-shadow —
     // claiming one of the group's OWN members — is LEGAL and the
     // canonical day-1 onboarding (Am22; not an error).
@@ -196,8 +303,8 @@ export function GroupModelForm({
     if (shadow !== '') {
       if (shadow === fields.id) {
         nextErrors.shadow_model_id = 'Shadow target cannot be the group\'s own ID';
-      } else if (!chatModels.some((m) => m.id === shadow)) {
-        nextErrors.shadow_model_id = `Shadow target ${shadow} does not exist (must reference an existing chat-kind model)`;
+      } else if (!laneModels.some((m) => m.id === shadow)) {
+        nextErrors.shadow_model_id = `Shadow target ${shadow} ${SHADOW_TARGET_MISSING[lane]}`;
       } else {
         const claimant = groups.find(
           (g) => g.id !== fields.id && g.enabled && (g.shadow_model_id ?? '') === shadow,
@@ -259,9 +366,11 @@ export function GroupModelForm({
         {mode === 'add' ? 'Add Group Model' : 'Edit Group Model'}
       </h3>
       {/* Read-only surfaced constants — the payload always stamps
-          these; the operator cannot change them. */}
+          these; the operator cannot change them. LANE-AWARE: the chat
+          lane's backup-only members are last-resort fallbacks IN THE
+          RACE CHAIN, which does not exist on the decision lane. */}
       <p class="text-xs text-gray-400 mb-4" data-testid="group-form-fixed-constants">
-        Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.
+        {FIXED_CONSTANTS_COPY[lane]}
       </p>
       <div class="space-y-4">
         {/* Group ID — disabled in edit mode (id is immutable, primary key). */}
@@ -331,20 +440,30 @@ export function GroupModelForm({
           )}
         </div>
 
-        {/* Members — GroupMemberEditor (chat-kind model picker + weight). */}
+        {/* Members — GroupMemberEditor (lane model picker + weight). */}
         <div
           data-testid="group-form-members-section"
-          aria-invalid={errors.members ? 'true' : 'false'}
-          aria-describedby={errors.members ? 'group-form-members-error' : undefined}
+          aria-invalid={errors.members || errors.lane ? 'true' : 'false'}
+          aria-describedby={errors.members ? 'group-form-members-error' : errors.lane ? 'group-form-lane-error' : undefined}
         >
           <label class="block text-sm font-medium text-gray-300 mb-1">
             Members <span class="text-red-400">*</span>
           </label>
           <GroupMemberEditor
             members={fields.members}
-            chatModels={chatModels}
+            lane={lane}
+            laneModels={laneModels}
             onChange={(next) => setFields((f) => ({ ...f, members: next }))}
           />
+          {errors.lane && (
+            <p
+              id="group-form-lane-error"
+              class="text-xs text-red-400 mt-1"
+              data-testid="group-form-lane-error"
+            >
+              {errors.lane}
+            </p>
+          )}
           {errors.members && (
             <p
               id="group-form-members-error"
@@ -357,7 +476,7 @@ export function GroupModelForm({
         </div>
 
         {/* Shadow-target picker (arch R1 Am9 / Q10 / Q19) — clearable
-            dropdown over chat-kind models. The empty option IS the
+            dropdown over this lane's models. The empty option IS the
             clear affordance: selecting "None — no shadowing" sends
             shadow_model_id: "" which drops the claim server-side, so
             the shadowed model reappears in /v1/models. */}
@@ -378,7 +497,7 @@ export function GroupModelForm({
             data-testid="group-form-shadow-select"
           >
             <option value="">None — no shadowing</option>
-            {chatModels.map((m) => (
+            {laneModels.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name} ({m.id})
               </option>

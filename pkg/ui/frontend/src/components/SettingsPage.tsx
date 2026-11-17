@@ -4,8 +4,9 @@ import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionCon
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { ImgGenModelsTab } from './config/ImgGenModelsTab';
-import { DecisionModelsTab } from './config/DecisionModelsTab';
+import { DecisionModelsContainer } from './config/DecisionModelsContainer';
 import { GroupModelsTab } from './config/GroupModelsTab';
+import { buildKindIndex, splitGroupsByLane } from './config/groupLane';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
@@ -293,6 +294,33 @@ export function SettingsPage({
   const chatKindModels = models.filter(
     (m) => m.kind !== 'image-gen' && m.kind !== 'decision' && m.kind !== 'group',
   );
+
+  // ── The group lane split (decision-groups, phase 2) ──────────────────
+  //
+  // The server exposes NO lane filter and NO lane field on the group
+  // DTO, so the FE classifies each group CLIENT-SIDE, by the same rule
+  // the server uses at request time: the lane is inferred by unanimity
+  // over the group's CURRENT member rows. The lane is never persisted
+  // and never travels on the wire.
+  //
+  // The index is built from the NARROW server-prefiltered lists (each
+  // hook fetches only its own slice, so the unfiltered `models` array
+  // can be stale for a model that was just created on another lane) —
+  // the narrow list wins over the unfiltered one.
+  //
+  // DISPLAY-ONLY: the split decides which tab LIST a group appears in.
+  // The server stays authoritative on every write.
+  const kindIndex = buildKindIndex({
+    models,
+    decisionModels,
+    groupModels,
+    imgGenModels,
+  });
+  const groupLaneSplit = splitGroupsByLane(groupModels, kindIndex);
+  // The text tab keeps chat + unknown — NO row is ever invisible in
+  // both tabs: a group the FE cannot classify stays in the text tab,
+  // where the operator can repair it.
+  const chatLaneGroups = [...groupLaneSplit.chat, ...groupLaneSplit.unknown];
 
   // Loop Detection handler
   const handleApplyLoopDetection = async (loopConfig: LoopDetectionConfig) => {
@@ -603,9 +631,17 @@ export function SettingsPage({
               kind: 'decision' + provider (openai|typesafe) so a chat
               or image-gen row can never round-trip into this surface.
               fetchError + onRetry plumb the hook's error state for the
-              alert-role banner (plan §6.7 / A11Y-3). */}
+              alert-role banner (plan §6.7 / A11Y-3).
+
+              decision-groups (phase 2): the decision list now lives
+              INSIDE a container that owns a vertical LEFT nav with two
+              child tabs — the models list (this panel, wrapped — the
+              DecisionModelsTab component itself is byte-unchanged) and
+              the DECISION-lane group surface. The container is a
+              pass-through: every models prop below reaches
+              DecisionModelsTab verbatim. */}
           {activeTab === 'decision_models' && (
-            <DecisionModelsTab
+            <DecisionModelsContainer
               models={decisionModels}
               onAddModel={onAddDecisionModel}
               onUpdateModel={onUpdateDecisionModel}
@@ -615,6 +651,15 @@ export function SettingsPage({
               onNavigateToCredentials={() => setActiveTab('credentials')}
               fetchError={decisionError}
               onRetry={onRetryDecisionModels}
+              groups={groupLaneSplit.decision}
+              laneModels={decisionModels}
+              kindIndex={kindIndex}
+              onAddGroupModel={onAddGroupModel}
+              onUpdateGroupModel={onUpdateGroupModel}
+              onDeleteGroupModel={onDeleteGroupModel}
+              onToggleGroupModel={handleToggleGroupModel}
+              groupFetchError={groupError}
+              groupOnRetry={onRetryGroupModels}
             />
           )}
 
@@ -623,15 +668,20 @@ export function SettingsPage({
               groupModels pre-filtered server-side via
               /fe/api/models?kind=group. The form inside stamps
               kind: 'group' + internal: true (G1) so a chat
-              row can never round-trip into this surface. chatModels
-              feeds the member + shadow pickers (chat-kind only);
+              row can never round-trip into this surface. laneModels
+              feeds the member + shadow pickers (the chat lane's
+              chat-kind rows); the list is the TEXT lane's slice of the
+              client-side lane split (chat + unknown — a group the FE
+              cannot classify stays here, where it can be repaired);
               wrapPreloadModel carries the one-click-wrap pre-fill
-              (Am30). fetchError + onRetry plumb the hook's error
-              state for the alert-role banner (A11Y-3). */}
+              (Am30, text lane only). fetchError + onRetry plumb the
+              hook's error state for the alert-role banner (A11Y-3). */}
           {activeTab === 'group_models' && (
             <GroupModelsTab
-              models={groupModels}
-              chatModels={chatKindModels}
+              lane="chat"
+              models={chatLaneGroups}
+              laneModels={chatKindModels}
+              kindIndex={kindIndex}
               onAddModel={onAddGroupModel}
               onUpdateModel={onUpdateGroupModel}
               onDeleteModel={onDeleteGroupModel}

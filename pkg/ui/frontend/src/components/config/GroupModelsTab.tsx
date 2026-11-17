@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, GroupModel } from '../../types';
+import type { Model, GroupModel, GroupLane } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { GroupModelForm, type GroupModelPayload } from './GroupModelForm';
 
@@ -7,11 +7,22 @@ interface GroupModelsTabProps {
   // Server-side pre-filtered to kind: 'group' by the parent hook
   // (useGroupModels hits /fe/api/models?kind=group). The tab itself
   // never re-filters client-side — the BE is the source of truth.
+  // The parent hands the LANE-SCOPED list (the client-side lane split
+  // lives in the parent; this tab trusts what it is given).
   models: Model[];
-  // Chat-kind models (the parent filters the useModels() list): the
-  // member picker + shadow picker source inside the form, and the
-  // picker-population for the one-click wrap flow.
-  chatModels: Model[];
+  // Which lane this tab renders. REQUIRED (not defaulted): a defaulted
+  // lane would let a call site silently fall back to 'chat'. A missed
+  // call site is a compile error.
+  lane: GroupLane;
+  // The models OF THIS LANE (the parent picks the feed): the member
+  // picker + shadow picker source inside the form, and the
+  // picker-population for the one-click wrap flow (chat lane only).
+  laneModels: Model[];
+  // model_id → kind index over the CURRENT model rows — the SAME index
+  // the parent builds for the lane split. Forwarded to the form so the
+  // lane-consistency guard infers the stored group's lane with the
+  // same helper the split uses.
+  kindIndex?: Map<string, string>;
   onAddModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
@@ -24,24 +35,71 @@ interface GroupModelsTabProps {
   onRetry?: () => void;
   // One-click wrap pre-fill (Am30): when non-null, the tab opens the
   // add-form pre-filled for this chat model, then consumes the signal
-  // so the pre-fill fires exactly once.
+  // so the pre-fill fires exactly once. TEXT LANE ONLY — the decision
+  // lane never offers the wrap (the wrap is a chat-model affordance).
   wrapPreloadModel?: Model | null;
   onWrapConsumed?: () => void;
 }
 
 // Toast/success message copy — load-balance-groups / plan §6.5.
 // Per-tab copy mirror of DecisionModelsTab with the strings swapped
-// to "Group" instead of "Decision".
-const TOAST = {
-  added: 'Group model added successfully',
-  updated: 'Group model updated successfully',
-  deleted: 'Group model deleted successfully',
-  toggled: 'Group model toggled successfully',
-} as const;
+// to "Group" instead of "Decision". The chat lane's strings are the
+// historical text BYTE-FOR-BYTE (ADR-9 / AC-R12); the decision lane
+// says "Decision group".
+const TOAST: Record<GroupLane, Record<'added' | 'updated' | 'deleted' | 'toggled', string>> = {
+  chat: {
+    added: 'Group model added successfully',
+    updated: 'Group model updated successfully',
+    deleted: 'Group model deleted successfully',
+    toggled: 'Group model toggled successfully',
+  },
+  decision: {
+    added: 'Decision group added successfully',
+    updated: 'Decision group updated successfully',
+    deleted: 'Decision group deleted successfully',
+    toggled: 'Decision group toggled successfully',
+  },
+};
+
+// Lane-aware chrome copy (heading / CTA / empty state / row badge).
+// The decision lane's badge is 🎯 (the app's established decision
+// glyph), NOT 🔀: the shuffle glyph would promise a racing /
+// load-balancing engine this lane does not have (ADR-8 / ADR-11 OQ-3
+// option (a) — the decision lane has no hedge/race engine).
+const HEADING: Record<GroupLane, string> = {
+  chat: 'Group Models',
+  decision: 'Decision Groups',
+};
+
+const CTA: Record<GroupLane, string> = {
+  chat: 'Add Group Model',
+  decision: 'Add Decision Group',
+};
+
+const EMPTY_TITLE: Record<GroupLane, string> = {
+  chat: 'No group models configured',
+  decision: 'No decision groups configured',
+};
+
+const EMPTY_BODY: Record<GroupLane, string> = {
+  chat: 'Add a group to load-balance chat traffic across multiple member models behind one ID.',
+  // Q6 (no per-conversation pinning) + ADR-11 OQ-2 / OQ-3 (no chain, no
+  // racing on this lane): the decision lane's resilience is per-credential
+  // attempts WITHIN a member.
+  decision:
+    'Members are picked by weight per request — there is no per-conversation pinning on the decision lane; resilience is per-credential attempts within a member; a fallback chain has no equivalent concept on this lane (deliberately not built).',
+};
+
+const BADGE_GLYPH: Record<GroupLane, string> = {
+  chat: '🔀',
+  decision: '🎯',
+};
 
 export function GroupModelsTab({
   models,
-  chatModels,
+  lane,
+  laneModels,
+  kindIndex,
   onAddModel,
   onUpdateModel,
   onDeleteModel,
@@ -66,9 +124,11 @@ export function GroupModelsTab({
 
   // One-click wrap (Am30): open the add-form pre-filled for the wrap
   // target, then consume the signal. Form pre-fill convenience ONLY —
-  // no group is created until the operator presses Add.
+  // no group is created until the operator presses Add. TEXT LANE ONLY
+  // (the wrap is a chat-model affordance): the decision lane never
+  // offers it.
   useEffect(() => {
-    if (wrapPreloadModel) {
+    if (lane === 'chat' && wrapPreloadModel) {
       setModelToEdit(undefined);
       setFormMode('add');
       setWrapMember(wrapPreloadModel);
@@ -76,7 +136,7 @@ export function GroupModelsTab({
       setStatus(null);
       onWrapConsumed?.();
     }
-  }, [wrapPreloadModel, onWrapConsumed, setStatus]);
+  }, [lane, wrapPreloadModel, onWrapConsumed, setStatus]);
 
   const handleOpenAdd = () => {
     setModelToEdit(undefined);
@@ -104,7 +164,7 @@ export function GroupModelsTab({
         // carry none); the parent's addModel just forwards the body to
         // POST /fe/api/models.
         await onAddModel(payload);
-        setStatus({ type: 'success', message: TOAST.added });
+        setStatus({ type: 'success', message: TOAST[lane].added });
       } else {
         const { id, name, kind, internal, members, shadow_model_id, enabled, fallback_chain, credentials } = payload;
         // kind/internal are stamped here too (not just inherited from
@@ -122,7 +182,7 @@ export function GroupModelsTab({
           fallback_chain,
           credentials,
         });
-        setStatus({ type: 'success', message: TOAST.updated });
+        setStatus({ type: 'success', message: TOAST[lane].updated });
       }
       setShowForm(false);
       setModelToEdit(undefined);
@@ -139,7 +199,7 @@ export function GroupModelsTab({
       // A 409 (model is a member of another group, Am27) surfaces here
       // as the house error body's message via apiFetch.
       await onDeleteModel(modelToDelete.id);
-      setStatus({ type: 'success', message: TOAST.deleted });
+      setStatus({ type: 'success', message: TOAST[lane].deleted });
       setModelToDelete(null);
     } catch (e) {
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to delete group model' });
@@ -153,7 +213,7 @@ export function GroupModelsTab({
       {!showForm ? (
         <>
           <div class="flex justify-between items-center mb-2">
-            <h3 class="text-white font-medium">Group Models</h3>
+            <h3 class="text-white font-medium">{HEADING[lane]}</h3>
             <button
               type="button"
               onClick={handleOpenAdd}
@@ -162,7 +222,7 @@ export function GroupModelsTab({
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
               </svg>
-              Add Group Model
+              {CTA[lane]}
             </button>
           </div>
 
@@ -188,8 +248,9 @@ export function GroupModelsTab({
             </div>
           )}
 
-          {/* Groups list — mirrors the sibling tabs' chrome with the 🔀
-              prefix glyph, member chips, and the shadow-claim line. */}
+          {/* Groups list — mirrors the sibling tabs' chrome with the
+              lane's prefix glyph (member chips + the shadow-claim
+              line). */}
           <div class="space-y-2" data-testid="group-models-list">
             {models.length === 0 ? (
               <div
@@ -199,8 +260,8 @@ export function GroupModelsTab({
                 <svg class="w-10 h-10 text-gray-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                 </svg>
-                <p class="text-gray-400 text-sm">No group models configured</p>
-                <p class="text-gray-500 text-xs mt-1">Add a group to load-balance chat traffic across multiple member models behind one ID.</p>
+                <p class="text-gray-400 text-sm">{EMPTY_TITLE[lane]}</p>
+                <p class="text-gray-500 text-xs mt-1">{EMPTY_BODY[lane]}</p>
               </div>
             ) : (
               models.map((model) => {
@@ -232,7 +293,7 @@ export function GroupModelsTab({
                             class="inline-flex items-center gap-1 text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded"
                             title="Virtual load-balancing group"
                           >
-                            <span aria-hidden="true">🔀</span>
+                            <span aria-hidden="true">{BADGE_GLYPH[lane]}</span>
                             group
                           </span>
                         </p>
@@ -300,7 +361,9 @@ export function GroupModelsTab({
           mode={formMode}
           initialData={modelToEdit}
           wrapTarget={formMode === 'add' ? wrapMember : null}
-          chatModels={chatModels}
+          lane={lane}
+          laneModels={laneModels}
+          kindIndex={kindIndex}
           groups={models as GroupModel[]}
           onSave={handleSave}
           onCancel={() => {
