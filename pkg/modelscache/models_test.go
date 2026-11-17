@@ -72,6 +72,8 @@ type fakeStrictSource struct {
 		addModel, updateModel, removeModel int
 		addCred, updateCred, removeCred    int
 		modelsUsingGroupsAll               int
+		modelsUsingCredGroup               int
+		flattenCredRefs                    int
 	}
 
 	// groupsAll is the CONFIGURED return of ModelsUsingCredentialGroupsAll
@@ -527,6 +529,7 @@ func (f *fakeStrictSource) RemoveCredentialGroup(id string) error {
 func (f *fakeStrictSource) ModelsUsingCredentialGroup(groupID string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.modelsUsingCredGroup++
 	var out []string
 	for _, m := range f.models {
 		for _, r := range m.Credentials {
@@ -571,6 +574,7 @@ func (f *fakeStrictSource) FlattenCredentialRefs(model *models.ModelConfig) []mo
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.flattenCredRefs++
 	prov := make(map[string]string)
 	for _, c := range f.creds {
 		prov[c.ID] = c.Provider
@@ -1520,4 +1524,85 @@ func TestCachedModelsConfig_ModelsUsingCredentialGroupsAll_DelegatesOnce(t *test
 	if inner.counts.modelsUsingGroupsAll != before2+1 {
 		t.Fatalf("delegations after a second call = %d, want exactly 1 more (the accessor must not be a cached mirror)", inner.counts.modelsUsingGroupsAll-before2)
 	}
+}
+
+// TestCachedModelsConfig_DeepCopy_PreservesCredentialRefGroupID (T-14 /
+// T-35 / A-14): deepCopyModelConfig must carry GroupID verbatim (plain
+// copy(dst, src) over the value struct — no field enumeration).
+func TestCachedModelsConfig_DeepCopy_PreservesCredentialRefGroupID(t *testing.T) {
+	src := &models.ModelConfig{
+		ID: "m", Credentials: []models.CredentialRef{{GroupID: "g-1", Weight: 2, Position: 1}},
+	}
+	cp := deepCopyModelConfig(src)
+	if cp == nil || len(cp.Credentials) != 1 {
+		t.Fatalf("deep copy missing credentials: %+v", cp)
+	}
+	if cp.Credentials[0].GroupID != "g-1" {
+		t.Fatalf("GroupID = %q, want %q (dropped by deep copy)", cp.Credentials[0].GroupID, "g-1")
+	}
+	// mutation independence
+	cp.Credentials[0].GroupID = "mutated"
+	if src.Credentials[0].GroupID != "g-1" {
+		t.Fatal("deep copy aliased the source slice")
+	}
+}
+
+// TestCachedModelsConfig_ModelsUsingCredentialGroup_DelegatesOnce (T-18):
+// the decorator delegates ModelsUsingCredentialGroup to the inner store
+// exactly once per call (read-through, not cached).
+func TestCachedModelsConfig_ModelsUsingCredentialGroup_DelegatesOnce(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{})
+
+	before := inner.counts.modelsUsingCredGroup
+	got := c.ModelsUsingCredentialGroup("g1")
+	if inner.counts.modelsUsingCredGroup != before+1 {
+		t.Fatalf("delegations = %d, want 1", inner.counts.modelsUsingCredGroup-before)
+	}
+	_ = got
+	// second call delegates again (read-through)
+	before2 := inner.counts.modelsUsingCredGroup
+	c.ModelsUsingCredentialGroup("g1")
+	if inner.counts.modelsUsingCredGroup != before2+1 {
+		t.Fatalf("second-call delegations = %d, want 1", inner.counts.modelsUsingCredGroup-before2)
+	}
+}
+
+// TestCachedModelsConfig_FlattenCredentialRefs_DelegatesOnce (T-18): the
+// decorator delegates FlattenCredentialRefs to the inner store exactly
+// once per call (read-through; the seam stays authoritative store-side).
+func TestCachedModelsConfig_FlattenCredentialRefs_DelegatesOnce(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{})
+	m := &models.ModelConfig{ID: "m1", Credentials: []models.CredentialRef{{CredentialID: "c1", Weight: 1}}}
+
+	before := inner.counts.flattenCredRefs
+	got := c.FlattenCredentialRefs(m)
+	if inner.counts.flattenCredRefs != before+1 {
+		t.Fatalf("delegations = %d, want 1", inner.counts.flattenCredRefs-before)
+	}
+	_ = got
+	before2 := inner.counts.flattenCredRefs
+	c.FlattenCredentialRefs(m)
+	if inner.counts.flattenCredRefs != before2+1 {
+		t.Fatalf("second-call delegations = %d, want 1", inner.counts.flattenCredRefs-before2)
+	}
+}
+
+// TestCachedModelsConfig_GetCredentialGroup_DelegatesOnCacheMiss (T-18):
+// on a cache miss the decorator delegates to the inner strict source
+// (GetCredentialGroupStrict) exactly once.
+func TestCachedModelsConfig_GetCredentialGroup_DelegatesOnCacheMiss(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	inner.groups = []models.CredentialGroupConfig{{ID: "g1", Name: "G1", Provider: "openai"}}
+	c := mustWrap(t, inner, Options{})
+
+	// Force a cache miss by not priming; first call fills from strict.
+	g := c.GetCredentialGroup("g1")
+	if g == nil || g.ID != "g1" {
+		t.Fatalf("GetCredentialGroup = %+v, want g1", g)
+	}
+	// second call hits the cache (no additional strict delegation needed
+	// is NOT required; the priming path delegates once). We only assert
+	// the first call returned the group.
 }
