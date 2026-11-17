@@ -13,7 +13,7 @@ function makeModel(overrides: Partial<Model> = {}): Model {
   };
 }
 
-const chatModels: Model[] = [
+const laneModels: Model[] = [
   makeModel({ id: 'coding', name: 'Coding' }),
   makeModel({ id: 'helper', name: 'Helper' }),
 ];
@@ -29,7 +29,8 @@ const groups: GroupModel[] = [
 function makeProps(overrides: Record<string, unknown> = {}) {
   return {
     mode: 'add' as const,
-    chatModels,
+    lane: 'chat' as const,
+    laneModels,
     groups,
     onSave: vi.fn().mockResolvedValue(undefined),
     onCancel: vi.fn(),

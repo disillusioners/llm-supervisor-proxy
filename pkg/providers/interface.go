@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credclass"
 )
 
 // Provider defines the interface for AI providers
@@ -222,6 +224,12 @@ func (e *ProviderError) IsRetryable() bool {
 //
 // Returns false for nil errors and for non-*ProviderError errors.
 // Safe to call from any goroutine.
+//
+// DELEGATION (credclass extraction): the vocabulary and the field-level
+// rules live in the leaf package pkg/credclass (stdlib-only) so a lane
+// that cannot import this package classifies with the SAME vocabulary.
+// This wrapper keeps the exported signature and the errors.As unwrap,
+// extracts the four facts, and delegates. Zero behaviour change.
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
@@ -235,29 +243,22 @@ func IsRateLimitError(err error) bool {
 	if !errors.As(err, &pe) || pe == nil {
 		return false
 	}
-	if pe.StatusCode == 429 {
-		return true
-	}
-	if strings.Contains(strings.ToLower(pe.ErrorType), "rate_limit") {
-		return true
-	}
-	switch pe.ErrorCode {
-	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
-		return true
-	}
-	return false
+	return credclass.IsRateLimit(pe.StatusCode, pe.ErrorType, pe.ErrorCode, pe.Message)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE CANONICAL QUOTA-CLASS VOCABULARY (wi-4b8d21e7, review S-1 / S-4).
 //
-// ONE canonical vocabulary, three consumers:
+// WHERE THE VOCABULARY LIVES (merge note — wi-4b8d21e7):
 //
-//   - the CHAT lane's IsQuotaError (the *ProviderError classifier);
-//   - the ANTHROPIC lane's decode-first classifier (it calls
-//     ClassifyQuotaBody — no local list);
-//   - the MINT-SCOPE layer's subset invariant (pkg/modelcache's scope
-//     vocabulary must cover every token here).
+//	The TABLES moved to the leaf package pkg/credclass (the upstream
+//	credclass extraction) — ONE vocabulary, two lanes, no drift: the
+//	chat lane reaches them through IsQuotaError, the decision lane
+//	consumes them directly. This file keeps the CANONICAL FACADE
+//	(the kind-aware classifier below) over those SAME tables, so the
+//	chat lane, the Anthropic lane and the mint-scope layer all reach
+//	ONE decision. The narrowed token set and its provenance live with
+//	the tables in pkg/credclass.
 //
 // WHY THE CLASS LIST IS TIGHT (the asymmetry that matters):
 //
@@ -267,43 +268,24 @@ func IsRateLimitError(err error) bool {
 //	15m instead of 60s — the "cooldown trap" this commission exists to
 //	close (a walled account that returns to the pool after a minute).
 //
-// Every token below is EVIDENCE-BACKED: a body in the corpus (a live
-// upstream body or a test pin of one) carries it. Tokens without an
-// observed instance were DROPPED (the shipped v197 list carried a few;
-// the Anthropic lane's local list carried three more, one of them
-// INVENTED — "insufficient_parameters" is a CLIENT error, not a quota).
+// Every token in the class list is EVIDENCE-BACKED: a body in the
+// corpus (a live upstream body or a test pin of one) carries it.
+// Tokens without an observed instance were DROPPED (the shipped v197
+// list carried a few; the Anthropic lane's local list carried three
+// more, one of them INVENTED — "insufficient_parameters" is a CLIENT
+// error, not a quota).
 //
-// PROVENANCE per token (the observed instance):
-//
-//	"insufficient_credit"  — providers/interface_quota_test.go (type)
-//	"insufficient_quota"   — providers/interface_quota_test.go (type/code);
-//	                         pkg/proxy/sticky_scenario_test.go (live-shaped body)
-//	"quota"                — providers/interface_quota_test.go (the
-//	                         "quota_exceeded" type is matched by this token);
-//	                         the 9router live body
-//	"payment_required"     — the review's drift probe (code=payment_required
-//	                         classified QUOTA in the race lane, NOT in the
-//	                         Anthropic lane — the drift this list ends);
-//	                         BOTH spellings are kept on purpose
-//	"resource_exhausted"   — pkg/imggen/ninerouter.go:290 (the 9router
-//	                         nested body: "status":"RESOURCE_EXHAUSTED")
-//	"insufficient credit"  — providers/interface_quota_test.go (message)
-//	"quota exceeded"       — providers/interface_quota_test.go (message)
-//	"quota exhausted"      — pkg/proxy/race_reason_test.go (message)
-//	"token plan usage limit" — the z.ai live bodies (codes 2056 / 2067)
-//	"token plan"           — the z.ai live bodies (codes 2056 / 2067)
-//	"payment required"     — providers/interface_quota_test.go (message)
-//	"your quota will reset" — the 9router live body
-//	"your limit will reset" — the z.ai 5-hour plan-window body
-//	"exhausted your capacity" — the 9router live body
+// PROVENANCE per token (the observed instance) and the RUNTIME-
+// CONSEQUENCE ladder live with the tables in pkg/credclass.
 //
 // DROPPED (no observed instance — the class list is the narrow, safe
-// side; the SCOPE vocabulary in pkg/modelcache keeps the account-subject
-// knowledge so the mint scope stays correct):
+// side; the SCOPE vocabulary in pkg/modelcache keeps the
+// account-subject knowledge so the mint scope stays correct):
 //
 //	"insufficient_quota" / "insufficient_balance" (message spellings),
 //	"insufficient_credits", "exceeded your quota", "credit exhausted",
-//	"credits exhausted", "out of credit", "billing",
+//	"credits exhausted", "out of credit",
+//	"billing" (message spelling; the TYPE/CODE token above stays),
 //	"credit_exhausted", "insufficient_balance" (type spelling),
 //	"insufficient_parameters" (INVENTED — a client-side parameter
 //	complaint, never a quota), "credit_balance_too_low" and
@@ -328,49 +310,7 @@ func IsRateLimitError(err error) bool {
 // (interface_quota_test.go): any future widen or narrow of the class
 // vocabulary must update that pin in the same change, so the policy
 // move is always deliberate.
-//
-// Observed live vocabulary (job 8d852270): HTTP 402 / code 2067 /
-// "Token Plan usage limit" — the code arrives as a NUMBER on the wire
-// (unparseable into the string-typed ErrorCode field), but the message
-// text survives into ProviderError.Message in BOTH wire shapes:
-// OpenAI-shaped bodies decode Message directly; non-OpenAI-shaped bodies
-// fall back to msg = raw body (openai.go:handleError), which still
-// contains the message text. The message vocabulary is therefore the
-// workhorse for numeric-code upstreams.
-var (
-	quotaTypeVocabulary = []string{
-		"insufficient_credit",
-		"insufficient_quota",
-		"quota",
-		"payment_required",
-		"billing",
-		"resource_exhausted",
-	}
-	quotaCodeVocabulary    = quotaTypeVocabulary // structured fields share the set
-	quotaMessageVocabulary = []string{
-		"insufficient credit",
-		"quota exceeded",
-		"quota exhausted",
-		// The specific observed live shape replaces the former bare
-		// "usage limit" phrase — a PLAIN rate-limit body uses "usage
-		// limit" for per-minute throttling ("you have reached your
-		// usage limit for this minute"), which must classify rate_limit
-		// (60s/Retry-After), NOT quota.
-		"token plan usage limit",
-		// "token plan" stays its own status-agnostic phrase BY DESIGN: a
-		// token-plan body means the plan is exhausted at ANY status.
-		"token plan",
-		"payment required",
-		// The account-subject shapes the SCOPE layer already knows
-		// (review S-1): the z.ai plan window and the 9router account
-		// quota are ACCOUNT walls — they must seed the QUOTA cooldown
-		// (15m), not the flat rate-limit one (60s), or the dry account
-		// re-enters the pool after a minute.
-		"your quota will reset",
-		"your limit will reset",
-		"exhausted your capacity",
-	}
-)
+// ─────────────────────────────────────────────────────────────────────────────
 
 // QuotaBodyKind — WHICH part of an upstream error body carried the
 // quota classification. The Anthropic lane needs the distinction: its
@@ -415,8 +355,8 @@ func (k QuotaBodyKind) String() string {
 // through IsQuotaError, the Anthropic lane through
 // ClassifyQuotaBody (it no longer carries a local list).
 func ClassifyQuotaBody(errorType, errorCode, message string) QuotaBodyKind {
-	if containsAny(strings.ToLower(errorType), quotaTypeVocabulary) ||
-		containsAny(strings.ToLower(errorCode), quotaCodeVocabulary) {
+	if credclass.ContainsAny(strings.ToLower(errorType), credclass.QuotaTypeVocabulary) ||
+		credclass.ContainsAny(strings.ToLower(errorCode), credclass.QuotaCodeVocabulary) {
 		return QuotaBodyStructured
 	}
 	if IsQuotaMessage(message) {
@@ -447,25 +387,14 @@ func IsQuotaBody(errorType, errorCode, message string) bool {
 // Read-only: the returned slice is a copy, so a caller cannot mutate
 // the canonical vocabulary.
 func QuotaVocabularyTokens() []string {
-	out := make([]string, 0, len(quotaTypeVocabulary)+len(quotaMessageVocabulary))
-	out = append(out, quotaTypeVocabulary...)
-	out = append(out, quotaMessageVocabulary...)
+	out := make([]string, 0, len(credclass.QuotaTypeVocabulary)+len(credclass.QuotaMessageVocabulary))
+	out = append(out, credclass.QuotaTypeVocabulary...)
+	out = append(out, credclass.QuotaMessageVocabulary...)
 	return out
 }
 
-// containsAny reports whether the lowercased haystack contains any of the
-// (already-lowercase) vocabulary entries.
-func containsAny(lowered string, vocabulary []string) bool {
-	for _, v := range vocabulary {
-		if strings.Contains(lowered, v) {
-			return true
-		}
-	}
-	return false
-}
-
 // IsQuotaMessage reports whether a free-text body carries the ACCOUNT
-// quota vocabulary (the message half of quotaMessageVocabulary).
+// quota vocabulary (the message half of credclass.QuotaMessageVocabulary).
 //
 // It is the exported twin of the message check IsQuotaError performs, so
 // a caller that holds a RAW body (no *ProviderError to inspect — the
@@ -478,7 +407,7 @@ func IsQuotaMessage(text string) bool {
 	if text == "" {
 		return false
 	}
-	return containsAny(strings.ToLower(text), quotaMessageVocabulary)
+	return credclass.ContainsAny(strings.ToLower(text), credclass.QuotaMessageVocabulary)
 }
 
 // IsQuotaError (layered credential fallback — Fix 1) classifies an error
@@ -503,7 +432,7 @@ func IsQuotaMessage(text string) bool {
 // often numeric (code 2067) — invisible to the string-typed ErrorCode
 // field. The message (or the raw-body fallback that lands in Message)
 // is the only carrier that survives every shape (see
-// quotaMessageVocabulary above).
+// credclass.QuotaMessageVocabulary).
 //
 // Precedence note for callers: a 429 whose BODY carries quota
 // vocabulary classifies as QUOTA, not rate-limit — the account is out
@@ -519,6 +448,15 @@ func IsQuotaMessage(text string) bool {
 // 401/auth-class errors carry none of the vocabulary — the classifier
 // is silent on them (auth stays terminal; eligibility is never widened
 // to it). Safe to call from any goroutine.
+//
+// DELEGATION (credclass extraction): the vocabulary and the field-level
+// rules live in the leaf package pkg/credclass (stdlib-only) so a lane
+// that cannot import this package classifies with the SAME vocabulary.
+// This wrapper keeps the exported signature and the errors.As unwrap,
+// extracts the four facts, and delegates. The ONLY behaviour change is
+// the DELIBERATE quota-CLASS narrowing (wi-4b8d21e7) documented with
+// the tables in pkg/credclass — every lane that reaches this package
+// inherits it, by design.
 func IsQuotaError(err error) bool {
 	if err == nil {
 		return false
@@ -530,11 +468,10 @@ func IsQuotaError(err error) bool {
 	if !errors.As(err, &pe) || pe == nil {
 		return false
 	}
-	if pe.StatusCode == 402 {
-		return true
-	}
-	// The CANONICAL classifier (review S-4): the structured fields win
-	// the tie over the free-text message — one vocabulary, one
-	// decision, shared with the Anthropic lane.
-	return ClassifyQuotaBody(pe.ErrorType, pe.ErrorCode, pe.Message) != QuotaBodyNone
+	// The CANONICAL classifier (review S-4) resolves the structured-vs-
+	// message tie over the SAME tables pkg/credclass holds — one
+	// vocabulary, one decision, shared with the Anthropic lane. The
+	// boolean form below (402 on the status alone, then the three field
+	// checks in order) is identical to it.
+	return credclass.IsQuota(pe.StatusCode, pe.ErrorType, pe.ErrorCode, pe.Message)
 }

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credclass"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -187,6 +189,11 @@ func TestHandleError_Quota402NumericCodeLeavesCodeEmpty(t *testing.T) {
 // the same change. The SCOPE vocabulary in pkg/modelcache is a
 // separate, deliberately broader list (class ⊂ scope) and is pinned
 // there, not here.
+//
+// WHERE THE TABLES LIVE (merge note — wi-4b8d21e7): the upstream
+// credclass extraction moved the vocabulary tables to the leaf
+// package pkg/credclass, so this pin reads them THERE — the lock
+// covers the ONE table every lane runs, not a local copy of it.
 // ─────────────────────────────────────────────────────────────────────────────
 func TestQuotaVocabulary_IsLocked(t *testing.T) {
 	wantStructured := []string{
@@ -197,11 +204,11 @@ func TestQuotaVocabulary_IsLocked(t *testing.T) {
 		"billing",
 		"resource_exhausted",
 	}
-	if !slices.Equal(quotaTypeVocabulary, wantStructured) {
-		t.Errorf("quotaTypeVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", quotaTypeVocabulary, wantStructured)
+	if !slices.Equal(credclass.QuotaTypeVocabulary, wantStructured) {
+		t.Errorf("credclass.QuotaTypeVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", credclass.QuotaTypeVocabulary, wantStructured)
 	}
-	if !slices.Equal(quotaCodeVocabulary, wantStructured) {
-		t.Errorf("quotaCodeVocabulary = %q\nwant it to share the locked structured set %q\n—type and code fields must match the SAME vocabulary.", quotaCodeVocabulary, wantStructured)
+	if !slices.Equal(credclass.QuotaCodeVocabulary, wantStructured) {
+		t.Errorf("credclass.QuotaCodeVocabulary = %q\nwant it to share the locked structured set %q\n—type and code fields must match the SAME vocabulary.", credclass.QuotaCodeVocabulary, wantStructured)
 	}
 
 	wantMessage := []string{
@@ -215,8 +222,8 @@ func TestQuotaVocabulary_IsLocked(t *testing.T) {
 		"your limit will reset",
 		"exhausted your capacity",
 	}
-	if !slices.Equal(quotaMessageVocabulary, wantMessage) {
-		t.Errorf("quotaMessageVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", quotaMessageVocabulary, wantMessage)
+	if !slices.Equal(credclass.QuotaMessageVocabulary, wantMessage) {
+		t.Errorf("credclass.QuotaMessageVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", credclass.QuotaMessageVocabulary, wantMessage)
 	}
 
 	// The dropped spellings stay ABSENT from the list each used to live
@@ -231,15 +238,15 @@ func TestQuotaVocabulary_IsLocked(t *testing.T) {
 		"out of credit",
 		"billing", // message spelling; the TYPE/CODE token above stays
 	} {
-		if slices.Contains(quotaMessageVocabulary, tok) {
-			t.Errorf("quotaMessageVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
+		if slices.Contains(credclass.QuotaMessageVocabulary, tok) {
+			t.Errorf("credclass.QuotaMessageVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
 		}
 	}
 	for _, tok := range []string{
 		"credit_exhausted",
 	} {
-		if slices.Contains(quotaTypeVocabulary, tok) {
-			t.Errorf("quotaTypeVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
+		if slices.Contains(credclass.QuotaTypeVocabulary, tok) {
+			t.Errorf("credclass.QuotaTypeVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
 		}
 	}
 

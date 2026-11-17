@@ -36,14 +36,18 @@ package ui
 // unchanged by WS (a); this lock is retained deliberately.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // addDecisionCreds seeds three test-credentials — openai (D4
@@ -752,5 +756,425 @@ func TestHandleModels_GET_KindArms_Group(t *testing.T) {
 	}
 	if _, missing := all["plain-chat"]; !missing {
 		t.Error("no-filter GET lost the chat row")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the LANE rules across the three
+// enforcement sites (helper ≡ POST ≡ PUT, each asserted INDEPENDENTLY —
+// the house multi-site rule-parity discipline).
+//
+// The decision-lane fixtures live in their OWN helper (the shared
+// addGroupMembers fixture is NOT touched — no churn in the GET ?kind=
+// tests).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// addDecisionGroupMembers seeds the DECISION-lane fixture rows: two
+// decision-kind member models (the decision provider vocabulary is
+// {openai, typesafe, openrouter} — openai-cred qualifies) and one
+// chat-kind model.
+func addDecisionGroupMembers(ts *modelTestServer) {
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-member-a", Name: "Decision Member A", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-5",
+		Credentials: decisionRefs("openai-cred"),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-member-b", Name: "Decision Member B", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-5-mini",
+		Credentials: decisionRefs("openai-cred"),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "chat-member-x", Name: "Chat Member X", Enabled: true, Kind: models.KindChat,
+	})
+}
+
+// decisionGroupBase returns a valid DECISION-lane group row (two
+// decision members, no claim).
+func decisionGroupBase() models.ModelConfig {
+	return models.ModelConfig{
+		ID:       "decision-group-1",
+		Name:     "Decision Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "dec-member-a", Weight: 1}, {ModelID: "dec-member-b", Weight: 2}},
+	}
+}
+
+// TestKindRules_Parity_Group_DecisionLane — the decision-lane rule
+// matrix across helper / POST / PUT.
+//
+// Cases: decision members accepted; a chat member in a decision group
+// rejected; a decision member in a chat group rejected; a mixed-kind
+// group rejected; a lane-matched shadow accepted; a lane-mismatched
+// shadow rejected.
+func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
+	type ruleCase struct {
+		name string
+		// substr is the rule phrase the rejection must carry ("" for
+		// the accepted cases).
+		substr string
+		// group is the payload under test.
+		group models.ModelConfig
+		// seed is the row seeded before the PUT arm ("" = none).
+		seed string
+		// accepted marks the positive cases.
+		accepted bool
+	}
+
+	cases := []ruleCase{
+		{
+			name:     "decision_members_accepted",
+			accepted: true,
+			group:    decisionGroupBase(),
+		},
+		{
+			name:   "chat_member_in_decision_group_rejected",
+			substr: "members must all share one kind (chat or decision)",
+			group: models.ModelConfig{
+				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
+				Kind: models.KindGroup, Internal: true,
+				Members: []models.GroupMember{{ModelID: "dec-member-a", Weight: 1}, {ModelID: "chat-member-x", Weight: 1}},
+			},
+		},
+		{
+			name:   "decision_member_in_chat_group_rejected",
+			substr: "members must all share one kind (chat or decision)",
+			group: models.ModelConfig{
+				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
+				Kind: models.KindGroup, Internal: true,
+				Members: []models.GroupMember{{ModelID: "chat-member-x", Weight: 1}, {ModelID: "dec-member-a", Weight: 1}},
+			},
+		},
+		{
+			name:     "lane_matched_shadow_accepted",
+			accepted: true,
+			group: func() models.ModelConfig {
+				g := decisionGroupBase()
+				g.ShadowModelID = "dec-member-a"
+				return g
+			}(),
+		},
+		{
+			name:   "lane_mismatched_shadow_rejected",
+			substr: "must reference a decision-kind model (got kind \"chat\")",
+			group: func() models.ModelConfig {
+				g := decisionGroupBase()
+				g.ShadowModelID = "chat-member-x"
+				return g
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each arm runs on its OWN stack: an accepted POST creates
+			// a real row (and may claim the shadow target), which would
+			// otherwise contaminate the PUT arm's G8 uniqueness scan.
+			newStack := func() (*modelTestServer, *httptest.Server) {
+				ts := newModelTestServer()
+				addDecisionCreds(ts)
+				addDecisionGroupMembers(ts)
+				return ts, ts.serve()
+			}
+
+			// --- Helper reference ---
+			helperTS, _ := newStack()
+			helperErr := validateGroupRulesCaller(tc.group, helperTS.mockModels.GetModels())
+			if tc.accepted {
+				if helperErr != "" {
+					t.Fatalf("helper rejected the valid decision-lane group %q: %v", tc.name, helperErr)
+				}
+			} else {
+				if helperErr == "" {
+					t.Fatalf("helper returned nil err for the broken decision-lane group %q — the rule under test did not fire", tc.name)
+				}
+				if !strings.Contains(helperErr, tc.substr) {
+					t.Fatalf("helper err %q does not contain expected rule phrase %q — models group validators may have drifted", helperErr, tc.substr)
+				}
+			}
+
+			// --- POST inline mirror ---
+			_, postSrv := newStack()
+			defer postSrv.Close()
+			postStatus, postErrSubstr := postDecisionModel(t, postSrv.URL, marshalGroupModel(tc.group))
+			if tc.accepted {
+				if postStatus != http.StatusCreated {
+					t.Errorf("POST inline mirror REJECTED the valid decision-lane group (status=%d, err=%q) — server.go POST group arm has drifted for %s", postStatus, postErrSubstr, tc.name)
+				}
+			} else {
+				if postStatus != http.StatusBadRequest {
+					t.Errorf("POST inline mirror ACCEPTED the broken decision-lane group (status=%d, err=%q) — server.go POST group arm has drifted for %s; must reject with 400", postStatus, postErrSubstr, tc.name)
+				} else if !strings.Contains(postErrSubstr, tc.substr) {
+					t.Errorf("POST inline err %q does not contain expected rule phrase %q — server.go POST group arm has drifted", postErrSubstr, tc.substr)
+				}
+			}
+
+			// --- PUT inline mirror (seed the row first) ---
+			putTS, putSrv := newStack()
+			defer putSrv.Close()
+			seed := decisionGroupBase()
+			seed.ID = "decision-group-1"
+			if err := putTS.mockModels.AddModel(seed); err != nil {
+				t.Fatalf("seed decision group: %v", err)
+			}
+			putStatus, putErrSubstr := putDecisionModel(t, putSrv.URL, "decision-group-1", marshalGroupModel(tc.group))
+			if tc.accepted {
+				if putStatus != http.StatusOK {
+					t.Errorf("PUT inline mirror REJECTED the valid decision-lane group (status=%d, err=%q) — server.go PUT group arm has drifted for %s", putStatus, putErrSubstr, tc.name)
+				}
+			} else {
+				if putStatus != http.StatusBadRequest {
+					t.Errorf("PUT inline mirror ACCEPTED the broken decision-lane group (status=%d, err=%q) — server.go PUT group arm has drifted for %s; must reject with 400", putStatus, putErrSubstr, tc.name)
+				} else if !strings.Contains(putErrSubstr, tc.substr) {
+					t.Errorf("PUT inline err %q does not contain expected rule phrase %q — server.go PUT group arm has drifted", putErrSubstr, tc.substr)
+				}
+			}
+		})
+	}
+
+	// Chain-rule subtest: a chat model whose fallback_chain names a
+	// DECISION-lane group must be rejected at the API boundary (B3).
+	t.Run("chain_rule_chat_model_references_decision_group", func(t *testing.T) {
+		// Seed a decision group in the mock store.
+		seedStack := func() (*modelTestServer, *httptest.Server) {
+			ts := newModelTestServer()
+			addDecisionCreds(ts)
+			addDecisionGroupMembers(ts)
+			g := decisionGroupBase()
+			g.ID = "decision-group-1"
+			if err := ts.mockModels.AddModel(g); err != nil {
+				t.Fatalf("seed decision group: %v", err)
+			}
+			return ts, ts.serve()
+		}
+
+		chainSubstr := "fallback_chain must not reference the decision-lane group"
+
+		// --- POST arm ---
+		_, postSrv := seedStack()
+		defer postSrv.Close()
+		postBody := `{
+			"id": "chat-with-decision-chain",
+			"name": "Chat With Decision Chain",
+			"enabled": true,
+			"kind": "chat",
+			"fallback_chain": ["decision-group-1"]
+		}`
+		postStatus, postErr := postDecisionModel(t, postSrv.URL, postBody)
+		if postStatus != http.StatusBadRequest {
+			t.Errorf("POST: status = %d, want 400; err=%q", postStatus, postErr)
+		} else if !strings.Contains(postErr, chainSubstr) {
+			t.Errorf("POST: err %q does not contain %q", postErr, chainSubstr)
+		}
+
+		// --- PUT arm (seed the chat model first) ---
+		putTS, putSrv := seedStack()
+		defer putSrv.Close()
+		seedChat := models.ModelConfig{
+			ID: "chat-with-decision-chain", Name: "Chat With Decision Chain",
+			Enabled: true, Kind: models.KindChat,
+		}
+		if err := putTS.mockModels.AddModel(seedChat); err != nil {
+			t.Fatalf("seed chat model: %v", err)
+		}
+		putBody := `{
+			"id": "chat-with-decision-chain",
+			"name": "Chat With Decision Chain",
+			"enabled": true,
+			"kind": "chat",
+			"fallback_chain": ["decision-group-1"]
+		}`
+		putStatus, putErr := putDecisionModel(t, putSrv.URL, "chat-with-decision-chain", putBody)
+		if putStatus != http.StatusBadRequest {
+			t.Errorf("PUT: status = %d, want 400; err=%q", putStatus, putErr)
+		} else if !strings.Contains(putErr, chainSubstr) {
+			t.Errorf("PUT: err %q does not contain %q", putErr, chainSubstr)
+		}
+	})
+}
+
+// TestKindRules_Parity_KindImmutability — ADR-1's guard asserted at
+// the API PUT (the UI mirror) AND against the canonical message
+// (pkg/models.KindChangeGroupMemberMessage — the single source of
+// truth the canonical write path in pkg/store/database also uses).
+//
+// The two sites are asserted INDEPENDENTLY: the API PUT must reject
+// with 400 + the bare {"error":"…"} envelope, and the message must be
+// exactly the canonical one (the canonical write path's own assertion
+// lives in pkg/store/database — TestUpdateModel_KindChange_*).
+func TestKindRules_Parity_KindImmutability(t *testing.T) {
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	addDecisionGroupMembers(ts)
+	// A decision group with a decision member.
+	group := decisionGroupBase()
+	group.ID = "decision-group-1"
+	if err := ts.mockModels.AddModel(group); err != nil {
+		t.Fatalf("seed decision group: %v", err)
+	}
+	srv := ts.serve()
+	defer srv.Close()
+
+	// The retype payload: the member becomes chat-kind.
+	retype := models.ModelConfig{
+		ID: "dec-member-a", Name: "Decision Member A", Enabled: true,
+		Kind: models.KindChat, Internal: true, InternalModel: "glm-5",
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"id":             "dec-member-a",
+		"name":           retype.Name,
+		"enabled":        retype.Enabled,
+		"kind":           retype.Kind,
+		"internal":       retype.Internal,
+		"internal_model": retype.InternalModel,
+	})
+	if err != nil {
+		t.Fatalf("marshal retype payload: %v", err)
+	}
+
+	status, errSubstr := putDecisionModel(t, srv.URL, "dec-member-a", string(body))
+	if status != http.StatusBadRequest {
+		t.Fatalf("the API PUT ACCEPTED a group member's kind change (status=%d, err=%q) — the kind-immutability guard is not wired at the API layer", status, errSubstr)
+	}
+	want := models.KindChangeGroupMemberMessage("dec-member-a", "decision-group-1")
+	if errSubstr != want {
+		t.Fatalf("the API rejection %q must be the canonical message %q", errSubstr, want)
+	}
+	if !strings.Contains(errSubstr, "dec-member-a") || !strings.Contains(errSubstr, "decision-group-1") {
+		t.Fatalf("the rejection %q must name BOTH the member and the group", errSubstr)
+	}
+
+	// The scoped arm: a model that is in NO group still retypes through
+	// the API.
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID: "solo-model", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "glm-5",
+	}); err != nil {
+		t.Fatalf("seed solo model: %v", err)
+	}
+	soloBody, err := json.Marshal(map[string]interface{}{
+		"id": "solo-model", "name": "Solo", "enabled": true,
+		"kind": models.KindDecision, "internal": true, "internal_model": "gpt-5",
+		"credentials": []map[string]interface{}{{"credential_id": "openai-cred", "weight": 1, "position": 0}},
+	})
+	if err != nil {
+		t.Fatalf("marshal solo payload: %v", err)
+	}
+	status, errSubstr = putDecisionModel(t, srv.URL, "solo-model", string(soloBody))
+	if status == http.StatusBadRequest {
+		t.Fatalf("a model that is in no group must still retype through the API, got 400: %q", errSubstr)
+	}
+}
+
+// TestDecision_Vocabulary_OutOfSetProvider_Rejected_AtAllGates — a
+// provider OUTSIDE {openai, typesafe, openrouter} is rejected for a
+// decision model at EVERY gate: the canonical rule, the DB write path,
+// the POST mirror and the PUT mirror — the parity across all sites.
+//
+// (The decision-groups commission's vocabulary pin: the credential
+// vocabulary is a SEPARATE map — the two are nested, never crossed.)
+func TestDecision_Vocabulary_OutOfSetProvider_Rejected_AtAllGates(t *testing.T) {
+	// --- The canonical rule (pkg/models) ---
+	decisionModel := models.ModelConfig{
+		ID: "dec-1", Name: "Decision 1", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-6-luna",
+		Credentials: []models.CredentialRef{{CredentialID: "minimax-cred", Weight: 1, Position: 0}},
+	}
+	if err := models.ValidateKindRules(&decisionModel, "minimax"); err == nil {
+		t.Error("the canonical rule must reject an out-of-set decision provider")
+	}
+
+	// --- The DB write path (the real manager) ---
+	dbPath := filepath.Join(t.TempDir(), "vocab.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	dbStore, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { dbStore.Close() })
+	if err := dbStore.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := database.NewModelsManager(dbStore, nil)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := mgr.AddModel(decisionModel); err == nil {
+		t.Error("the DB write path must reject an out-of-set decision provider")
+	}
+
+	// --- The POST + PUT mirrors ---
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	ts.mockModels.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"})
+	srv := ts.serve()
+	defer srv.Close()
+
+	payload := `{"id":"dec-1","name":"Decision 1","enabled":true,"kind":"decision","internal":true,` +
+		`"internal_model":"gpt-6-luna","credentials":[{"credential_id":"minimax-cred","weight":1,"position":0}]}`
+	status, errSubstr := postDecisionModel(t, srv.URL, payload)
+	if status != http.StatusBadRequest {
+		t.Errorf("the POST mirror must reject an out-of-set decision provider (status=%d, err=%q)", status, errSubstr)
+	}
+	if status, errSubstr = putDecisionModel(t, srv.URL, "dec-1", payload); status != http.StatusBadRequest {
+		t.Errorf("the PUT mirror must reject an out-of-set decision provider (status=%d, err=%q)", status, errSubstr)
+	}
+}
+
+// TestKindRules_Parity_Group_DecisionMembers_MixedProviders — a
+// decision group with an openai member and an openrouter member is
+// accepted by the POST + PUT mirrors (the GROUP row carries no
+// credentials, so no provider gate applies to it — the "no
+// saveable-but-502 hole" acceptance).
+//
+// The DB arm of the same case is
+// TestGroup_AddModel_DecisionMembers_MixedProviders_Accepted.
+func TestKindRules_Parity_Group_DecisionMembers_MixedProviders(t *testing.T) {
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	// Two decision members on DIFFERENT providers (the mixed set).
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-openai", Name: "Decision OpenAI", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-6-luna",
+		Credentials: decisionRefs("openai-cred"),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-openrouter", Name: "Decision OpenRouter", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "anthropic/claude",
+		Credentials: decisionRefs("openrouter-cred"),
+	})
+	srv := ts.serve()
+	defer srv.Close()
+
+	group := models.ModelConfig{
+		ID: "decision-mixed-providers", Name: "Decision Mixed Providers", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dec-openai", Weight: 1}, {ModelID: "dec-openrouter", Weight: 1}},
+	}
+
+	// The helper reference accepts it (the group row carries no
+	// provider).
+	if err := validateGroupRulesCaller(group, ts.mockModels.GetModels()); err != "" {
+		t.Fatalf("the helper must accept a decision group with mixed providers: %v", err)
+	}
+
+	// The POST mirror accepts it.
+	payload := marshalGroupModel(group)
+	payload = strings.Replace(payload, `"id":"group-1"`, `"id":"decision-mixed-providers"`, 1)
+	status, errSubstr := postDecisionModel(t, srv.URL, payload)
+	if status != http.StatusCreated {
+		t.Fatalf("the POST mirror must accept a decision group with mixed providers (status=%d, err=%q)", status, errSubstr)
+	}
+
+	// The PUT mirror accepts it (the POST arm already created the
+	// row — the PUT updates it in place).
+	status, errSubstr = putDecisionModel(t, srv.URL, "decision-mixed-providers", payload)
+	if status != http.StatusOK {
+		t.Fatalf("the PUT mirror must accept a decision group with mixed providers (status=%d, err=%q)", status, errSubstr)
 	}
 }

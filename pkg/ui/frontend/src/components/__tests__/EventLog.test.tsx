@@ -150,3 +150,32 @@ describe('EventLog layered credential fallback renderers', () => {
     expect(root.textContent).not.toContain('→');
   });
 });
+
+// ─── F1 — the generic fallbacks (AC-R10) ───────────────────────────────────
+//
+// The decision lane's pick / attempt / suppress event tokens are NOT
+// named in the FE's EventType union yet (the backend names them in its
+// own release). The FE renders events GENERICALLY — three per-type
+// lookups that ALL carry a fallback — so an unnamed token is visible
+// the moment the backend emits it, with NO FE rendering change.
+//
+// This case pins that fallback path. The cast in the fixture IS the
+// evidence that the token is outside the union today; the curated
+// label/message/colour entries for the trio land with the backend
+// commit that names the tokens.
+describe('EventLog — generic fallbacks for an unnamed event token', () => {
+  it('F1 — an event type outside the FE EventType union renders through the generic fallbacks', () => {
+    const token = 'decision_member_picked';
+    const unnamed = { type: token, timestamp: 0, data: {} } as unknown as Event;
+    const root = renderEvents([unnamed]);
+    // The label is the uppercased token.
+    expect(root.textContent).toContain(`[${token.toUpperCase()}]`);
+    // The message is the generic "Event: <token>".
+    expect(root.textContent).toContain(`Event: ${token}`);
+    // The colour is the gray default.
+    const label = Array.from(root.querySelectorAll('span')).find((s) =>
+      (s.textContent ?? '').includes(`[${token.toUpperCase()}]`),
+    );
+    expect(label?.className).toContain('text-gray-400');
+  });
+});

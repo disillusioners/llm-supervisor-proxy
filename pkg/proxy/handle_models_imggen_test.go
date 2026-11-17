@@ -15,9 +15,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // stubModelsConfig is a minimal models.ModelsConfigInterface
@@ -221,5 +223,98 @@ func TestHandleModels_MethodNotAllowed(t *testing.T) {
 	h.HandleModels(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the /v1/models filter: a decision-lane
+// GROUP is excluded from the OpenAI-compatible listing (it is served
+// by /v1/decisions only). A chat group stays listed (today's
+// behaviour).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestHandleModels_FilterDecisionGroup — a decision group is ABSENT
+// from /v1/models; a chat group is still listed.
+func TestHandleModels_FilterDecisionGroup(t *testing.T) {
+	stub := newDecisionGroupStub(t)
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-1", Name: "Chat 1", Enabled: true,
+		Kind: models.KindChat, Internal: true, InternalModel: "glm-5",
+		Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+	}); err != nil {
+		t.Fatalf("AddModel chat: %v", err)
+	}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-group", Name: "Chat Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "chat-1", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel chat group: %v", err)
+	}
+	stub.lanes["chat-group"] = models.GroupLaneChat
+
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {}, stub)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	h.HandleModels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"id":"decision-group"`) {
+		t.Errorf("the decision group must be ABSENT from /v1/models; body=%s", body)
+	}
+	if !strings.Contains(body, `"id":"chat-group"`) {
+		t.Errorf("the chat group must stay listed; body=%s", body)
+	}
+}
+
+// TestHandleModels_FilterDecisionGroup_ThroughCachedConfig — the same
+// exclusion through the PRODUCTION models binding, WITH the
+// all-models fold: a group with a DISABLED decision member is still a
+// decision group and must still be excluded.
+func TestHandleModels_FilterDecisionGroup_ThroughCachedConfig(t *testing.T) {
+	cached, cleanup := newCachedProxyModels(t, func(mgr *database.ModelsManager) {
+		if err := mgr.AddCredential(models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-1", Name: "Decision 1", Enabled: true,
+			Kind: models.KindDecision, Internal: true, InternalModel: "gpt-6-luna",
+			Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+		}); err != nil {
+			t.Fatalf("AddModel member: %v", err)
+		}
+		// A DISABLED decision member: the lane derivation counts it
+		// (the manager's inference counts disabled members), so the
+		// group is still a decision group.
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-off", Name: "Decision Off", Enabled: false,
+			Kind: models.KindDecision, Internal: true, InternalModel: "gpt-6-luna",
+			Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+		}); err != nil {
+			t.Fatalf("AddModel disabled member: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "decision-group", Name: "Decision Group", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			Members: []models.GroupMember{{ModelID: "dec-1", Weight: 1}, {ModelID: "dec-off", Weight: 1}},
+		}); err != nil {
+			t.Fatalf("AddModel group: %v", err)
+		}
+	})
+	defer cleanup()
+
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {}, cached)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	h.HandleModels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), `"id":"decision-group"`) {
+		t.Errorf("the decision group must be ABSENT from /v1/models (the all-models fold counts the disabled decision member); body=%s", rec.Body.String())
 	}
 }

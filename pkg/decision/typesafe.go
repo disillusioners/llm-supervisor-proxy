@@ -441,6 +441,13 @@ func (p *systemOneProvider) InspectResponse(respBytes []byte, originalReq *Decis
 		return nil, &Outcome{
 			RelayStatus: 502,
 			Reason:      fmt.Sprintf("%s returned error envelope (code=%q, type=%q)", p.name, probe.Error.Code, probe.Error.Type),
+			// The envelope's fields travel with the Outcome: the lane
+			// classifies the failure on them (the decision-groups
+			// commission) — the adapter's 502 collapse must not lose
+			// the vocabulary.
+			ErrorType:    probe.Error.Type,
+			ErrorCode:    probe.Error.Code,
+			ErrorMessage: probe.Error.Message,
 		}, nil
 	}
 

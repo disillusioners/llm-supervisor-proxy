@@ -16,7 +16,7 @@ function makeModel(overrides: Partial<Model> = {}): Model {
 // Chat-kind fixture set — one row per kind so every test asserts the
 // picker filter in one render (the same multi-kind chrome as
 // ModelsTab.chatFilter / TokenForm tests).
-const chatModels: Model[] = [
+const laneModels: Model[] = [
   makeModel({ id: 'chat-1', name: 'Chat One' }),
   makeModel({ id: 'chat-2', name: 'Chat Two (no kind)' }),
   makeModel({ id: 'img-1', name: 'Image One', kind: 'image-gen' }),
@@ -40,7 +40,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('renders one row per member with picker + weight input + remove', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 2 }, { model_id: 'chat-2', weight: 3 }])} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 2 }, { model_id: 'chat-2', weight: 3 }])} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const rows = container.querySelectorAll('[data-testid="group-member-row"]');
     expect(rows.length).toBe(2);
@@ -55,7 +55,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('Am30 — the model picker offers ONLY chat-kind models (image-gen, decision, and group rows are absent)', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers()} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers()} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const select = container.querySelector('[data-testid="group-member-model-select"]') as HTMLSelectElement;
     const optionValues = Array.from(select.options).map((o) => o.value);
@@ -73,7 +73,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('picking a model updates the row via onChange', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: '', weight: 1 }])} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: '', weight: 1 }])} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const select = container.querySelector('[data-testid="group-member-model-select"]') as HTMLSelectElement;
     fireEvent.change(select, { target: { value: 'chat-2' } });
@@ -83,7 +83,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('editing a weight updates the row via onChange (float weights parse)', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers()} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers()} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const input = container.querySelector('[data-testid="group-member-weight-input"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '2.5' } });
@@ -93,7 +93,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('remove drops the row via onChange', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const removes = container.querySelectorAll('[data-testid="group-member-remove"]');
     fireEvent.click(removes[0]);
@@ -103,7 +103,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('add appends a fresh {model_id: "", weight: 1} row', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers()} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers()} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     fireEvent.click(container.querySelector('[data-testid="group-member-add"]') as HTMLButtonElement);
     expect(onChange).toHaveBeenCalledWith([
@@ -116,7 +116,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     const onChange = vi.fn();
     const sixteen = Array.from({ length: 16 }, (_, i) => ({ model_id: `chat-${i + 1}`, weight: 1 }));
     const { container } = render(
-      <GroupMemberEditor members={sixteen} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={sixteen} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     const add = container.querySelector('[data-testid="group-member-add"]') as HTMLButtonElement;
     expect(add.disabled).toBe(true);
@@ -126,7 +126,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
   it('Q10 — duplicate model IDs WARN but do not block (no onChange interference, hint rendered)', () => {
     const onChange = vi.fn();
     const { container } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-1', weight: 2 }])} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-1', weight: 2 }])} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     // Both duplicate rows still render (nothing is blocked/removed).
     expect(container.querySelectorAll('[data-testid="group-member-row"]').length).toBe(2);
@@ -135,7 +135,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     expect(container.querySelector('[data-testid="group-member-dup-warn"]')).not.toBeNull();
     // No dup ⇒ no hint.
     const { container: clean } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])} chatModels={chatModels} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])} lane="chat" laneModels={laneModels} onChange={onChange} />,
     );
     expect(clean.querySelector('[data-testid="group-member-dup-warn"]')).toBeNull();
   });
@@ -144,7 +144,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     const onChange = vi.fn();
     const internal = [makeModel({ id: 'int-1', name: 'Internal One', internal: true, internal_provider: 'deepseek' })];
     const { container } = render(
-      <GroupMemberEditor members={makeMembers([{ model_id: 'int-1', weight: 1 }])} chatModels={internal} onChange={onChange} />,
+      <GroupMemberEditor members={makeMembers([{ model_id: 'int-1', weight: 1 }])} lane="chat" laneModels={internal} onChange={onChange} />,
     );
     expect(container.textContent).toContain('deepseek');
   });
@@ -162,7 +162,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     const { container } = render(
       <GroupMemberEditor
         members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])}
-        chatModels={chatModels}
+        lane="chat" laneModels={laneModels}
         onChange={onChange}
       />,
     );
@@ -177,7 +177,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     const { container } = render(
       <GroupMemberEditor
         members={makeMembers([{ model_id: 'chat-1', weight: 1 }])}
-        chatModels={chatModels}
+        lane="chat" laneModels={laneModels}
         onChange={onChange}
       />,
     );
@@ -191,7 +191,7 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     const { container } = render(
       <GroupMemberEditor
         members={makeMembers([{ model_id: 'chat-1', weight: 1, backup_only: true }])}
-        chatModels={chatModels}
+        lane="chat" laneModels={laneModels}
         onChange={onChange}
       />,
     );
@@ -212,12 +212,38 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
           { model_id: 'chat-1', weight: 1, backup_only: true },
           { model_id: 'chat-2', weight: 1 },
         ])}
-        chatModels={chatModels}
+        lane="chat" laneModels={laneModels}
         onChange={onChange}
       />,
     );
     const ticks = container.querySelectorAll('[data-testid="group-member-backup-only"]');
     expect((ticks[0] as HTMLInputElement).checked).toBe(true);
     expect((ticks[1] as HTMLInputElement).checked).toBe(false);
+  });
+
+  // T1 — the text lane's candidate-eligibility exclusion must NOT leak.
+  //
+  // The DECISION lane's picker excludes inactive models (ADR-7 /
+  // AC-R6: an inactive model is a valid CHAIN target but NOT a group
+  // candidate). The TEXT lane keeps offering inactive chat models —
+  // ADR-9 / AC-R12 says this release must not change text-lane
+  // behaviour, and bringing the text lane to those semantics is the
+  // PARALLEL commission's call, not this one's.
+  //
+  // The fixture is LOCAL to this case so the shared fixture set (and
+  // every existing assertion over it) stays untouched.
+  it('T1 — the text picker still offers an inactive chat model (the decision-lane exclusion must not leak into the text lane)', () => {
+    const onChange = vi.fn();
+    const textLaneModels: Model[] = [
+      makeModel({ id: 'chat-on', name: 'Chat On' }),
+      makeModel({ id: 'chat-off', name: 'Chat Off', enabled: false }),
+    ];
+    const { container } = render(
+      <GroupMemberEditor members={makeMembers()} lane="chat" laneModels={textLaneModels} onChange={onChange} />,
+    );
+    const select = container.querySelector('[data-testid="group-member-model-select"]') as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((o) => o.value);
+    expect(optionValues).toContain('chat-on');
+    expect(optionValues).toContain('chat-off');
   });
 });

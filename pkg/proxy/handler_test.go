@@ -19,6 +19,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // getLastAssistantMessage returns the last assistant message from the request log.
@@ -2401,5 +2402,52 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	}
 	if reqs[0].Status != "completed" {
 		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}
+
+// TestHandleChatCompletions_RejectsDecisionGroupMisroute_ThroughCachedConfig
+// — the same refusal through the PRODUCTION models binding (the
+// cached decorator): the guard's effect must reach the raw manager
+// through the decorator forward.
+func TestHandleChatCompletions_RejectsDecisionGroupMisroute_ThroughCachedConfig(t *testing.T) {
+	cached, cleanup := newCachedProxyModels(t, func(mgr *database.ModelsManager) {
+		if err := mgr.AddCredential(models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-1", Name: "Decision 1", Enabled: true,
+			Kind: models.KindDecision, Internal: true, InternalModel: "gpt-6-luna",
+			Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+		}); err != nil {
+			t.Fatalf("AddModel member: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "decision-group", Name: "Decision Group", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			Members: []models.GroupMember{{ModelID: "dec-1", Weight: 1}},
+		}); err != nil {
+			t.Fatalf("AddModel group: %v", err)
+		}
+	})
+	defer cleanup()
+
+	var upstreamHits int
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"x"}}]}`))
+	}, cached)
+
+	rec := httptest.NewRecorder()
+	body := `{"model":"decision-group","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.HandleChatCompletions(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 through the cached config; body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Errorf("the upstream was called for a chat→decision-group misroute; hit count = %d", upstreamHits)
 	}
 }

@@ -14,13 +14,18 @@ package proxy
 // model_hourly_usage.request_count.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // TestHandleChatCompletions_RejectsImageGenMisroute — chat
@@ -180,4 +185,151 @@ func TestHandleChatCompletions_RejectsDecisionMisroute(t *testing.T) {
 	if !strings.Contains(msg, "/v1/decisions") {
 		t.Errorf("error message = %q, want it to mention /v1/decisions", msg)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the chat lane's GROUP arm of the misroute
+// guard.
+//
+// A group whose inferred lane is DECISION is served by /v1/decisions
+// only: the chat route must refuse it with the same 400
+// decision_misroute envelope and ZERO upstream calls. The guard is
+// ADDITIVE and lane-gated — a chat group is unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// groupLaneStubModels is a models stub that ALSO answers the optional
+// group-lane seam (the decision-groups commission's one new
+// models-manager method). The JSON backend does not implement it —
+// the seam is optional by design.
+type groupLaneStubModels struct {
+	*models.ModelsConfig
+	lanes map[string]models.GroupLane
+}
+
+// GroupLane is the optional lane seam.
+func (s *groupLaneStubModels) GroupLane(groupID string) (models.GroupLane, bool) {
+	lane, ok := s.lanes[groupID]
+	return lane, ok
+}
+
+// newDecisionGroupStub seeds a decision group (a group whose members
+// are decision-kind models) plus its member.
+func newDecisionGroupStub(t *testing.T) *groupLaneStubModels {
+	t.Helper()
+	stub := &groupLaneStubModels{ModelsConfig: &models.ModelsConfig{}, lanes: map[string]models.GroupLane{}}
+	credCfg := models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"}
+	if err := stub.AddCredential(credCfg); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	cred := []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "dec-1", Name: "Decision 1", Enabled: true,
+		Kind: models.KindDecision, Internal: true,
+		InternalModel: "gpt-6-luna", Credentials: cred,
+	}); err != nil {
+		t.Fatalf("AddModel member: %v", err)
+	}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "decision-group", Name: "Decision Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dec-1", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel group: %v", err)
+	}
+	stub.lanes["decision-group"] = models.GroupLaneDecision
+	return stub
+}
+
+// TestHandleChatCompletions_RejectsDecisionGroupMisroute — a decision
+// GROUP on /v1/chat/completions ⇒ 400 + code=decision_misroute + ZERO
+// upstream hits; a CHAT group on the same route is unaffected.
+func TestHandleChatCompletions_RejectsDecisionGroupMisroute(t *testing.T) {
+	stub := newDecisionGroupStub(t)
+	// A chat group (the negative arm).
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-1", Name: "Chat 1", Enabled: true,
+		Kind: models.KindChat, Internal: true, InternalModel: "glm-5",
+		Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+	}); err != nil {
+		t.Fatalf("AddModel chat: %v", err)
+	}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-group", Name: "Chat Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "chat-1", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel chat group: %v", err)
+	}
+	stub.lanes["chat-group"] = models.GroupLaneChat
+
+	var upstreamHits int
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"x"}}]}`))
+	}, stub)
+
+	// The decision group is refused.
+	rec := httptest.NewRecorder()
+	body := `{"model":"decision-group","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.HandleChatCompletions(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (the decision group must be refused on the chat route); body=%s", rec.Code, rec.Body.String())
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("body not JSON: %v; body=%s", err, rec.Body.String())
+	}
+	errObj, ok := parsed["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("body has no 'error' object: %s", rec.Body.String())
+	}
+	code, _ := errObj["code"].(string)
+	if code != "decision_misroute" {
+		t.Errorf("error code = %q, want decision_misroute", code)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("the upstream was called for a chat→decision-group misroute; hit count = %d", upstreamHits)
+	}
+}
+
+// newCachedProxyModels builds the PRODUCTION models binding — a real
+// models manager over a migrated SQLite store plus the CACHED
+// decorator over it (CACHE_LAYER_ENABLED defaults ON in production).
+// The ThroughCachedConfig effect tests bind the handler to it: the
+// guard's effect must reach the raw manager THROUGH the decorator
+// forward (the decorator-forward trap).
+func newCachedProxyModels(t *testing.T, seed func(*database.ModelsManager)) (models.ModelsConfigInterface, func()) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "proxy-cached.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	dbStore, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := dbStore.RunMigrations(context.Background()); err != nil {
+		dbStore.Close()
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := database.NewModelsManager(dbStore, nil)
+	if err != nil {
+		dbStore.Close()
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	seed(mgr)
+	cached, err := modelscache.NewCachedModelsConfig(mgr, modelscache.Options{ReconcileInterval: time.Hour})
+	if err != nil {
+		mgr.Close()
+		dbStore.Close()
+		t.Fatalf("NewCachedModelsConfig: %v", err)
+	}
+	cleanup := func() {
+		cached.Stop()
+		mgr.Close()
+		dbStore.Close()
+	}
+	return cached, cleanup
 }

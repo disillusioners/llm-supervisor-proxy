@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // anthropicDecisionRequest builds an Anthropic wire-shape request
@@ -133,4 +134,97 @@ func TestAnthropicBoundary_DecisionMisroute_Negatives(t *testing.T) {
 			t.Errorf("unknown model fired decision_misroute 400 (guard misfires pre-resolve); body=%s", w.Body.String())
 		}
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the Anthropic lane's GROUP arm of the
+// misroute guard (the same shape as the chat lane's arm).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestAnthropicBoundary_DecisionGroupMisroute — a decision GROUP on
+// /v1/messages ⇒ 400 + the Anthropic envelope code
+// "decision_misroute" + ZERO upstream calls; a chat group is
+// unaffected.
+func TestAnthropicBoundary_DecisionGroupMisroute(t *testing.T) {
+	stub := newDecisionGroupStub(t)
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-1", Name: "Chat 1", Enabled: true,
+		Kind: models.KindChat, Internal: true, InternalModel: "glm-5",
+		Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+	}); err != nil {
+		t.Fatalf("AddModel chat: %v", err)
+	}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "chat-group", Name: "Chat Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "chat-1", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel chat group: %v", err)
+	}
+	stub.lanes["chat-group"] = models.GroupLaneChat
+
+	var upstreamHits int
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"x"}]}`))
+	}, stub)
+
+	rec := httptest.NewRecorder()
+	req := anthropicDecisionRequest(t, "decision-group")
+	h.HandleAnthropicMessages(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (the decision group must be refused on the Anthropic route); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "decision_misroute") {
+		t.Errorf("the Anthropic envelope must carry the decision_misroute code, got %s", rec.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Errorf("the upstream was called for an Anthropic→decision-group misroute; hit count = %d", upstreamHits)
+	}
+}
+
+// TestAnthropicBoundary_DecisionGroupMisroute_ThroughCachedConfig — the
+// same refusal through the PRODUCTION models binding (the cached
+// decorator).
+func TestAnthropicBoundary_DecisionGroupMisroute_ThroughCachedConfig(t *testing.T) {
+	cached, cleanup := newCachedProxyModels(t, func(mgr *database.ModelsManager) {
+		if err := mgr.AddCredential(models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-1", Name: "Decision 1", Enabled: true,
+			Kind: models.KindDecision, Internal: true, InternalModel: "gpt-6-luna",
+			Credentials: []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}},
+		}); err != nil {
+			t.Fatalf("AddModel member: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "decision-group", Name: "Decision Group", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			Members: []models.GroupMember{{ModelID: "dec-1", Weight: 1}},
+		}); err != nil {
+			t.Fatalf("AddModel group: %v", err)
+		}
+	})
+	defer cleanup()
+
+	var upstreamHits int
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"x"}]}`))
+	}, cached)
+
+	rec := httptest.NewRecorder()
+	req := anthropicDecisionRequest(t, "decision-group")
+	h.HandleAnthropicMessages(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 through the cached config; body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Errorf("the upstream was called for an Anthropic→decision-group misroute; hit count = %d", upstreamHits)
+	}
 }
