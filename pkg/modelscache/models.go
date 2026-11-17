@@ -747,7 +747,7 @@ func (c *CachedModelsConfig) AddCredentialGroup(g models.CredentialGroupConfig) 
 		log.Printf("[WARN] [cache] AddCredentialGroup: re-read persisted row failed (%v) — mirroring caller value", err)
 		stored = &g
 		if stored.ID == "" {
-			log.Printf("[WARN] [cache] AddCredentialGroup: effective group id is empty — skipping mirror update")
+			log.Printf("[WARN] [cache] AddCredentialGroup: effective credential group id is empty — skipping mirror update")
 			return nil
 		}
 	}
@@ -797,7 +797,7 @@ func (c *CachedModelsConfig) UpdateCredentialGroup(id string, g models.Credentia
 			stored.ID = id
 		}
 		if stored.ID == "" {
-			log.Printf("[WARN] [cache] UpdateCredentialGroup: effective group id is empty — skipping mirror update")
+			log.Printf("[WARN] [cache] UpdateCredentialGroup: effective credential group id is empty — skipping mirror update")
 			return nil
 		}
 	}

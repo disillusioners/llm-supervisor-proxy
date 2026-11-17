@@ -811,7 +811,7 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 	// degrades to "group refs fail closed" (WARN + no members expanded)
 	// — never to a silent wrong list.
 	if err := m.rebuildCredentialGroupsCache(context.Background()); err != nil {
-		log.Printf("[WARN] [credential-groups] group cache rebuild failed at startup (%v) — group refs fail closed until the next rebuild", err)
+		log.Printf("[WARN] [credential-groups] credential group cache rebuild failed at startup (%v) — credential group refs fail closed until the next rebuild", err)
 	}
 
 	// Startup rebind: seed engine state for every persisted model so
@@ -2148,7 +2148,7 @@ func (m *ModelsManager) validateGroupAwareCredentialRefs(model models.ModelConfi
 		}
 		switch model.Kind {
 		case models.KindDecision, models.KindImageGen, models.KindGroup:
-			return fmt.Errorf("model %s: credentials[%d]: group refs are not allowed for kind %q", model.ID, idx, model.Kind)
+			return fmt.Errorf("model %s: credentials[%d]: credential group refs are not allowed for kind %q", model.ID, idx, model.Kind)
 		}
 	}
 
@@ -2189,7 +2189,7 @@ func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
 		}
 		switch model.Kind {
 		case models.KindDecision, models.KindImageGen, models.KindGroup:
-			return fmt.Errorf("model %s: credentials[%d]: group refs are not allowed for kind %q", model.ID, idx, model.Kind)
+			return fmt.Errorf("model %s: credentials[%d]: credential group refs are not allowed for kind %q", model.ID, idx, model.Kind)
 		}
 	}
 

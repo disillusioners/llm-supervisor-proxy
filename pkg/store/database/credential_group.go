@@ -464,7 +464,7 @@ func (m *ModelsManager) ModelsUsingCredentialGroupsAll() map[string][]string {
 
 	modelList, err := m.scanModels(m.qb.GetAllModels())
 	if err != nil {
-		log.Printf("[WARN] [credential-groups] model scan failed while computing group usage (%v) — the used_by map is empty", err)
+		log.Printf("[WARN] [credential-groups] model scan failed while computing credential group usage (%v) — the used_by map is empty", err)
 		return out
 	}
 	for _, mc := range modelList {
@@ -922,7 +922,7 @@ func credentialGroupSnapshotsEqual(cachedGroups map[string]models.CredentialGrou
 func (m *ModelsManager) fanOutCredentialGroupLocked(groupID string) {
 	modelList, err := m.scanModels(m.qb.GetAllModels())
 	if err != nil {
-		log.Printf("[WARN] [credential-groups] fan-out for group '%s' failed — model scan error: %v", groupID, err)
+		log.Printf("[WARN] [credential-groups] fan-out for credential group '%s' failed — model scan error: %v", groupID, err)
 		return
 	}
 	for i := range modelList {

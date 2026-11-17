@@ -569,7 +569,7 @@ func TestCredentialGroup_StoreValidation_GroupRules(t *testing.T) {
 		if err == nil {
 			t.Fatalf("AddModel(kind=%s) with a group ref returned nil error, want a rejection", kind)
 		}
-		if !strings.Contains(err.Error(), "group refs are not allowed") {
+		if !strings.Contains(err.Error(), "credential group refs are not allowed") {
 			t.Fatalf("AddModel(kind=%s) err = %q, want the R-5 rejection", kind, err.Error())
 		}
 	}

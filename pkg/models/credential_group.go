@@ -135,11 +135,11 @@ func ValidateCredentialRefs(refs []CredentialRef, groups interface{}, creds inte
 		}
 		if ref.IsGroupRef() {
 			if nonChat {
-				return fmt.Errorf("credentials[%d]: group refs not allowed for kind %q", idx, k)
+				return fmt.Errorf("credentials[%d]: credential group refs not allowed for kind %q", idx, k)
 			}
 			g, ok := gm[ref.GroupID]
 			if !ok {
-				return fmt.Errorf("credentials[%d]: group %q not found", idx, ref.GroupID)
+				return fmt.Errorf("credentials[%d]: credential group %q not found", idx, ref.GroupID)
 			}
 			// provider match
 			if primaryProvider != "" && strings.ToLower(g.Provider) != primaryProvider {
