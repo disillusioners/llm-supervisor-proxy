@@ -1059,6 +1059,8 @@ func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 	foundEnvelope := false
 	attemptedEvents := 0
 	suppressedEvents := 0
+	var failFastAttempted, failFastSkipped, failFastMembersAttempted int
+	foundFailFast := false
 	for _, ev := range env.events {
 		data := eventData(ev)
 		if data["outcome"] == "all_members_failed" {
@@ -1069,6 +1071,23 @@ func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 		}
 		if data["outcome"] == "member_suppressed" {
 			suppressedEvents++
+		}
+		// The fail-fast event carries the accounting counters.
+		if v, ok := data["attempted"]; ok {
+			if ai, ok := v.(int); ok {
+				failFastAttempted = ai
+				foundFailFast = true
+			}
+		}
+		if v, ok := data["skipped"]; ok {
+			if si, ok := v.(int); ok {
+				failFastSkipped = si
+			}
+		}
+		if v, ok := data["members_attempted"]; ok {
+			if mi, ok := v.(int); ok {
+				failFastMembersAttempted = mi
+			}
 		}
 	}
 	// With B1 fixed, a suppressed-only member prevents the exhaustion
@@ -1083,6 +1102,19 @@ func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 	}
 	if suppressedEvents != 1 {
 		t.Fatalf("member_suppressed events = %d, want 1", suppressedEvents)
+	}
+	// The fail-fast event carries the accounting counters (R4).
+	if !foundFailFast {
+		t.Fatalf("no fail-fast event carried the accounting counters")
+	}
+	if failFastAttempted != 1 {
+		t.Fatalf("fail-fast attempted = %d, want 1", failFastAttempted)
+	}
+	if failFastSkipped != 1 {
+		t.Fatalf("fail-fast skipped = %d, want 1", failFastSkipped)
+	}
+	if failFastMembersAttempted != 1 {
+		t.Fatalf("fail-fast members_attempted = %d, want 1", failFastMembersAttempted)
 	}
 }
 

@@ -218,7 +218,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			if !res.failure.advance {
 				// Client-attributable failure: the walk stops (the
 				// upstream's own failure is the answer).
-				h.failFastDecisionGroup(w, groupID, res)
+				h.failFastDecisionGroup(w, groupID, res, attempted, skipped, membersAttempted, startTime)
 				return
 			}
 			if res.failure.rotate {
@@ -253,7 +253,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, h.decisionMarkKey(headSuppressed.ID))
 				}
 				if !res.failure.advance {
-					h.failFastDecisionGroup(w, groupID, res)
+					h.failFastDecisionGroup(w, groupID, res, attempted, skipped, membersAttempted, startTime)
 					return
 				}
 				attempted++
@@ -269,7 +269,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 		// if a genuine failure exists, fail with that failure's error
 		// instead of the exhaustion envelope.
 		if hasSuppressedOnly && lastFailure != nil {
-			h.failFastDecisionGroup(w, groupID, *lastFailure)
+			h.failFastDecisionGroup(w, groupID, *lastFailure, attempted, skipped, membersAttempted, startTime)
 			return
 		}
 		h.exhaustDecisionGroup(w, groupID, attempted, skipped, membersAttempted, startTime)
@@ -348,11 +348,22 @@ func (h *Handler) exhaustDecisionGroup(w http.ResponseWriter, groupID string, at
 
 // failFastDecisionGroup relays a client-attributable upstream failure
 // (the walk stopped — the group did NOT exhaust).
-func (h *Handler) failFastDecisionGroup(w http.ResponseWriter, groupID string, res memberAttempt) {
+func (h *Handler) failFastDecisionGroup(w http.ResponseWriter, groupID string, res memberAttempt, attempted, skipped, membersAttempted int, startTime time.Time) {
 	status := http.StatusBadGateway
 	if res.failure != nil && res.failure.status != 0 {
 		status = res.failure.status
 	}
+	h.publishEvent(eventTypeDecision, map[string]interface{}{
+		"outcome":           res.failure.outcome,
+		"model":             groupID,
+		"member":            res.memberID,
+		"provider":          res.provider,
+		"upstream_status":   res.upstreamStatus,
+		"attempted":         attempted,
+		"skipped":           skipped,
+		"members_attempted": membersAttempted,
+		"duration_ms":       time.Since(startTime).Milliseconds(),
+	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if _, err := w.Write(res.body); err != nil {
