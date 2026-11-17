@@ -309,6 +309,26 @@ func IsRateLimitError(err error) bool {
 //	complaint, never a quota), "credit_balance_too_low" and
 //	"billing_error" (Anthropic-lane-only, no corpus instance).
 //
+// RUNTIME CONSEQUENCE of the drops (operator-facing — a body carrying a
+// dropped spelling now falls through the classifier ladder instead of
+// matching quota):
+//
+//	an HTTP 429 carrying one → RATE-LIMIT class (the body carries no
+//	  quota vocabulary, so the fallback ladder lands on the 429
+//	  status) → 60s / Retry-After cooldown, NOT the 15m quota
+//	  cooldown;
+//	any OTHER status carrying one (e.g. a 400) → not limit-class at
+//	  all → NO rotation and NO cooldown (a client-attributable 4xx
+//	  must never rotate or bench a credential — commission S-3);
+//	cosmetic: "insufficient credits" (space, plural) is still MATCHED —
+//	  the retained "insufficient credit" hits it via Contains. Only
+//	  the underscore spelling "insufficient_credits" is truly gone.
+//
+// The retained set is PINNED by TestQuotaVocabulary_IsLocked
+// (interface_quota_test.go): any future widen or narrow of the class
+// vocabulary must update that pin in the same change, so the policy
+// move is always deliberate.
+//
 // Observed live vocabulary (job 8d852270): HTTP 402 / code 2067 /
 // "Token Plan usage limit" — the code arrives as a NUMBER on the wire
 // (unparseable into the string-typed ErrorCode field), but the message
@@ -473,9 +493,10 @@ func IsQuotaMessage(text string) bool {
 //   - error-body code matches the quota vocabulary substring
 //     (case-insensitive), OR
 //   - error message carries one of the bounded quota phrases
-//     (case-insensitive) — "insufficient credit", "insufficient
-//     balance", "quota exceeded", "token plan usage limit", "token
-//     plan", "payment required", …
+//     (case-insensitive) — "insufficient credit", "quota exceeded",
+//     "token plan usage limit", "token plan", "payment required", …
+//     (dropped spellings such as "insufficient balance" no longer
+//     match — see the RUNTIME CONSEQUENCE note at the vocabulary)
 //
 // Why a message vocabulary at all: quota rejections arrive in
 // non-OpenAI body shapes from gateway upstreams, and the quota code is

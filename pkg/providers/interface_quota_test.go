@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -157,5 +158,111 @@ func TestHandleError_Quota402NumericCodeLeavesCodeEmpty(t *testing.T) {
 	}
 	if perr.RetryAfter != 0 {
 		t.Errorf("RetryAfter = %v, want 0 (Retry-After parsing is 429-only)", perr.RetryAfter)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestQuotaVocabulary_IsLocked — the vocabulary PIN (wi-4b8d21e7, closure
+// OBS-1).
+//
+// Round 2 NARROWED the quota-CLASS vocabulary to the evidence-backed
+// tokens (every dropped spelling lacked an observed corpus instance).
+// That narrowing is a DELIBERATE policy change with an operator-facing
+// consequence, not a no-op:
+//
+//   - an HTTP 429 carrying a dropped spelling ("insufficient balance",
+//     "credit exhausted", "out of credit", …) now classifies RATE-LIMIT
+//     (60s / Retry-After cooldown), NOT quota (15m) — the body carries
+//     no quota vocabulary, so the fallback ladder lands on the 429
+//     status;
+//   - any NON-429 carrying a dropped spelling is not limit-class at
+//     all → no rotation, no cooldown (a client-attributable 4xx must
+//     never rotate or bench a credential — commission S-3);
+//   - "insufficient credits" (space, plural) is still MATCHED via the
+//     retained "insufficient credit" (Contains) — only the underscore
+//     spelling "insufficient_credits" is gone.
+//
+// This pin locks the CURRENT set element-for-element so any future
+// widen or narrow is a conscious decision that updates this test in
+// the same change. The SCOPE vocabulary in pkg/modelcache is a
+// separate, deliberately broader list (class ⊂ scope) and is pinned
+// there, not here.
+// ─────────────────────────────────────────────────────────────────────────────
+func TestQuotaVocabulary_IsLocked(t *testing.T) {
+	wantStructured := []string{
+		"insufficient_credit",
+		"insufficient_quota",
+		"quota",
+		"payment_required",
+		"billing",
+		"resource_exhausted",
+	}
+	if !slices.Equal(quotaTypeVocabulary, wantStructured) {
+		t.Errorf("quotaTypeVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", quotaTypeVocabulary, wantStructured)
+	}
+	if !slices.Equal(quotaCodeVocabulary, wantStructured) {
+		t.Errorf("quotaCodeVocabulary = %q\nwant it to share the locked structured set %q\n—type and code fields must match the SAME vocabulary.", quotaCodeVocabulary, wantStructured)
+	}
+
+	wantMessage := []string{
+		"insufficient credit",
+		"quota exceeded",
+		"quota exhausted",
+		"token plan usage limit",
+		"token plan",
+		"payment required",
+		"your quota will reset",
+		"your limit will reset",
+		"exhausted your capacity",
+	}
+	if !slices.Equal(quotaMessageVocabulary, wantMessage) {
+		t.Errorf("quotaMessageVocabulary = %q\nwant (locked) %q\n—the quota-CLASS vocabulary changed. Widening benches a healthy credential for 15m; narrowing re-classifies live bodies. Make the change deliberate and update this pin.", quotaMessageVocabulary, wantMessage)
+	}
+
+	// The dropped spellings stay ABSENT from the list each used to live
+	// in (round-2 policy: no class token without an observed corpus
+	// instance).
+	for _, tok := range []string{
+		"insufficient balance",
+		"insufficient quota", // space spelling; the underscore TYPE token above stays
+		"exceeded your quota",
+		"credit exhausted",
+		"credits exhausted",
+		"out of credit",
+		"billing", // message spelling; the TYPE/CODE token above stays
+	} {
+		if slices.Contains(quotaMessageVocabulary, tok) {
+			t.Errorf("quotaMessageVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
+		}
+	}
+	for _, tok := range []string{
+		"credit_exhausted",
+	} {
+		if slices.Contains(quotaTypeVocabulary, tok) {
+			t.Errorf("quotaTypeVocabulary re-added dropped spelling %q — a re-added class token benches a healthy credential for 15m on any body that carries it; it needs corpus evidence AND this pin updated", tok)
+		}
+	}
+
+	// The exported aggregate must be exactly the locked union (15
+	// tokens) — pkg/modelcache's scope-subset invariant reads it.
+	want := append(append([]string{}, wantStructured...), wantMessage...)
+	got := QuotaVocabularyTokens()
+	if !slices.Equal(got, want) {
+		t.Errorf("QuotaVocabularyTokens() = %q (len %d)\nwant the locked 15-token union %q", got, len(got), want)
+	}
+
+	// The consequence, pinned EXECUTABLE (the header comment's ladder):
+	// a dropped spelling on a live body classifies by status fallback,
+	// never by the dropped text.
+	dropped429 := &ProviderError{StatusCode: 429, Message: "insufficient balance, please top up"}
+	if IsQuotaError(dropped429) {
+		t.Error("429 carrying the dropped spelling \"insufficient balance\" classified QUOTA — the round-2 narrowing regressed")
+	}
+	if !IsRateLimitError(dropped429) {
+		t.Error("429 carrying a dropped spelling must still classify RATE-LIMIT (60s/Retry-After), not nothing")
+	}
+	dropped400 := &ProviderError{StatusCode: 400, Message: "insufficient balance, please top up"}
+	if IsQuotaError(dropped400) || IsRateLimitError(dropped400) {
+		t.Error("400 carrying a dropped spelling must be limit-class NOWHERE — no rotation, no cooldown (commission S-3)")
 	}
 }

@@ -188,6 +188,26 @@ shipped.
 | a genuinely model-scoped body | **model** | **MARK** (30m cap) | — | — |
 | *(no observed body in this class — the vocabulary is empty)* | | | | |
 
+**The narrowed CLASS vocabulary is a deliberate policy change, not a
+no-op** (closure OBS-1, 2026-11-17). Round 2 dropped the unobserved
+spellings from the shared chat-lane class list
+(`pkg/providers/interface.go`): "insufficient balance", "insufficient
+quota" (space spelling), "exceeded your quota", "credit exhausted",
+"credits exhausted", "out of credit", the MESSAGE spelling "billing",
+and the TYPE spelling "credit_exhausted". Operator-facing consequence:
+an HTTP 429 carrying one of those spellings now classifies RATE-LIMIT
+(60s / Retry-After cooldown), not quota (15m) — the body carries no
+retained quota vocabulary, so the classifier ladder falls through to
+the 429 status; any OTHER status carrying one (e.g. a 400) is not
+limit-class at all — no rotation, no cooldown (the S-3 rule that a
+client-attributable 4xx never rotates or benches a credential).
+Cosmetic: "insufficient credits" (space, plural) is still matched via
+the retained "insufficient credit" (Contains) — it is NOT dropped in
+effect. The retained 15-token set is pinned by
+`TestQuotaVocabulary_IsLocked` (`pkg/providers/interface_quota_test.go`)
+— with the dropped spellings asserted ABSENT — so any future widen or
+narrow of the class vocabulary must touch that pin and be deliberate.
+
 ---
 
 ## 7. Phase B — the change table (final citations)
@@ -206,12 +226,38 @@ shipped.
 | the non-race twin | `pkg/proxy/internal_handler.go:282` | no model mark site (F-5) — the credential layer alone |
 | the read-only binding observation | `pkg/credentiallb/testhooks.go:119` (`BoundCredentialForTest`) | the observation seam for the two hash-binding pins |
 
-**The v197 pins still pass VERBATIM** — `ModelWall` (the wall-shape
-classifier) and the clamp/knob/never-shorten policy are untouched; the
-scope gate is a NEW function in front of them.
+**The v197 pins still hold — but not VERBATIM** (corrected, closure
+OBS-2, 2026-11-17). The ASSERTIONS survive — `ModelWall` (the
+wall-shape classifier) and the clamp/knob/never-shorten policy are
+untouched, and the scope gate is a NEW function in front of them — but
+the pin file changed shape on this branch: the five primitive pins were
+RENAMED `TestApplyWall_*` → `TestApplyWallPrimitive_*` (the primitive
+`applyWall` is now unexported behind the scope gate), and two of their
+fixtures (`NoResetUsesKnob`, `KnobAboveHardCeilingClamped`) were
+retargeted to a model-scoped body — the synthetic test-seam marker —
+so the wall-shape primitive is exercised on a body the scope layer
+would admit; the incident's ACCOUNT body is instead pinned REJECTED at
+the scoped entry point
+(`TestApplyScopedWall_AccountScopedBodiesNeverMark`, scope_test.go).
+No `-run` filter is voided by the rename: Go's `-run` element is an
+UNANCHORED regex, so `-run 'TestApplyWall'` still selects every renamed
+primitive (settled empirically 2026-11-17: 6 tests run — the five
+primitives plus the `TestApplyWall_NotExportedOutsidePackage` tripwire
+— all PASS; the round-2 reviewer's "silent vacuous green" claim was
+wrong).
 
 ## 8. Red-first evidence
 
 See the coder report (the round-2 re-proof) and the commit history: the
 acceptance tests are committed BEFORE the fix (`76ff867`), so the
 branch's own history carries the red→green transition.
+
+## 9. Staleness ledger (external notes — read-only, never edited here)
+
+- `.agents/tidier/notes.md:71` (a FOREIGN agent's dirty working file —
+  uncommitted, and never committed by this branch) still describes the
+  round-1 defect H2 ("`newlyBound` discarded with `_ = newlyBound`")
+  as LIVE; it is FIXED at HEAD — `grep -c newlyBound
+  pkg/proxy/quota_mint_scope_test.go` is 0, and the binding is observed
+  through the read-only hook `credentiallb.Engine.BoundCredentialForTest`
+  (`pkg/credentiallb/testhooks.go:119`) in both hash-binding pins.
