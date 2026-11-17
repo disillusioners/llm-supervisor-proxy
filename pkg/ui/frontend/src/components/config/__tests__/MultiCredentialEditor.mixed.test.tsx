@@ -198,7 +198,41 @@ describe('MultiCredentialEditor — mixed credential/group picker (T-F)', () => 
     // select value shows credential id
     const select = container.querySelector('select') as HTMLSelectElement;
     expect(select.value).toBe('cred-oai-1');
+    // Fire a real change so the emitted payload is inspected (discriminating):
+    // a plain credential row must NOT carry a group_id key.
+    const weightInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    fireEvent.input(weightInput, { target: { value: '3' } });
+    expect(onChange).toHaveBeenCalled();
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(Object.prototype.hasOwnProperty.call(last[0], 'group_id')).toBe(false);
   });
+
+  it('O10: group whose provider differs only in case is NOT disabled', () => {
+    const onChange = vi.fn();
+    const groupsCase = [
+      { id: 'group-oai-case', name: 'OpenAI Pool (mixed case)', provider: 'OpenAI', members: ['cred-oai-1'] },
+    ];
+    const { container } = render(
+      <MultiCredentialEditor
+        credentials={[
+          { credential_id: 'cred-oai-1', weight: 1, position: 0 },
+          { credential_id: '', weight: 1, position: 1 },
+        ]}
+        availableCredentials={creds}
+        availableGroups={groupsCase as any}
+        loading={false}
+        onChange={onChange}
+      />,
+    );
+    const selects = container.querySelectorAll('select');
+    const secondSelect = selects[1];
+    const groupOption = Array.from(secondSelect.querySelectorAll('option')).find(
+      (o) => o.getAttribute('value') === 'group-oai-case',
+    ) as HTMLOptionElement;
+    expect(groupOption).not.toBeNull();
+    expect(groupOption.disabled).toBe(false);
+  });
+
 
   it('warn-only: member-overlap hint renders', () => {
     const onChange = vi.fn();

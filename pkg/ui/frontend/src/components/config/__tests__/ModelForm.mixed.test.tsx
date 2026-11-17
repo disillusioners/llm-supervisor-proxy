@@ -102,8 +102,9 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
 
   it('G2: submit validation rejects empty row', async () => {
     const onSave = vi.fn();
+    const onStatus = vi.fn();
     const { container } = render(
-      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={vi.fn()} />,
+      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
     );
     await waitForCredsLoaded(container);
     // add a credential row
@@ -117,45 +118,21 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     const nameInput = container.querySelector('input[placeholder="e.g., GPT-4"]') as HTMLInputElement;
     fireEvent.input(nameInput, { target: { value: 'New Model' } });
     // submit
-    const saveBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent && b.textContent.toLowerCase().includes('save'),
-    );
-    if (saveBtn) fireEvent.click(saveBtn as HTMLElement);
-    // onSave should not be called due to validation
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
     await waitFor(() => {
-      // either onSave not called or status error shown
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('please select a credential or group') });
     });
-    expect(onSave).not.toHaveBeenCalled();
-  });
-
-  it('G2: submit validation rejects 9router group', async () => {
-    const onSave = vi.fn();
-    const { container } = render(
-      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={vi.fn()} />,
-    );
-    await waitForCredsLoaded(container);
-    const addCredBtn = Array.from(container.querySelectorAll('button')).find(
-      (b: any) => b.textContent && b.textContent.includes("+ Add credential"),
-    )!;
-    fireEvent.click(addCredBtn as HTMLElement);
-    const select = container.querySelector('select') as HTMLSelectElement;
-    fireEvent.change(select as HTMLSelectElement, { target: { value: "group-9r" } });
-    const idInput = container.querySelector('input[placeholder="e.g., gpt-4"]') as HTMLInputElement;
-    fireEvent.input(idInput, { target: { value: 'm-new' } });
-    const nameInput = container.querySelector('input[placeholder="e.g., GPT-4"]') as HTMLInputElement;
-    fireEvent.input(nameInput, { target: { value: 'New Model' } });
-    const saveBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent && b.textContent.toLowerCase().includes('save'),
-    );
-    if (saveBtn) fireEvent.click(saveBtn as HTMLElement);
-    await waitFor(() => {});
     expect(onSave).not.toHaveBeenCalled();
   });
 
   it('G2: submit validation rejects duplicate ref', async () => {
     const onSave = vi.fn();
+    const onStatus = vi.fn();
     const { container } = render(
-      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={vi.fn()} />,
+      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
     );
     await waitForCredsLoaded(container);
     const addCredBtn = Array.from(container.querySelectorAll('button')).find(
@@ -174,18 +151,21 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     const weightInputs = container.querySelectorAll('input[type="number"]');
     fireEvent.input(weightInputs[0], { target: { value: '1' } });
     fireEvent.input(weightInputs[1], { target: { value: '1' } });
-    const saveBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent && b.textContent.toLowerCase().includes('save'),
-    );
-    if (saveBtn) fireEvent.click(saveBtn as HTMLElement);
-    await waitFor(() => {});
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+    await waitFor(() => {
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('duplicate credential') });
+    });
     expect(onSave).not.toHaveBeenCalled();
   });
 
   it('G2: submit validation rejects weight < 1', async () => {
     const onSave = vi.fn();
+    const onStatus = vi.fn();
     const { container } = render(
-      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={vi.fn()} />,
+      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
     );
     await waitForCredsLoaded(container);
     const addCredBtn = Array.from(container.querySelectorAll('button')).find(
@@ -200,11 +180,13 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     fireEvent.input(idInput, { target: { value: 'm-new' } });
     const nameInput = container.querySelector('input[placeholder="e.g., GPT-4"]') as HTMLInputElement;
     fireEvent.input(nameInput, { target: { value: 'New Model' } });
-    const saveBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent && b.textContent.toLowerCase().includes('save'),
-    );
-    if (saveBtn) fireEvent.click(saveBtn as HTMLElement);
-    await waitFor(() => {});
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+    await waitFor(() => {
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('weight must be at least 1') });
+    });
     expect(onSave).not.toHaveBeenCalled();
   });
 
@@ -256,6 +238,88 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
       (b) => b.textContent && b.textContent.toLowerCase().includes('test'),
     ) as HTMLButtonElement;
     expect(testBtn.disabled).toBe(false);
+  });
+
+  it('C3: 9router-group guard reachable via edit-mode hydration', async () => {
+    const onStatus = vi.fn();
+    const onSave = vi.fn();
+    const initial: Model = {
+      id: 'm9r',
+      name: 'Nine Router Model',
+      fallback_chain: [],
+      truncate_params: [],
+      credentials: [{ credential_id: '', group_id: 'group-9r', weight: 1, position: 0 }],
+    } as any;
+    const { container } = render(
+      <ModelForm mode="edit" initialData={initial} onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
+    );
+    await waitForCredsLoaded(container);
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+    await waitFor(() => {
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('9router') });
+    });
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('O8: unknown group_id is a submit-time error', async () => {
+    const onStatus = vi.fn();
+    const onSave = vi.fn();
+    const initial: Model = {
+      id: 'm-unk',
+      name: 'Unknown Group Model',
+      fallback_chain: [],
+      truncate_params: [],
+      credentials: [{ credential_id: '', group_id: 'group-unknown', weight: 1, position: 0 }],
+    } as any;
+    const { container } = render(
+      <ModelForm mode="edit" initialData={initial} onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
+    );
+    await waitForCredsLoaded(container);
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+    await waitFor(() => {
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('not found') });
+    });
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('O11: expanded cap rejects a group with 16 members plus one more row', async () => {
+    const { getCredentialGroups } = await import('../../../hooks/useApi');
+    (getCredentialGroups as any).mockResolvedValueOnce([
+      { id: 'group-big', name: 'Big Pool', provider: 'openai', members: Array.from({ length: 16 }, (_, i) => `cred-${i}`) },
+    ]);
+    const onSave = vi.fn();
+    const onStatus = vi.fn();
+    const { container } = render(
+      <ModelForm mode="add" onSave={onSave} onCancel={vi.fn()} onStatus={onStatus} />,
+    );
+    await waitForCredsLoaded(container);
+    const addCredBtn = Array.from(container.querySelectorAll('button')).find(
+      (b: any) => b.textContent && b.textContent.includes("+ Add credential"),
+    )!;
+    // row 1: pick the big group
+    fireEvent.click(addCredBtn as HTMLElement);
+    const firstSelect = container.querySelector('select') as HTMLSelectElement;
+    fireEvent.change(firstSelect, { target: { value: 'group-big' } });
+    // row 2: one more direct/empty row
+    fireEvent.click(addCredBtn as HTMLElement);
+    const idInput = container.querySelector('input[placeholder="e.g., gpt-4"]') as HTMLInputElement;
+    fireEvent.input(idInput, { target: { value: 'm-new' } });
+    const nameInput = container.querySelector('input[placeholder="e.g., GPT-4"]') as HTMLInputElement;
+    fireEvent.input(nameInput, { target: { value: 'New Model' } });
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+    await waitFor(() => {
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('At most 16 credentials allowed') });
+    });
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it('validatedCredentials maps credential_id with ?? "" (plain list byte-identical)', async () => {

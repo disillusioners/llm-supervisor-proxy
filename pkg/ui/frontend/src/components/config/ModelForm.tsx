@@ -154,24 +154,28 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
   const [legacyCredentialNotice, setLegacyCredentialNotice] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const fetchCredentials = async () => {
       setLoadingCredentials(true);
       try {
         const creds = await getCredentials();
-        setCredentials(creds || []);
+        if (!cancelled) setCredentials(creds || []);
       } catch (e) {
-        console.error('Failed to fetch credentials:', e);
+        if (!cancelled) console.error('Failed to fetch credentials:', e);
       }
       try {
         const grps = await getCredentialGroups();
-        setGroups(grps || []);
+        if (!cancelled) setGroups(grps || []);
       } catch (e) {
-        console.error('Failed to fetch credential groups:', e);
+        if (!cancelled) console.error('Failed to fetch credential groups:', e);
       } finally {
-        setLoadingCredentials(false);
+        if (!cancelled) setLoadingCredentials(false);
       }
     };
-    fetchCredentials();
+    void fetchCredentials();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Time ticker for peak hour status (updates every 60 seconds)
@@ -322,8 +326,18 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       if (formData.credentials.length === 0) {
         throw new Error('Internal upstream requires at least one credential');
       }
-      if (formData.credentials.length > MAX_CREDENTIALS) {
-        throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed`);
+      // Binding cap is the EXPANDED credential list (R-4: <=16 after
+      // group expansion). Count raw rows would let 2 groups x 16 members
+      // slip through and be rejected by the store.
+      const expandedCount = formData.credentials.reduce((acc, row) => {
+        if (row.group_id) {
+          const g = groups.find((gr) => gr.id === row.group_id);
+          return acc + (g?.members?.length ?? 0);
+        }
+        return acc + 1;
+      }, 0);
+      if (expandedCount > MAX_CREDENTIALS) {
+        throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed (expanded count ${expandedCount})`);
       }
       const seen = new Set<string>();
       for (let i = 0; i < formData.credentials.length; i++) {
@@ -334,7 +348,10 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         // Resolve provider: credential → credentials.find; group → groups.find.
         if (row.group_id) {
           const g = groups.find((gr) => gr.id === row.group_id);
-          if (g?.provider === '9router') {
+          if (!g) {
+            throw new Error(`Credential row ${i + 1}: group "${row.group_id}" not found`);
+          }
+          if (g.provider === '9router') {
             throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
           }
         } else {
@@ -790,6 +807,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
             Cancel
           </button>
           <button
+            data-testid="model-form-submit"
             onClick={handleSubmit}
             class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-md transition-colors text-sm font-medium"
             disabled={!isValid || saving}

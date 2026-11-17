@@ -84,7 +84,7 @@ export function CredentialGroupForm({
         setError(`Member ${memberId} does not exist`);
         return;
       }
-      if (cred.provider !== provider) {
+      if (cred.provider.toLowerCase() !== provider.toLowerCase()) {
         setError(`Member ${memberId} is not a ${provider} credential`);
         return;
       }

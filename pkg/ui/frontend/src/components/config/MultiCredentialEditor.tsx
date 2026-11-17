@@ -94,7 +94,7 @@ export function MultiCredentialEditor({
       rowIndex > 0 &&
       primaryProvider &&
       credProvider &&
-      credProvider !== primaryProvider
+      credProvider.toLowerCase() !== primaryProvider.toLowerCase()
     ) {
       return {
         disabled: true,
@@ -118,7 +118,7 @@ export function MultiCredentialEditor({
       rowIndex > 0 &&
       primaryProvider &&
       group.provider &&
-      group.provider !== primaryProvider
+      group.provider.toLowerCase() !== primaryProvider.toLowerCase()
     ) {
       return {
         disabled: true,

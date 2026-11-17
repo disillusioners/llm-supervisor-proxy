@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useCallback } from 'preact/hooks';
 import { route } from 'preact-router';
 import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig } from '../types';
 import { ProxySettings } from './config/ProxySettings';
@@ -109,7 +109,7 @@ export function SettingsPage({
   const [wrapTarget, setWrapTarget] = useState<Model | null>(null);
 
   // Helper to add a toast
-  const addToast = (type: ToastData['type'], message: string, restartRequired?: boolean) => {
+  const addToast = useCallback((type: ToastData['type'], message: string, restartRequired?: boolean) => {
     const newToast: ToastData = {
       id: generateToastId(),
       type,
@@ -117,7 +117,7 @@ export function SettingsPage({
       restartRequired,
     };
     setToasts(prev => [...prev, newToast]);
-  };
+  }, []);
 
   // Helper to dismiss a toast
   const dismissToast = (id: string) => {
@@ -125,11 +125,11 @@ export function SettingsPage({
   };
 
   // Create a setStatus-like function for child components
-  const setStatusWrapper = (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => {
+  const setStatusWrapper = useCallback((status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => {
     if (status) {
       addToast(status.type, status.message, status.restartRequired);
     }
-  };
+  }, [addToast]);
 
   // Proxy Settings state
   const [port, setPort] = useState<number>(8089);

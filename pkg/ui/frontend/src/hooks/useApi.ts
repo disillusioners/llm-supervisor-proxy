@@ -959,6 +959,19 @@ export function useTokens() {
 // four explicit deletes are the canonical contract — see the
 // `useApi.ts` quadruple-delete sites (3 sibling hooks x 3 ops =
 // 9 sites) and the package test in useApiCredentials.test.ts.
+/**
+ * A status-bearing error. The credential-group flows branch on the HTTP
+ * status code; the message is for humans only.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+    this.name = 'ApiError';
+  }
+}
+
 export async function getCredentials(): Promise<Credential[]> {
   const res = await fetch('/fe/api/credentials');
   if (!res.ok) throw new Error('Failed to fetch credentials');
@@ -982,8 +995,8 @@ export async function createCredential(cred: Credential): Promise<Credential> {
     body: JSON.stringify(cred),
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to create credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to create credential', res.status);
   }
   invalidateModelCaches();
   return res.json();
@@ -996,8 +1009,8 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
     body: JSON.stringify(cred),
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to update credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to update credential', res.status);
   }
   invalidateModelCaches();
   return res.json();
@@ -1006,8 +1019,8 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
 export async function deleteCredential(id: string): Promise<void> {
   const res = await fetch(`/fe/api/credentials/${id}`, { method: 'DELETE' });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to delete credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to delete credential', res.status);
   }
   invalidateModelCaches();
 }
@@ -1034,19 +1047,6 @@ export async function deleteCredential(id: string): Promise<void> {
 // GUARDED, and every group mutation throws an ApiError that CARRIES
 // the HTTP status — the delete-block flow branches on the status code
 // (409 = referenced by ≥1 model), never on the message text.
-
-/**
- * A status-bearing error. The credential-group flows branch on the HTTP
- * status code; the message is for humans only.
- */
-export class ApiError extends Error {
-  readonly status: number;
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
-    this.name = 'ApiError';
-  }
-}
 
 /**
  * The operator-facing message for a blocked credential-group delete
@@ -1076,7 +1076,7 @@ export async function getCredentialGroups(): Promise<CredentialGroup[]> {
       res.status,
     );
   }
-  const data = await res.json();
+  const data = await res.json().catch(() => null);
   return Array.isArray(data) ? data : [];
 }
 

@@ -48,6 +48,7 @@ vi.mock('../CredentialsTab', async (importOriginal) => {
 
 let groups: CredentialGroup[] = [];
 let deleteCalls = 0;
+let groupFetches = 0;
 let deleteStatus = 204;
 const realFetch = globalThis.fetch;
 
@@ -62,6 +63,7 @@ beforeEach(() => {
   document.body.innerHTML = '';
   groups = [];
   deleteCalls = 0;
+  groupFetches = 0;
   deleteStatus = 204;
   captured.credentialsProps = null;
   (globalThis as { fetch: typeof fetch }).fetch = vi.fn(
@@ -81,6 +83,7 @@ beforeEach(() => {
         if (method === 'POST' || method === 'PUT') {
           return json(groups[0] || { id: 'pool-1' });
         }
+        groupFetches++;
         return json(groups);
       }
       if (url.includes('/fe/api/credentials')) {
@@ -341,5 +344,61 @@ describe('CredentialsContainer (credential-groups commission)', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-testid="credential-group-row-pool-1"]')).toBeNull();
     });
+  });
+
+  it('O6 — the 409 retry loop re-reads used_by and gives up after 3 attempts', async () => {
+    groups = [
+      {
+        id: 'pool-1',
+        name: 'OpenAI Pool',
+        provider: 'openai',
+        members: ['cred-oai-1'],
+        used_by: ['model-a'],
+      },
+    ];
+    const models: Model[] = [
+      {
+        id: 'model-a',
+        name: 'Model A',
+        enabled: true,
+        fallback_chain: [],
+        credentials: [{ credential_id: '', group_id: 'pool-1', weight: 1, position: 0 }],
+      },
+    ];
+    const onUpdateModel = vi.fn().mockResolvedValue(undefined);
+    const setStatusWrapper = vi.fn();
+    const { container } = renderContainer({ models, onUpdateModel, setStatusWrapper });
+
+    // Open the groups panel.
+    fireEvent.click(navButtons(container)[1]);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="credential-group-row-pool-1"]')).not.toBeNull();
+    });
+
+    // The delete is blocked (409) on EVERY attempt.
+    deleteStatus = 409;
+    fireEvent.click(container.querySelector('[data-testid="credential-group-delete-pool-1"]')!);
+    fireEvent.click(container.querySelector('[data-testid="credential-group-delete-confirm"]')!);
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="credential-group-blocked"]')).not.toBeNull();
+    });
+
+    const beforeFetches = groupFetches;
+    const beforeDeletes = deleteCalls;
+    setStatusWrapper.mockClear();
+    fireEvent.click(container.querySelector('[data-testid="credential-group-inline-delete"]')!);
+
+    await waitFor(() => {
+      // Terminal message after the 3rd attempt.
+      expect(setStatusWrapper).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'error', message: 'This credential group is still referenced by one or more models. Inline its members into those models, then delete the group.' }),
+      );
+    });
+
+    // 3 delete attempts total (this run added 3).
+    expect(deleteCalls - beforeDeletes).toBe(3);
+    // used_by is re-read between attempts (at least 3 group fetches).
+    expect(groupFetches - beforeFetches).toBeGreaterThanOrEqual(3);
   });
 });

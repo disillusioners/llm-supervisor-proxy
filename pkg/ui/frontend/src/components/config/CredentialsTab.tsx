@@ -48,18 +48,22 @@ export function CredentialsTab({ status, setStatus, groupMemberships }: Credenti
 
   // Fetch credentials on mount
   useEffect(() => {
+    let cancelled = false;
     const fetchCredentials = async () => {
       try {
         setLoading(true);
         const data = await getCredentials();
-        setCredentials(data || []);
+        if (!cancelled) setCredentials(data || []);
       } catch (e) {
-        setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to fetch credentials' });
+        if (!cancelled) setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to fetch credentials' });
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
-    fetchCredentials();
+    void fetchCredentials();
+    return () => {
+      cancelled = true;
+    };
   }, [setStatus]);
 
   const handleOpenAdd = () => {
