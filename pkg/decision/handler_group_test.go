@@ -1057,16 +1057,32 @@ func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 	}
 	env.drainEvents()
 	foundEnvelope := false
+	attemptedEvents := 0
+	suppressedEvents := 0
 	for _, ev := range env.events {
 		data := eventData(ev)
 		if data["outcome"] == "all_members_failed" {
 			foundEnvelope = true
+		}
+		if data["outcome"] == "member_attempted" {
+			attemptedEvents++
+		}
+		if data["outcome"] == "member_suppressed" {
+			suppressedEvents++
 		}
 	}
 	// With B1 fixed, a suppressed-only member prevents the exhaustion
 	// envelope from firing (the request fails with the genuine failure).
 	if foundEnvelope {
 		t.Fatalf("the exhaustion envelope must NOT fire when a member was only suppressed (never attempted)")
+	}
+	// Exact event-count accounting (R3): exactly one genuine attempt
+	// and exactly one suppressed attempt.
+	if attemptedEvents != 1 {
+		t.Fatalf("member_attempted events = %d, want 1 (the suppressed member must not be counted as attempted)", attemptedEvents)
+	}
+	if suppressedEvents != 1 {
+		t.Fatalf("member_suppressed events = %d, want 1", suppressedEvents)
 	}
 }
 
