@@ -132,7 +132,12 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 	var headCred models.ResolvedCredential
 	var lastFailure *memberAttempt
 	hasSuppressedOnly := false
-	dcGrantedMember := ""
+	// granted = the members that already received a D-C honest attempt
+	// in THIS request (the per-member latch; the per-request cap is
+	// derived from it — the FIRST fully-unavailable member in policy
+	// order gets the honest attempt, a LATER one is skipped
+	// zero-cost).
+	granted := make(map[string]bool, 1)
 
 	for idx := range order {
 		candidate := order[idx]
@@ -167,7 +172,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			triedPairs[pairKey] = true
 
 			wireModel := h.decisionMarkKey(candidate.ID)
-			suppressed, reason, honestAttempt := h.attemptSuppressed(candidate.ID, cred, wireModel, &dcGrantedMember)
+			suppressed, reason := h.attemptSuppressed(candidate.ID, cred, wireModel, granted)
 			if suppressed {
 				skipped++
 				hasSuppressedOnly = true
@@ -222,9 +227,12 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				return
 			}
 			if res.failure.rotate {
-				if honestAttempt {
-					break
-				}
+				// Rotation-eligible: the member's next credential is
+				// attempted before the walk advances (the member's own
+				// resilience is consumed first). When the member is
+				// FULLY unavailable, the per-member latch denies a
+				// second honest attempt — the attempt above was the
+				// member's ONE honest attempt (Q2).
 				h.rotateMemberCredential(candidate.ID, cred, res.failure.class)
 				continue
 			}
@@ -241,11 +249,14 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 		// attempted), the POLICY HEAD gets exactly one honest
 		// (unsuppressed) attempt — the pick stays policy.
 		if attempted == 0 && headSuppressed != nil {
+			// The honest attempt IS a real attempt: the accounting
+			// increments BEFORE it, so a client-attributable failure
+			// (the fail-fast below) reports it honestly (R-5).
+			attempted++
+			membersAttempted++
 			res := h.attemptDecisionMember(headSuppressed.ID, headCred, req, rawBody, r)
 			if res.failure == nil {
 				winner = &res
-				attempted++
-				membersAttempted++
 			} else {
 				lf := res
 				lastFailure = &lf
@@ -256,8 +267,6 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 					h.failFastDecisionGroup(w, groupID, res, attempted, skipped, membersAttempted, startTime)
 					return
 				}
-				attempted++
-				membersAttempted++
 			}
 		}
 	}
@@ -332,18 +341,26 @@ func (h *Handler) commitDecisionWinner(w http.ResponseWriter, groupID string, wi
 // machine code, no usage row, exactly ONE event.
 func (h *Handler) exhaustDecisionGroup(w http.ResponseWriter, groupID string, attempted, skipped, membersAttempted int, startTime time.Time) {
 	log.Printf("[decision] group=%s exhausted: %d attempted, %d skipped, %d members attempted", groupID, attempted, skipped, membersAttempted)
-	h.publishEvent(eventTypeDecision, map[string]interface{}{
-		"outcome":           "all_members_failed",
-		"model":             groupID,
-		"attempted":         attempted,
-		"skipped":           skipped,
-		"members_attempted": membersAttempted,
-		"upstream_status":   0,
-		"duration_ms":       time.Since(startTime).Milliseconds(),
-	})
+	h.publishEvent(eventTypeDecision, withDecisionAccounting(map[string]interface{}{
+		"outcome":         "all_members_failed",
+		"model":           groupID,
+		"upstream_status": 0,
+		"duration_ms":     time.Since(startTime).Milliseconds(),
+	}, attempted, skipped, membersAttempted))
 	h.openAIErrorWithCode(w, http.StatusBadGateway,
 		fmt.Sprintf("all decision group members failed (%d attempted)", attempted),
 		decisionAllMembersFailedCode)
+}
+
+// withDecisionAccounting merges the walk's accounting counters into an
+// event payload — the SINGLE SOURCE of the counter key spelling (the
+// fail-fast event and the exhaustion envelope both publish these three
+// keys through this one builder, so the two can never drift).
+func withDecisionAccounting(base map[string]interface{}, attempted, skipped, membersAttempted int) map[string]interface{} {
+	base["attempted"] = attempted
+	base["skipped"] = skipped
+	base["members_attempted"] = membersAttempted
+	return base
 }
 
 // failFastDecisionGroup relays a client-attributable upstream failure
@@ -353,17 +370,14 @@ func (h *Handler) failFastDecisionGroup(w http.ResponseWriter, groupID string, r
 	if res.failure != nil && res.failure.status != 0 {
 		status = res.failure.status
 	}
-	h.publishEvent(eventTypeDecision, map[string]interface{}{
-		"outcome":           res.failure.outcome,
-		"model":             groupID,
-		"member":            res.memberID,
-		"provider":          res.provider,
-		"upstream_status":   res.upstreamStatus,
-		"attempted":         attempted,
-		"skipped":           skipped,
-		"members_attempted": membersAttempted,
-		"duration_ms":       time.Since(startTime).Milliseconds(),
-	})
+	h.publishEvent(eventTypeDecision, withDecisionAccounting(map[string]interface{}{
+		"outcome":         res.failure.outcome,
+		"model":           groupID,
+		"member":          res.memberID,
+		"provider":        res.cred.Provider,
+		"upstream_status": res.upstreamStatus,
+		"duration_ms":     time.Since(startTime).Milliseconds(),
+	}, attempted, skipped, membersAttempted))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if _, err := w.Write(res.body); err != nil {
@@ -379,39 +393,53 @@ func (h *Handler) failFastDecisionGroup(w http.ResponseWriter, groupID string, r
 // as a skip (never a failure). The all-credentials-cooling case (the
 // member's own resilience) gets exactly ONE honest attempt: the cache
 // is never a failure oracle at any layer.
-func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredential, wireModel string, dcGranted *string) (bool, string, bool) {
+func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredential, wireModel string, granted map[string]bool) (bool, string) {
+	// The D-C escape is consulted FIRST (RC-1): engine COOLING is an
+	// unavailability source INDEPENDENT of the mark layers, so neither
+	// the nil-layer guard nor the "no mark" early return may hide it.
+	//
+	// The member-level symmetry (ADR-15's D-C): when EVERY credential
+	// of the member is unavailable — cooling OR marked in the upstream
+	// layer — the member gets exactly ONE honest attempt on its
+	// policy-first credential. The cache is never a failure oracle at
+	// any layer: a mark/cooling record cannot, by itself, remove the
+	// member's last attempt.
+	if h.memberFullyUnavailable(memberID) {
+		// Per-member latch (Q2): the SAME member must not get a second
+		// honest attempt across its rotation.
+		if granted[memberID] {
+			return true, "all_credentials_unavailable_already_granted"
+		}
+		// Per-request cap (Q1): the first fully-unavailable member in
+		// policy order gets the honest attempt; any LATER one is
+		// SKIPPED zero-cost (a real upstream attempt is already in
+		// flight — the cache can no longer be the sole cause of
+		// failure). The cap is about a DIFFERENT member — the same
+		// member is the latch's business (so the two guards stay
+		// independently observable).
+		for id := range granted {
+			if id != memberID {
+				return true, "all_credentials_unavailable_request_cap"
+			}
+		}
+		granted[memberID] = true
+		return false, "all_credentials_unavailable"
+	}
 	// No health layer wired ⇒ nothing can suppress an attempt (the
 	// lane degrades to "always attempt"; the demotion path still runs
 	// when a layer IS wired).
 	if h.suppression.upstream == nil && h.suppression.model == nil {
-		return false, "", false
+		return false, ""
 	}
 	marked := h.suppression.credentialMarked(cred.CredentialID, cred.Provider, wireModel)
 	modelMarked := h.suppression.modelMarked(memberID)
 	if !marked && !modelMarked {
-		return false, "", false
-	}
-	// The member-level symmetry (ADR-15's D-C): when EVERY credential
-	// of the member is unavailable — cooling OR marked in the
-	// upstream layer — the member gets exactly ONE honest attempt on
-	// its policy-first credential. The cache is never a failure oracle
-	// at any layer: a mark/cooling record cannot, by itself, remove
-	// the member's last attempt.
-	if h.memberFullyUnavailable(memberID) {
-		// Per-member latch + per-request cap (B2, rulings Q1+Q2):
-		// at most one honest attempt per member AND at most one per
-		// request (the first fully-unavailable member in policy order).
-		// A later fully-unavailable member is skipped zero-cost.
-		if *dcGranted != "" {
-			return true, "all_credentials_unavailable_already_granted", false
-		}
-		*dcGranted = memberID
-		return false, "all_credentials_unavailable", true
+		return false, ""
 	}
 	if modelMarked {
-		return true, "model_layer_mark", false
+		return true, "model_layer_mark"
 	}
-	return true, "upstream_layer_mark", false
+	return true, "upstream_layer_mark"
 }
 
 // memberFullyUnavailable reports whether EVERY credential of the member

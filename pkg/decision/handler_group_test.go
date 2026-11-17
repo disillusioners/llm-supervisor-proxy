@@ -831,7 +831,7 @@ func TestDecision_Group_401_RotatesWithinMember(t *testing.T) {
 			wireModel := "gpt-6-luna"
 			return models.ResolvedCredential{
 				Provider:      "openai",
-				APIKey:        "sk-cred",
+				APIKey:        "sk-" + credID,
 				BaseURL:       env.upstreams[id].URL,
 				InternalModel: wireModel,
 				CredentialID:  credID,
@@ -1116,6 +1116,109 @@ func TestDecision_Group_Exhaustion_ExcludesSuppressedAttempts(t *testing.T) {
 	if failFastMembersAttempted != 1 {
 		t.Fatalf("fail-fast members_attempted = %d, want 1", failFastMembersAttempted)
 	}
+
+	// R-4: the EXHAUSTION ENVELOPE's payload carries the same
+	// accounting counters (the shared builder — the two payloads can
+	// never drift).
+	t.Run("exhaustion_envelope_counters", func(t *testing.T) {
+		cache := skipcache.New()
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+			{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+
+		rec := env.send(t)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502 (the exhaustion envelope); body=%s", rec.Code, rec.Body.String())
+		}
+		env.drainEvents()
+		found := false
+		var attempted, skipped, membersAttempted int
+		for _, ev := range env.events {
+			data := eventData(ev)
+			if data["outcome"] != "all_members_failed" {
+				continue
+			}
+			found = true
+			if v, ok := data["attempted"].(int); ok {
+				attempted = v
+			}
+			if v, ok := data["skipped"].(int); ok {
+				skipped = v
+			}
+			if v, ok := data["members_attempted"].(int); ok {
+				membersAttempted = v
+			}
+		}
+		if !found {
+			t.Fatalf("the exhaustion envelope event was not published")
+		}
+		if attempted != 2 {
+			t.Fatalf("exhaustion attempted = %d, want 2", attempted)
+		}
+		if skipped != 0 {
+			t.Fatalf("exhaustion skipped = %d, want 0", skipped)
+		}
+		if membersAttempted != 2 {
+			t.Fatalf("exhaustion members_attempted = %d, want 2", membersAttempted)
+		}
+	})
+
+	// R-5: the CLIENT-ATTRIBUTABLE fail-fast path reports the honest
+	// attempt it made — the accounting is hoisted BEFORE the attempt,
+	// so the fail-fast can never under-report it.
+	t.Run("client_attributable_counters", func(t *testing.T) {
+		cache := skipcache.New()
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 400, Body: decisionErrorBody("bad_request", "invalid_request_error", "bad request"), ExtraCredentialIDs: []string{"cred-dec-a-2"}},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		// Mark ONLY cred-dec-a: the member is suppressed (it still has
+		// a usable credential), so the OQ-1 lift grants the head its
+		// ONE honest attempt — which the upstream answers with a
+		// client-attributable 400.
+		cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
+
+		rec := env.send(t)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (the client-attributable fail-fast); body=%s", rec.Code, rec.Body.String())
+		}
+		env.drainEvents()
+		var attempted, skipped, membersAttempted int
+		found := false
+		for _, ev := range env.events {
+			data := eventData(ev)
+			if v, ok := data["attempted"]; ok {
+				if ai, ok := v.(int); ok {
+					attempted = ai
+					found = true
+				}
+			}
+			if v, ok := data["skipped"]; ok {
+				if si, ok := v.(int); ok {
+					skipped = si
+				}
+			}
+			if v, ok := data["members_attempted"]; ok {
+				if mi, ok := v.(int); ok {
+					membersAttempted = mi
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("the fail-fast event did not carry the accounting counters")
+		}
+		if attempted != 1 {
+			t.Fatalf("fail-fast attempted = %d, want 1 (the honest attempt is a real attempt)", attempted)
+		}
+		if skipped != 1 {
+			t.Fatalf("fail-fast skipped = %d, want 1", skipped)
+		}
+		if membersAttempted != 1 {
+			t.Fatalf("fail-fast members_attempted = %d, want 1", membersAttempted)
+		}
+	})
 }
 
 // TestDecision_Group_WinClear_ClearsWinnerNotFailedHead — the WINNER's
@@ -1334,6 +1437,179 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 		})
 	})
 
+	// RC-1: the COOLING-ONLY shape — the member's credentials are
+	// unavailable through the credential ENGINE's cooldown (zero
+	// marks). The D-C escape must apply here too (the cooling shape
+	// is the routinely-reachable one: a quota cooldown is 15m against
+	// a 60s mark TTL, and a 401/403 rotation cools without writing
+	// any mark).
+	t.Run("cooling_only_latch", func(t *testing.T) {
+		cache := skipcache.New()
+		engine := newStubCredEngine()
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down"), InternalModel: "model-a", ExtraCredentialIDs: []string{"cred-dec-a-2"}},
+			{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody(), InternalModel: "model-b"},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		env.handler.SetCredentialEngine(engine)
+		// BOTH credentials COOLING (engine cooldown) — ZERO marks.
+		engine.excluded["dec-a|cred-dec-a"] = true
+		engine.excluded["dec-a|cred-dec-a-2"] = true
+
+		rotated := false
+		env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+			if id != "dec-a" && id != "dec-b" {
+				return models.ResolvedCredential{}, false
+			}
+			credID := "cred-" + id
+			if id == "dec-a" && rotated {
+				credID = "cred-dec-a-2"
+			}
+			wireModel := "model-a"
+			if id == "dec-b" {
+				wireModel = "model-b"
+			}
+			return models.ResolvedCredential{
+				Provider:      "openai",
+				APIKey:        "sk-" + credID,
+				BaseURL:       env.upstreams[id].URL,
+				InternalModel: wireModel,
+				CredentialID:  credID,
+			}, true
+		})
+		engine.onExclude = func(modelID, credID string) {
+			if modelID == "dec-a" {
+				rotated = true
+			}
+		}
+
+		rec := env.send(t)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		// EXACTLY ONE upstream hit: the cooling shape gets ONE honest
+		// attempt — the AM-4 rotation must NOT re-fire the escape (a
+		// second call on a cooling credential is a billed call).
+		if env.hitsFor("dec-a") != 1 {
+			t.Fatalf("the D-C escape must grant exactly ONE honest attempt for the cooling shape, got %d hits", env.hitsFor("dec-a"))
+		}
+		// On the POLICY-FIRST credential.
+		if got := env.fakes["dec-a"].lastAuthH; got != "Bearer sk-cred-dec-a" {
+			t.Fatalf("the honest attempt must use the member's POLICY-FIRST credential, got %q", got)
+		}
+	})
+
+	// R-2(b): the PER-MEMBER latch alone — the SAME member must not
+	// get a second honest attempt across its rotation.
+	t.Run("per_member_latch", func(t *testing.T) {
+		cache := skipcache.New()
+		engine := newStubCredEngine()
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down"), InternalModel: "model-a", ExtraCredentialIDs: []string{"cred-dec-a-2"}},
+			{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody(), InternalModel: "model-b"},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		env.handler.SetCredentialEngine(engine)
+		engine.excluded["dec-a|cred-dec-a"] = true
+		engine.excluded["dec-a|cred-dec-a-2"] = true
+
+		rotated := false
+		env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+			if id != "dec-a" && id != "dec-b" {
+				return models.ResolvedCredential{}, false
+			}
+			credID := "cred-" + id
+			if id == "dec-a" && rotated {
+				credID = "cred-dec-a-2"
+			}
+			wireModel := "model-a"
+			if id == "dec-b" {
+				wireModel = "model-b"
+			}
+			return models.ResolvedCredential{
+				Provider:      "openai",
+				APIKey:        "sk-" + credID,
+				BaseURL:       env.upstreams[id].URL,
+				InternalModel: wireModel,
+				CredentialID:  credID,
+			}, true
+		})
+		engine.onExclude = func(modelID, credID string) {
+			if modelID == "dec-a" {
+				rotated = true
+			}
+		}
+
+		rec := env.send(t)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		// The rotation DID re-offer the member's second credential …
+		if !rotated {
+			t.Fatalf("the limit-class failure must rotate the member's credential (the latch must be what stops the second attempt)")
+		}
+		// … and the latch denied the SECOND honest attempt on it.
+		if env.hitsFor("dec-a") != 1 {
+			t.Fatalf("the per-member latch must deny a second honest attempt, got %d hits", env.hitsFor("dec-a"))
+		}
+	})
+
+	// R-2(a) + R-6: the PER-REQUEST cap alone — a LATER fully-unavailable
+	// member is SKIPPED with ZERO upstream calls once a real attempt is
+	// in flight (the cache can no longer be the sole cause of failure).
+	t.Run("per_request_cap_zero_cost_skip", func(t *testing.T) {
+		cache := skipcache.New()
+		engine := newStubCredEngine()
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down"), InternalModel: "model-a", ExtraCredentialIDs: []string{"cred-dec-a-2"}},
+			{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down"), InternalModel: "model-b", ExtraCredentialIDs: []string{"cred-dec-b-2"}},
+			{ID: "dec-c", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody(), InternalModel: "model-c"},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		env.handler.SetCredentialEngine(engine)
+		// BOTH members fully unavailable (all their credentials cooling).
+		engine.excluded["dec-a|cred-dec-a"] = true
+		engine.excluded["dec-a|cred-dec-a-2"] = true
+		engine.excluded["dec-b|cred-dec-b"] = true
+		engine.excluded["dec-b|cred-dec-b-2"] = true
+
+		rec := env.send(t)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		// The FIRST fully-unavailable member (policy order) got the one
+		// honest attempt …
+		if env.hitsFor("dec-a") != 1 {
+			t.Fatalf("the first fully-unavailable member must get exactly ONE honest attempt, got %d hits", env.hitsFor("dec-a"))
+		}
+		// … and the LATER fully-unavailable member was skipped with
+		// ZERO upstream calls (the per-request cap).
+		if env.hitsFor("dec-b") != 0 {
+			t.Fatalf("a later fully-unavailable member must be skipped with ZERO upstream calls, got %d hits", env.hitsFor("dec-b"))
+		}
+		// The zero-cost skip is OBSERVABLE in the event stream.
+		env.drainEvents()
+		suppressedLater := false
+		for _, ev := range env.events {
+			data := eventData(ev)
+			if data["outcome"] == "member_suppressed" {
+				if member, ok := data["member"].(string); ok && member == "dec-b" {
+					suppressedLater = true
+				}
+			}
+		}
+		if !suppressedLater {
+			t.Fatalf("the later fully-unavailable member must publish a member_suppressed event")
+		}
+		// The winner's own call is the only other upstream call.
+		if env.hitsFor("dec-c") != 1 {
+			t.Fatalf("the healthy member must serve, got %d hits", env.hitsFor("dec-c"))
+		}
+		if env.totalHits() != 2 {
+			t.Fatalf("only the one honest attempt and the winner may reach an upstream, got %d total hits", env.totalHits())
+		}
+	})
+
 	t.Run("limit_class_latch", func(t *testing.T) {
 		// B2: a LIMIT-CLASS failure on the D-C escape's single honest
 		// attempt must END the member (no rotation, no second escape).
@@ -1365,7 +1641,7 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 			}
 			return models.ResolvedCredential{
 				Provider:      "openai",
-				APIKey:        "sk-cred",
+				APIKey:        "sk-" + credID,
 				BaseURL:       env.upstreams[id].URL,
 				InternalModel: wireModel,
 				CredentialID:  credID,
