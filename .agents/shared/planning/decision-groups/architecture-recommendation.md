@@ -489,6 +489,16 @@ is behind. Verified directly (`git log origin/latest`, `git diff --stat 24c51ef.
   guard is implementable with no `gh`. Baseline run time 9-13 min; stall = no step transition ≥30
   min. `docker-ci.yml:6-8` declares `workflow_dispatch` ⇒ the plan's "Actions-UI retry rebuilds
   nothing" claim is **false** — a manual run is a first-class recovery path.
+  > **⚠️ SUPERSEDED (2026-11-16, corpus B1 correction — the content above is RETAINED as the
+  > architect's original advice, NOT as current guidance): a `workflow_dispatch` run is
+  > **COMPILE-ONLY and can NEVER publish** — every publish step in `docker-ci.yml` is gated on
+  > `github.event_name == 'push'` (`:110/:117/:121/:136/:153`). The corrected CI-recovery ladder is:
+  > **rung 1** = re-run the ORIGINAL push-triggered run (admin-only, with user handoff);
+  > **rung 2** = a **non-zero-delta CONTENT retrigger** (a one-line content commit touching a path
+  > inside `docker-ci.yml`'s `on.push.paths` filter ⇒ `**` minus `!.git/**` ⇒ any tracked file
+  > outside `.git/` → `--no-ff` latest → `--no-ff` master), because a true **empty** commit has an
+  > **empty changed-file set ⇒ `on.push.paths` fires NOTHING ⇒ no event, no build, no publish**
+  > (`docker-ci.yml:4-5`). See `phase3-plan.md` § Ship runbook step 3 (rungs 1–2) and risk row R6.
 - **Marker (measured):** `decision_all_members_failed` = **0 hits on BOTH the v193 (`b11d7c8`) and
   v194 (`fd1649c`) cached binaries** → recommended blocking marker; plus a dedicated
   `const GroupLaneMarker = "decision_groups_lane_v1"` as a rename-proof secondary. `skip` is a

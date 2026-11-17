@@ -1019,22 +1019,80 @@ done
 # ALL 48 promised case ids are enumerated (the 45 new-file cases A1–E8 plus the
 # 3 updated-file cases T1/F1/V1); each is grepped with a title-anchored pattern
 # so a file name or a passing neighbour can never satisfy another case's token:
-cat > "$LOGDIR/expected_fe_case_tokens.txt" <<'EOF'
-A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13
-B1 B2 B3 B4 B5 B6 B7 B9
-C1 C2 C3 C4 C5 C6 C7
-D1 D2 D3 D4 D5 D6 D8 D9 D10
-E1 E2 E3 E4 E5 E6 E7 E8
-T1 F1 V1
+# FILE-SCOPED census (tester AMBER): the token list carries the FILE the phase-2
+# contract assigns to each token, and each token is censused ONLY within that
+# file's own log lines. WHY: upstream's credential-groups commission reused the
+# A1-A13 / B1-C7 / D1-D4 / E1-E3 label space in 5 of THEIR files, so 35 of our
+# tokens match 2-3 lines in a WHOLE-LOG census. OUR contract still holds — each
+# of our 48 tokens has exactly ONE line across OUR 8 files — so the correct
+# check is the file-scoped one, not a rename.
+cat > "$LOGDIR/expected_fe_case_tokens.tsv" <<'EOF'
+A1	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A2	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A3	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A4	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A5	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A6	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A7	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A8	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A9	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A10	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A11	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A12	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+A13	pkg/ui/frontend/src/components/config/__tests__/DecisionModelsContainer.test.tsx
+B1	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B2	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B3	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B4	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B5	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B6	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B7	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+B9	pkg/ui/frontend/src/components/config/__tests__/GroupModelsTab.decisionLane.test.tsx
+C1	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C2	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C3	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C4	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C5	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C6	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+C7	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.decisionLane.test.tsx
+D1	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D2	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D3	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D4	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D5	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D6	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D8	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D9	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+D10	pkg/ui/frontend/src/components/config/__tests__/GroupModelForm.decisionLane.test.tsx
+E1	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E2	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E3	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E4	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E5	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E6	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E7	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+E8	pkg/ui/frontend/src/components/config/__tests__/groupLane.test.ts
+T1	pkg/ui/frontend/src/components/config/__tests__/GroupMemberEditor.test.tsx
+F1	pkg/ui/frontend/src/components/__tests__/EventLog.test.tsx
+V1	pkg/ui/frontend/src/components/config/__tests__/DecisionModelForm.test.tsx
 EOF
-for tok in $(cat "$LOGDIR/expected_fe_case_tokens.txt"); do
-  grep -Eq "[^A-Za-z0-9]${tok}[^A-Za-z0-9]*[—:-]" "$LOGDIR/fe_vitest.log" \
-    && echo "OK   FE case $tok" || echo "MISS FE case $tok"
-done
+while IFS="$(printf '\t')" read -r tok f; do
+  [ -n "$tok" ] || continue
+  # vitest prints paths RELATIVE to pkg/ui/frontend/ (e.g. `src/components/...`),
+  # while the TSV carries repo-root-absolute paths — strip the prefix so the
+  # file filter matches (tester-reproduced: unstripped ⇒ OK=0/MISS=48 on a green
+  # log — a FALSE STOP; stripped ⇒ OK=48/MISS=0).
+  rel="${f#pkg/ui/frontend/}"
+  n=$(grep -F "$rel" "$LOGDIR/fe_vitest.log" | grep -Ec "[^A-Za-z0-9]${tok}[^A-Za-z0-9]*[—:-]")
+  if [ "$n" -eq 1 ]; then echo "OK   FE case $tok (file-scoped, $n hit)"
+  else echo "MISS FE case $tok (file-scoped, $n hits — expected exactly 1)"; fi
+done < "$LOGDIR/expected_fe_case_tokens.tsv"
 # (the pattern requires the token as a WHOLE WORD followed by the title's
 #  separator — an A1 hit can never satisfy A10, and a file path can never
-#  satisfy a case id. `MISS` on any token ⇒ the case was not run or the naming
-#  contract was broken — either way the gate fails.)
+#  satisfy a case id. The census is FILE-SCOPED so an upstream commission's
+#  reuse of the same label space in ITS files cannot inflate our counts.
+#  `MISS` — or a count != 1 — on any token ⇒ the case was not run, ran twice,
+#  or the naming contract was broken ⇒ the gate fails.)
 grep -v '=== RUN' "$LOGDIR/A.log" | grep -E '^(--- |ok |FAIL|PASS)' | tail -40
 
 # ── step 7: build + vet + import guards ─────────────────────────────────────
@@ -1269,7 +1327,7 @@ A master push builds the image (CI publishes only on a master push). **Version =
 2. **Autonomous fallback — NON-ZERO-DELTA CONTENT RETRIGGER (house-proven pattern, wi-7769a812):** a **one-line CONTENT commit** (a non-empty diff — **NOT** `--allow-empty`) touching a path **inside `docker-ci.yml`'s `on.push.paths` filter**, then `--no-ff` merge into `latest` → `--no-ff` promotion to `master` → push. **The filter is `'**'` minus `!.git/**`** (`docker-ci.yml:13-16`) ⇒ **any** tracked file outside `.git/` satisfies it; the house-proven choice is a one-line append to a **tracked** path, e.g. the on-branch corpus file `.agents/shared/planning/decision-groups/phase3-plan.md` (the `.agents/` commit convention tracks these), or any other benign tracked file. **WHY the empty commit CANNOT work:** a true empty commit has an **empty changed-file set** ⇒ **`on.push.paths` fires NOTHING** ⇒ **no event, no build, no publish** — stated by the workflow itself (`docker-ci.yml:4-5`) and by this runbook above; a `--allow-empty` retrigger is therefore **useless** (it is the exact trap this rung previously encoded). The non-zero-delta commit ⇒ a **push event fires** ⇒ the publish steps run (they are gated on `github.event_name == 'push'`) ⇒ a **per-SHA tag** exists for step 5's digest verify. It is a **documented CI-stall EMERGENCY EXCEPTION to the promotion-only master invariant** — use it only when the fast path is unavailable (no admin) and a stall is blocking ship. **The retrigger commit is INTENTIONAL and must NOT be "cleaned up" or reverted afterward** — reverting it would emit another push event and trigger another build; record it in the ship evidence like any other commit.
 3. Both paths end in a push event ⇒ publish ⇒ per-SHA tag; only then does step 5's digest verify apply. A compile-only dispatch run is **never** sufficient evidence of a publish.
 
-| `W4` | CI recovery ladder (B1): re-run first (admin-only fast path, user handoff), empty-commit retrigger as the autonomous emergency fallback |
+| `W4` | CI recovery ladder (B1): **rung 1** = re-run the ORIGINAL push-triggered run (admin-only fast path, user handoff); **rung 2** = **non-zero-delta content retrigger** (see the rung-2 text above) — a `workflow_dispatch` run is **COMPILE-ONLY and NEVER publishes** (every publish step is gated on `github.event_name == 'push'`) |
 
 **CI green ≠ gate green.** `docker-ci.yml:104` swallows Go-test failures and the workflow gates neither Go tests nor the FE. The § Execution order local gate remains the authority.
 
@@ -1498,7 +1556,7 @@ Both must carry a one-line `**Verdict GO**` (or NO-GO) and name the deploy scope
 | R3 | **Anti-vacuous MISS** (an added test never shows `--- PASS`) | CRITICAL | **STOP.** The gate proved nothing about that behaviour. | branch unpushed |
 | R4 | **gofmt NEW drift non-empty** | MEDIUM | Fix the **specific** files (never a repo-wide `-w`); re-run § Execution order step 4. | branch unpushed |
 | R5 | **Quarantined flake fires** | LOW | Adjudicate: 3 isolated re-runs; record attempts in the RESULTS report; cite the QUARANTINE row. A different signature ⇒ treat as R1. | unchanged |
-| R6 | **CI run does not appear within 5 min** | MEDIUM | Apply the **B1 recovery ladder**: (1) re-run the original push-triggered run — admin-only, hand off to the user/leader with the run URL; (2) if no admin is available and ship is blocked, the **empty-commit retrigger to master** (the documented CI-stall emergency exception; the commit is intentional and must not be cleaned up). **A `workflow_dispatch` run cannot publish** — never treat a compile-only dispatch as evidence of a publish. Do **not** ship an unbuilt sha. | both hosts untouched at the live release |
+| R6 | **CI run does not appear within 5 min** | MEDIUM | Apply the **B1 recovery ladder**: (1) re-run the ORIGINAL push-triggered run — admin-only, hand off to the user/leader with the run URL; (2) if no admin is available and ship is blocked, the **non-zero-delta CONTENT retrigger** (a one-line content commit touching a path inside `docker-ci.yml`'s `on.push.paths` filter → `--no-ff` latest → `--no-ff` master — see the rung-2 text above). **The empty-commit / `--allow-empty` variant CANNOT publish**: a true empty commit has an **empty changed-file set** ⇒ **`on.push.paths` fires NOTHING** ⇒ **no event, no build, no publish** (`docker-ci.yml:4-5`) — do **not** use it (the documented CI-stall emergency exception; the commit is intentional and must not be cleaned up). **A `workflow_dispatch` run cannot publish** — never treat a compile-only dispatch as evidence of a publish. Do **not** ship an unbuilt sha. | both hosts untouched at the live release |
 | R7 | **CI build stalls (>30 min, no progress)** | HIGH | **REPORT THE STALL** (run URL + status timeline) and abort the deploy. Do **not** wait silently (run #190 precedent: 6 h hang, admin-only re-run). | both hosts untouched at v193; branch already merged (recoverable by a follow-up promotion) |
 | R8 | **Digest mismatch** (`layer digest verified = NO`, or the revision label ≠ the promoted sha) | CRITICAL | **STOP** — never deploy an image that is not the reviewed code. | both hosts untouched at v193 |
 | R9 | **Primary marker absent** (`decision_all_members_failed` count = 0) | CRITICAL | **STOP.** The image does not contain the feature. Secondary `GroupLane` is corroborating only. | both hosts untouched at v193 |
