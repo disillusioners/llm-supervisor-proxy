@@ -994,6 +994,8 @@ func TestRaceCoordinator_SecondaryFlagSetOnSecondRequest(t *testing.T) {
 	if !secondReq.UseSecondaryUpstream() {
 		t.Error("Second request should have useSecondaryUpstream=true")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_MainRequestHasSecondaryFlagFalse tests that main requests
@@ -1023,6 +1025,8 @@ func TestRaceCoordinator_MainRequestHasSecondaryFlagFalse(t *testing.T) {
 	if mainReq.UseSecondaryUpstream() {
 		t.Error("Main request should have useSecondaryUpstream=false")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse tests that fallback requests
@@ -1052,6 +1056,8 @@ func TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse(t *testing.T) {
 	if fallbackReq.UseSecondaryUpstream() {
 		t.Error("Fallback request should have useSecondaryUpstream=false")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_AllRequestTypes tests that all three request types are
@@ -1109,6 +1115,8 @@ func TestRaceCoordinator_AllRequestTypes(t *testing.T) {
 	if coord.requests[2].UseSecondaryUpstream() {
 		t.Error("Fallback request should have useSecondaryUpstream=false")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_UseSecondaryUpstreamFlagAccessible tests that the
@@ -1263,6 +1271,8 @@ func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
 	// The key insight is that the SECONDARY model should NOT be affected by peak hours
 	// because the secondary logic is in executeInternalRequest(, false, false), not ResolveInternalConfig()
 	// So when useSecondaryUpstream=true, it uses SecondaryUpstreamModel, not PeakHourModel
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_PeakHourModelOnly_NoSecondary tests that when peak hours
@@ -1331,6 +1341,8 @@ func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
 	if !secondReq.UseSecondaryUpstream() {
 		t.Error("Second request should have useSecondaryUpstream=true")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_SecondaryOverridesPeakHour verifies that the secondary
@@ -1407,6 +1419,8 @@ func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
 	if !secondReq.UseSecondaryUpstream() {
 		t.Error("Second request should have useSecondaryUpstream=true")
 	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
 
 // TestRaceCoordinator_NoPeakHour_UsesInternalModel tests that when peak hours
@@ -1462,5 +1476,38 @@ func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
 	}
 	if !secondReq.UseSecondaryUpstream() {
 		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
+}
+
+// joinSpawnedExecutors waits (bounded, 2s) for every executor spawned by
+// coord.spawn() to reach a terminal state. spawn() launches its executor
+// fire-and-forget (race_coordinator.go:561, `go c.execute(req)`), and
+// execute() re-resolves the package-level newProviderClient seam
+// (race_executor.go:45) on every attempt — an unjoined executor can still
+// be reading that global AFTER the test returns, while the NEXT test's
+// setup writes its own override there: a cross-test race-detector
+// exposure. Calling this at the end of a test keeps its spawned work
+// inside the test. Mirrors the joinExecutors closure in
+// race_coordinator_credfailover_test.go (same polling shape); this is the
+// package-level twin so the coordinator tests can share it.
+//
+// Pre-existing upstream defect (write side landed in 8efd770, 2026-10-19);
+// joined here to unblock the proxy race pack for every lane. Test-only.
+func joinSpawnedExecutors(c *raceCoordinator) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		allDone := true
+		for _, r := range c.requests {
+			if !r.IsDone() {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
