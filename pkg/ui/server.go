@@ -85,6 +85,40 @@ type Credential struct {
 	BaseURL  string `json:"base_url,omitempty"`
 }
 
+// CredentialGroup is the wire DTO of a credential group
+// (credential-groups / T-28).
+//
+// NO SECRETS: a group holds credential REFERENCES (member ids), never
+// keys — the member credentials keep their own (masked) surface.
+//
+// The JSON keys are FIXED by the frontend contract (lowercase
+// snake_case): id, name, provider, members, used_by. `used_by` is the
+// SERVER-side list of model ids referencing the group (A-10) — it is
+// carried on BOTH the list and the detail response so the frontend
+// never has to derive it from its own (possibly stale) model list.
+//
+// The tags are explicit and mandatory: without them Go's encoder would
+// emit "ID"/"Members"/"UsedBy" and the frontend would read undefined
+// for every field.
+type CredentialGroup struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Provider string   `json:"provider"`
+	Members  []string `json:"members"`
+	UsedBy   []string `json:"used_by"`
+}
+
+// credentialGroupRequest is the POST/PUT payload of the credential
+// group endpoints. `id` is required on POST and IMMUTABLE on PUT (the
+// path id wins there). `members` is optional (an empty group is legal —
+// the create-then-populate flow, G-8).
+type credentialGroupRequest struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Provider string   `json:"provider"`
+	Members  []string `json:"members"`
+}
+
 //go:embed static/*
 var staticFiles embed.FS
 
@@ -195,6 +229,14 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Credential management
 	mux.HandleFunc("/fe/api/credentials", s.handleCredentials)
 	mux.HandleFunc("/fe/api/credentials/", s.handleCredentialDetail)
+	// Credential GROUP management (credential-groups / T-27).
+	//
+	// The {id} handler registers with the LITERAL TRAILING SLASH
+	// (A-12vi) — the stdlib ServeMux matches a trailing-slash pattern
+	// as a PREFIX subtree, so "/fe/api/credential-groups/{id}" lands
+	// here (same precedent as the credentials pair above).
+	mux.HandleFunc("/fe/api/credential-groups", s.handleCredentialGroups)
+	mux.HandleFunc("/fe/api/credential-groups/", s.handleCredentialGroupDetail)
 	// Provider list
 	mux.HandleFunc("/fe/api/providers", s.handleProviders)
 	// Usage API
@@ -669,6 +711,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 //   (e) no duplicate credential identifiers within the slice.
 //   (f) len(creds) <= models.MaxCredentialRefs (16).
 //
+// CREDENTIAL GROUPS (credential-groups / T-28c — LOAD-BEARING):
+// rule (b) is relaxed for a GROUP ref: a reference names EITHER a
+// credential (`credential_id`) OR a credential group (`group_id`) —
+// never both, never neither. A group ref is additionally checked for
+// (i) the group EXISTING and (ii) the model KIND being chat (the
+// non-chat kinds forbid group refs — R-5). The DIRECT-ref rules stay
+// byte-identical.
+//
+// Without this relaxation the mirror rejected EVERY group ref with
+// 400 "credentials[0]: identifier is empty", which made
+// group-referencing models un-creatable / un-editable / un-copyable /
+// un-validatable through the API — the headline feature was
+// unreachable and the store-level group-aware validation
+// (models.ValidateCredentialRefs) was dead code on the API path.
+//
 // On acceptance, the function walks the slice and STAMPS each
 // entry's Position to the slice index (0-based) so callers persist
 // deterministic ordering regardless of the operator's payload order
@@ -679,13 +736,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // The caller decides the HTTP response shape (POST/PUT return
 // 400 {error}; the validate endpoint returns {valid:false,
 // errors:[...]}).
-func validateCredentials(creds []models.CredentialRef, internal bool, existingCreds []models.CredentialConfig) []string {
+func validateCredentials(creds []models.CredentialRef, internal bool, existingCreds []models.CredentialConfig, groups []models.CredentialGroupConfig, kind string) []string {
 	var errs []string
 
 	// Build a lookup index by id for rule (b) and rule (d).
 	byID := make(map[string]models.CredentialConfig, len(existingCreds))
 	for _, c := range existingCreds {
 		byID[c.ID] = c
+	}
+
+	// Build a lookup index for the credential groups (T-28c): a group
+	// reference must name an EXISTING group.
+	groupByID := make(map[string]models.CredentialGroupConfig, len(groups))
+	for _, g := range groups {
+		groupByID[g.ID] = g
 	}
 
 	// Rule (a) — internal models must carry at least one credential.
@@ -701,29 +765,56 @@ func validateCredentials(creds []models.CredentialRef, internal bool, existingCr
 
 	// Pre-resolve primary provider (rule (d) anchor) for the
 	// case-insensitive same-provider comparison.
+	//
+	// T-28c: the primary may be a GROUP reference — the group's
+	// provider anchors the comparison (all group members share it).
+	// primaryLabel is the identifier rendered in the rule-(d) message.
 	var primaryProvider string
+	primaryLabel := ""
 	if len(creds) > 0 {
-		if primary, ok := byID[creds[0].CredentialID]; ok {
+		if creds[0].IsGroupRef() {
+			if g, ok := groupByID[creds[0].GroupID]; ok {
+				primaryProvider = strings.ToLower(g.Provider)
+				primaryLabel = creds[0].GroupID
+			}
+		} else if primary, ok := byID[creds[0].CredentialID]; ok {
 			primaryProvider = strings.ToLower(primary.Provider)
+			primaryLabel = creds[0].CredentialID
 		}
 	}
 
 	seen := make(map[string]bool, len(creds))
 	for idx, ref := range creds {
 		// Rule (b) — non-empty id that exists.
-		if ref.CredentialID == "" {
+		//
+		// T-28c: a reference names EITHER a credential OR a group.
+		// Both-set and neither-set are rejected (R-1); a group ref
+		// must name an existing group and the model kind must allow
+		// group refs (R-5).
+		switch {
+		case ref.CredentialID != "" && ref.GroupID != "":
+			errs = append(errs, fmt.Sprintf("credentials[%d]: both credential_id and group_id set", idx))
+		case ref.CredentialID == "" && ref.GroupID == "":
 			errs = append(errs, fmt.Sprintf("credentials[%d]: identifier is empty", idx))
-		} else if existing, ok := byID[ref.CredentialID]; !ok {
-			errs = append(errs, fmt.Sprintf("credentials[%d]: identifier %q references an unknown credential", idx, ref.CredentialID))
-		} else if idx == 0 {
-			// First entry exists — fine, just used below for the
-			// provider-match comparison.
-			_ = existing
+		case ref.IsGroupRef():
+			if _, ok := groupByID[ref.GroupID]; !ok {
+				errs = append(errs, fmt.Sprintf("credentials[%d]: group_id %q references an unknown credential group", idx, ref.GroupID))
+			} else if !kindAllowsCredentialGroups(kind) {
+				errs = append(errs, fmt.Sprintf("credentials[%d]: credential groups are not allowed for kind %q", idx, kind))
+			}
+		default:
+			if _, ok := byID[ref.CredentialID]; !ok {
+				errs = append(errs, fmt.Sprintf("credentials[%d]: identifier %q references an unknown credential", idx, ref.CredentialID))
+			}
 		}
 
 		// Rule (c) — strictly positive weight.
 		if ref.Weight <= 0 {
-			errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): weight must be > 0, got %d", idx, ref.CredentialID, ref.Weight))
+			if ref.IsGroupRef() {
+				errs = append(errs, fmt.Sprintf("credentials[%d] (group_id=%q): weight must be > 0, got %d", idx, ref.GroupID, ref.Weight))
+			} else {
+				errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): weight must be > 0, got %d", idx, ref.CredentialID, ref.Weight))
+			}
 		}
 
 		// Rule (e) — no duplicates within the slice.
@@ -732,6 +823,11 @@ func validateCredentials(creds []models.CredentialRef, internal bool, existingCr
 				errs = append(errs, fmt.Sprintf("credentials[%d]: duplicate identifier %q in credentials list", idx, ref.CredentialID))
 			}
 			seen[ref.CredentialID] = true
+		} else if ref.IsGroupRef() {
+			if seen["group:"+ref.GroupID] {
+				errs = append(errs, fmt.Sprintf("credentials[%d]: duplicate group_id %q in credentials list", idx, ref.GroupID))
+			}
+			seen["group:"+ref.GroupID] = true
 		}
 
 		// Rule (d) — all entries share the primary provider
@@ -739,9 +835,13 @@ func validateCredentials(creds []models.CredentialRef, internal bool, existingCr
 		// and the current entry resolve to existing credentials;
 		// otherwise the (b) error above already covers it.
 		if idx > 0 && primaryProvider != "" {
-			if cur, ok := byID[ref.CredentialID]; ok {
+			if ref.IsGroupRef() {
+				if g, ok := groupByID[ref.GroupID]; ok && strings.ToLower(g.Provider) != primaryProvider {
+					errs = append(errs, fmt.Sprintf("credentials[%d] (group_id=%q): provider %q does not match primary provider %q", idx, ref.GroupID, g.Provider, primaryLabel))
+				}
+			} else if cur, ok := byID[ref.CredentialID]; ok {
 				if strings.ToLower(cur.Provider) != primaryProvider {
-					errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): provider %q does not match primary provider %q", idx, ref.CredentialID, cur.Provider, creds[0].CredentialID))
+					errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): provider %q does not match primary provider %q", idx, ref.CredentialID, cur.Provider, primaryLabel))
 				}
 			}
 		}
@@ -755,6 +855,84 @@ func validateCredentials(creds []models.CredentialRef, internal bool, existingCr
 	}
 
 	return errs
+}
+
+// kindAllowsCredentialGroups reports whether a model kind may carry a
+// CREDENTIAL GROUP reference (credential-groups / R-5).
+//
+// The non-chat kinds (decision, image-gen, group) forbid group refs:
+// their test buttons and resolvers read the RAW credential list
+// (handlers_decision.go / handlers_imggen.go read Credentials[0]), so
+// a group ref there would resolve to an empty credential id. An empty
+// kind is the legacy default and means CHAT.
+func kindAllowsCredentialGroups(kind string) bool {
+	return kind == "" || kind == models.KindChat
+}
+
+// flatCredentialRefs returns the FLATTENED credential refs of a raw
+// ref list (credential-groups / T-23d, A-2).
+//
+// A group reference is expanded into its members by the ONE
+// authoritative flattening seam
+// (models.ModelsConfigInterface.FlattenCredentialRefs — purely
+// in-memory, NO DB query, safe to call per attempt). A group-free
+// list flattens to itself, so a plain model's behaviour is unchanged.
+//
+// modelID is only used for the seam's diagnostic log line.
+func (s *Server) flatCredentialRefs(modelID string, refs []models.CredentialRef) []models.CredentialRef {
+	if s.modelsConfig == nil || len(refs) == 0 {
+		return nil
+	}
+	probe := &models.ModelConfig{ID: modelID, Credentials: refs}
+	return s.modelsConfig.FlattenCredentialRefs(probe)
+}
+
+// flatPrimaryCredential returns the PRIMARY credential of a raw ref
+// list — the FIRST FLATTENED member (A-2).
+//
+// For a group-primary model that is the group's first member, whose
+// provider IS the group provider (every member shares it) — so the
+// provider guards (the 9router-primary guards, the kind-provider
+// gates) fire for a group whose provider is the guarded one. Before
+// this change a group ref bypassed every one of those guards, because
+// Credentials[0].CredentialID was EMPTY.
+//
+// Returns nil when the flat list is empty (an empty group) — the
+// caller then has no provider to compare and no index to panic on.
+func (s *Server) flatPrimaryCredential(modelID string, refs []models.CredentialRef) *models.CredentialConfig {
+	flat := s.flatCredentialRefs(modelID, refs)
+	if len(flat) == 0 {
+		return nil
+	}
+	return s.modelsConfig.GetCredential(flat[0].CredentialID)
+}
+
+// firstFlattenedGroupMember returns the FIRST flattened member of a
+// credential GROUP (credential-groups / A-11 / T-28b) — the credential
+// the model's TEST button must exercise when the operator picked the
+// group instead of a single credential.
+//
+// The expansion goes through the ONE authoritative flattening seam
+// (models.ModelsConfigInterface.FlattenCredentialRefs), so the
+// fail-closed provider rule applies: a member whose provider diverges
+// from the group's provider is skipped, exactly as in selection.
+//
+// Returns "" when the id is not a group, the group does not exist, or
+// the group contributes no member.
+func (s *Server) firstFlattenedGroupMember(groupID string) string {
+	if s.modelsConfig == nil || groupID == "" {
+		return ""
+	}
+	probe := &models.ModelConfig{
+		ID:          groupID,
+		Credentials: []models.CredentialRef{{GroupID: groupID, Weight: 1}},
+	}
+	for _, ref := range s.modelsConfig.FlattenCredentialRefs(probe) {
+		if ref.CredentialID != "" {
+			return ref.CredentialID
+		}
+	}
+	return ""
 }
 
 // handleModels handles GET and POST /fe/api/models
@@ -1014,7 +1192,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		// ("internal ⇒ credentials non-empty") rejects exactly the
 		// group-row shape; groups carry no credentials by design.
 		if newModel.Kind != models.KindGroup {
-			if credErrs := validateCredentials(newModel.Credentials, newModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+			if credErrs := validateCredentials(newModel.Credentials, newModel.Internal, s.modelsConfig.GetCredentials(), s.modelsConfig.GetCredentialGroups(), newModel.Kind); len(credErrs) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
@@ -1043,7 +1221,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		if (newModel.Kind == "" || newModel.Kind == models.KindChat) && len(newModel.Credentials) > 0 {
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(newModel.ID, newModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider == "9router" {
@@ -1086,7 +1264,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			// via the same lookup the shared ValidateKindRules
 			// helper uses).
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(newModel.ID, newModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider != "" && primaryProvider != "minimax" && primaryProvider != "9router" {
@@ -1165,7 +1343,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			// D4 provider gate — recommended identity B
 			// ("openai" reused + "typesafe" new + "openrouter" System One).
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(newModel.ID, newModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" && primaryProvider != "openrouter" {
@@ -1508,7 +1686,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// load-balance-groups / Am23 wire twin: group rows bypass
 		// the credential validation entirely (POST-twin posture).
 		if updatedModel.Kind != models.KindGroup {
-			if credErrs := validateCredentials(updatedModel.Credentials, updatedModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+			if credErrs := validateCredentials(updatedModel.Credentials, updatedModel.Internal, s.modelsConfig.GetCredentials(), s.modelsConfig.GetCredentialGroups(), updatedModel.Kind); len(credErrs) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
@@ -1537,7 +1715,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if (updatedModel.Kind == "" || updatedModel.Kind == models.KindChat) && len(updatedModel.Credentials) > 0 {
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(updatedModel.ID, updatedModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider == "9router" {
@@ -1569,7 +1747,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(updatedModel.ID, updatedModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider != "" && primaryProvider != "minimax" && primaryProvider != "9router" {
@@ -1630,7 +1808,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			// D4 — recommended identity B (openai + typesafe + openrouter).
 			primaryProvider := ""
-			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+			if pcred := s.flatPrimaryCredential(updatedModel.ID, updatedModel.Credentials); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
 			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" && primaryProvider != "openrouter" {
@@ -1860,7 +2038,7 @@ func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceI
 	// Credential parity with the create path: the copy carries the
 	// source's credential REFS, so they are validated (and position-
 	// stamped) exactly like a fresh create payload.
-	if credErrs := validateCredentials(copyModel.Credentials, copyModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+	if credErrs := validateCredentials(copyModel.Credentials, copyModel.Internal, s.modelsConfig.GetCredentials(), s.modelsConfig.GetCredentialGroups(), copyModel.Kind); len(credErrs) > 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -2015,7 +2193,7 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 	// (see validateCredentials above). The validator does NOT stamp
 	// positions on this path — the validate endpoint is dry-run and
 	// the caller's payload is read-only.
-	if credErrs := validateCredentials(model.Credentials, model.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+	if credErrs := validateCredentials(model.Credentials, model.Internal, s.modelsConfig.GetCredentials(), s.modelsConfig.GetCredentialGroups(), model.Kind); len(credErrs) > 0 {
 		validationErrors = append(validationErrors, credErrs...)
 	}
 
@@ -2076,6 +2254,17 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	// If credential_id is provided, look up the credential
 	if req.CredentialID != "" {
 		cred := s.modelsConfig.GetCredential(req.CredentialID)
+		if cred == nil {
+			// A-11 (credential-groups / T-28b): the posted id may be a
+			// CREDENTIAL GROUP id — expand it to the FIRST flattened
+			// member and test THAT member. Without this expansion the
+			// frontend's Test button on a group-referencing model
+			// dead-ends with "Credential not found: <group id>" (a
+			// 400, not a 404).
+			if memberID := s.firstFlattenedGroupMember(req.CredentialID); memberID != "" {
+				cred = s.modelsConfig.GetCredential(memberID)
+			}
+		}
 		if cred == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -2630,8 +2819,10 @@ func (s *Server) handleCredentialDetail(w http.ResponseWriter, r *http.Request) 
 	case http.MethodDelete:
 		if err := s.modelsConfig.RemoveCredential(id); err != nil {
 			w.Header().Set("Content-Type", "application/json")
-			// Check if error is due to credential being in use
-			if strings.Contains(err.Error(), "in use") {
+			// In-use ⇒ 409. The store wraps models.ErrCredentialInUse
+			// (A-9 — errors.Is, never a string match on the message).
+			// Everything else keeps the legacy 404.
+			if errors.Is(err, models.ErrCredentialInUse) {
 				w.WriteHeader(http.StatusConflict)
 			} else {
 				w.WriteHeader(http.StatusNotFound)
@@ -2653,4 +2844,327 @@ func (s *Server) handleCredentialDetail(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// CREDENTIAL GROUPS (credential-groups / T-27, T-28)
+// ---------------------------------------------------------------------------
+
+// writeJSONError writes the /fe/api bare-JSON error envelope
+// {"error": "<string>"} with the given status.
+//
+// A-9 (binding): EVERY error site of the credential-group endpoints
+// goes through this helper — including 405 (wrong method) and a
+// missing/empty {id}. The legacy credentials handlers use http.Error
+// (text/plain) in places; that MUST NOT be copied here, because the
+// frontend calls res.json() and a text/plain body throws a
+// SyntaxError instead of surfacing the message.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// credentialGroupStatus maps a credential-group error to its HTTP
+// status BY SENTINEL (A-9 — errors.Is, never a string match).
+//
+//   - not found                → 404
+//   - in use (referenced)      → 409
+//   - validation rejections    → 400
+//   - anything else            → 500 (a genuine store/DB failure)
+//
+// The four group-level FIELD errors the store returns are plain
+// fmt.Errorf (no sentinel): "credential group id cannot be empty",
+// "credential group name cannot be empty", "credential group provider
+// %q is not valid" and "credential group members exceed max of %d".
+// Those are caught AT THE HANDLER LEVEL (see
+// validateCredentialGroupPayload) so they answer 400 and never reach
+// this mapper as a 500.
+func credentialGroupStatus(err error) int {
+	switch {
+	case err == nil:
+		return http.StatusOK
+	case errors.Is(err, models.ErrCredentialGroupNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, models.ErrCredentialGroupInUse):
+		return http.StatusConflict
+	case errors.Is(err, models.ErrCredentialGroupDuplicate),
+		errors.Is(err, models.ErrCredentialGroupMemberNotFound),
+		errors.Is(err, models.ErrCredentialGroupProviderMismatch),
+		errors.Is(err, models.ErrCredentialGroupMemberDuplicate),
+		errors.Is(err, models.ErrCredentialGroupMemberEmpty),
+		errors.Is(err, models.ErrCannotChangeCredentialID):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// credentialGroupUsedByMap returns groupID → referencing model ids
+// (A-10: the used_by surface is computed SERVER-SIDE, on the LIST as
+// well as on the detail, so the frontend's badges never derive from
+// its own — possibly stale — model list).
+//
+// ONE pass, never one scan per group.
+//
+// The AUTHORITATIVE path is the interface method
+// ModelsUsingCredentialGroupsAll() — the store's ONE-pass DB scan over
+// the model table. It is part of models.ModelsConfigInterface, so
+// PRODUCTION (the modelscache decorator binds it) reads the DB
+// directly: the used_by surface never lags a model written straight to
+// the DB behind the decorator's reconciled model-list snapshot.
+//
+// The fallback below is a NIL/EMPTY guard ONLY: the JSON twin and the
+// test mocks return nil (they have no credential groups at all), so the
+// map is derived in ONE pass over the model list instead. It never
+// becomes one full-table scan per group.
+func (s *Server) credentialGroupUsedByMap() map[string][]string {
+	out := make(map[string][]string)
+	if s.modelsConfig == nil {
+		return out
+	}
+	if batched := s.modelsConfig.ModelsUsingCredentialGroupsAll(); len(batched) > 0 {
+		for id, modelIDs := range batched {
+			out[id] = modelIDs
+		}
+		return out
+	}
+	// Fallback: ONE pass over the model list (the raw credential refs
+	// of every model carry the group references).
+	for _, mc := range s.modelsConfig.GetModels() {
+		for _, ref := range mc.Credentials {
+			if !ref.IsGroupRef() {
+				continue
+			}
+			out[ref.GroupID] = append(out[ref.GroupID], mc.ID)
+		}
+	}
+	return out
+}
+
+// newCredentialGroupDTO projects a stored group onto the wire DTO.
+func newCredentialGroupDTO(g models.CredentialGroupConfig, usedBy []string) CredentialGroup {
+	members := g.Members
+	if members == nil {
+		members = []string{}
+	}
+	usage := usedBy
+	if usage == nil {
+		usage = []string{}
+	}
+	return CredentialGroup{
+		ID:       g.ID,
+		Name:     g.Name,
+		Provider: g.Provider,
+		Members:  members,
+		UsedBy:   usage,
+	}
+}
+
+// validateCredentialGroupPayload applies the group-level FIELD rules
+// AT THE HANDLER LEVEL, so a rejection answers 400 and not 500.
+//
+// The rules mirror the store's ValidateCredentialGroup exactly:
+//   - G-1 id non-empty
+//   - G-2 name non-empty
+//   - G-3 provider ∈ models.ValidProviderNames() — the store compares
+//     case-INSensitively (strings.EqualFold), so the mirror does too
+//   - G-4 len(members) <= models.MaxCredentialGroupMembers
+//
+// The member-level rules (existence, provider match, duplicates) are
+// sentinel-backed in the store and are mapped by credentialGroupStatus.
+func validateCredentialGroupPayload(g models.CredentialGroupConfig) error {
+	if g.ID == "" {
+		return fmt.Errorf("credential group id cannot be empty")
+	}
+	if g.Name == "" {
+		return fmt.Errorf("credential group name cannot be empty")
+	}
+	valid := false
+	for _, p := range models.ValidProviderNames() {
+		if strings.EqualFold(p, g.Provider) {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("credential group provider %q is not valid", g.Provider)
+	}
+	if len(g.Members) > models.MaxCredentialGroupMembers {
+		return fmt.Errorf("credential group members exceed max of %d", models.MaxCredentialGroupMembers)
+	}
+	return nil
+}
+
+// handleCredentialGroups handles GET and POST /fe/api/credential-groups
+// (credential-groups / T-27, T-28).
+func (s *Server) handleCredentialGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listCredentialGroups(w)
+	case http.MethodPost:
+		s.createCredentialGroup(w, r)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// listCredentialGroups answers GET /fe/api/credential-groups with a
+// bare JSON ARRAY of groups (NOT an envelope object), each element
+// carrying its own server-side used_by.
+func (s *Server) listCredentialGroups(w http.ResponseWriter) {
+	groups := s.modelsConfig.GetCredentialGroups()
+	usedBy := s.credentialGroupUsedByMap()
+	out := make([]CredentialGroup, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, newCredentialGroupDTO(g, usedBy[g.ID]))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
+
+// createCredentialGroup answers POST /fe/api/credential-groups.
+//
+// 201 + the created group on success. The body is capped at 64KB
+// (the credentials precedent).
+func (s *Server) createCredentialGroup(w http.ResponseWriter, r *http.Request) {
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req credentialGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	group := models.CredentialGroupConfig{
+		ID:       req.ID,
+		Name:     req.Name,
+		Provider: req.Provider,
+		Members:  req.Members,
+	}
+	if err := validateCredentialGroupPayload(group); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.modelsConfig.AddCredentialGroup(group); err != nil {
+		writeJSONError(w, credentialGroupStatus(err), err.Error())
+		return
+	}
+
+	// Persist changes to disk
+	if err := s.modelsConfig.Save(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	usedBy := s.credentialGroupUsedByMap()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(newCredentialGroupDTO(group, usedBy[group.ID]))
+}
+
+// handleCredentialGroupDetail handles GET, PUT and DELETE
+// /fe/api/credential-groups/{id} (credential-groups / T-27, T-28).
+//
+// The route is registered with the LITERAL TRAILING SLASH (A-12vi) —
+// the stdlib ServeMux matches it as a prefix subtree.
+func (s *Server) handleCredentialGroupDetail(w http.ResponseWriter, r *http.Request) {
+	// /fe/api/credential-groups/{id}
+	id := strings.TrimPrefix(r.URL.Path, "/fe/api/credential-groups/")
+	if id == "" {
+		writeJSONError(w, http.StatusBadRequest, "credential group id is required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.getCredentialGroup(w, id)
+	case http.MethodPut:
+		s.updateCredentialGroup(w, r, id)
+	case http.MethodDelete:
+		s.deleteCredentialGroup(w, id)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// getCredentialGroup answers GET /fe/api/credential-groups/{id} —
+// 200 + the group WITH its server-side used_by, 404 when absent.
+func (s *Server) getCredentialGroup(w http.ResponseWriter, id string) {
+	group := s.modelsConfig.GetCredentialGroup(id)
+	if group == nil {
+		writeJSONError(w, http.StatusNotFound, "credential group not found")
+		return
+	}
+	usedBy := s.credentialGroupUsedByMap()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(newCredentialGroupDTO(*group, usedBy[group.ID]))
+}
+
+// updateCredentialGroup answers PUT /fe/api/credential-groups/{id}.
+//
+// The id is IMMUTABLE — the path id wins; a payload carrying a
+// different id is a 400.
+func (s *Server) updateCredentialGroup(w http.ResponseWriter, r *http.Request, id string) {
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req credentialGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.ID != "" && req.ID != id {
+		writeJSONError(w, http.StatusBadRequest, "credential group id is immutable")
+		return
+	}
+
+	group := models.CredentialGroupConfig{
+		ID:       id,
+		Name:     req.Name,
+		Provider: req.Provider,
+		Members:  req.Members,
+	}
+	if err := validateCredentialGroupPayload(group); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.modelsConfig.UpdateCredentialGroup(id, group); err != nil {
+		writeJSONError(w, credentialGroupStatus(err), err.Error())
+		return
+	}
+
+	// Persist changes to disk
+	if err := s.modelsConfig.Save(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	usedBy := s.credentialGroupUsedByMap()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(newCredentialGroupDTO(group, usedBy[group.ID]))
+}
+
+// deleteCredentialGroup answers DELETE /fe/api/credential-groups/{id}.
+//
+// 204 on success; 409 when the group is still referenced by a model
+// (the error names the referencing models — the frontend renders the
+// "inline the members, then delete" recovery from the status code and
+// the used_by surface).
+func (s *Server) deleteCredentialGroup(w http.ResponseWriter, id string) {
+	if err := s.modelsConfig.RemoveCredentialGroup(id); err != nil {
+		writeJSONError(w, credentialGroupStatus(err), err.Error())
+		return
+	}
+
+	// Persist changes to disk
+	if err := s.modelsConfig.Save(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

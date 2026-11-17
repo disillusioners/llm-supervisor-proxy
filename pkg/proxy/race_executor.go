@@ -44,6 +44,35 @@ func isSuppressedAttempt(err error) bool {
 // newProviderClient is a variable that can be overridden in tests to inject mock providers
 var newProviderClient = providers.NewProvider
 
+// flatCredentialRefs returns the FLATTENED credential refs of a model
+// config (credential-groups / T-23d, A-2).
+//
+// A GROUP reference is expanded into its members by the ONE
+// authoritative flattening seam
+// (models.ModelsConfigInterface.FlattenCredentialRefs — purely
+// in-memory, NO DB query, safe to call on hot paths). A group-free
+// model flattens to its own raw list, so a plain model's behaviour is
+// byte-identical.
+//
+// pkg/proxy NEVER imports pkg/store/database (the §g import guard) —
+// the seam is reached through the interface only. No group OBJECT or
+// group TYPE ever enters this package: the seam hands back plain
+// []models.CredentialRef (the same shape as the raw list, group
+// references already expanded away).
+func flatCredentialRefs(modelsCfg models.ModelsConfigInterface, mc *models.ModelConfig) []models.CredentialRef {
+	if modelsCfg == nil || mc == nil {
+		return nil
+	}
+	return modelsCfg.FlattenCredentialRefs(mc)
+}
+
+// flatCredentialCount returns the number of FLATTENED credential refs
+// of a model config (credential-groups / T-23d, A-2) — the count the
+// credential-rotation gates must read.
+func flatCredentialCount(modelsCfg models.ModelsConfigInterface, mc *models.ModelConfig) int {
+	return len(flatCredentialRefs(modelsCfg, mc))
+}
+
 // raceIntProviderIsMiniMax returns true iff the resolved internal model
 // has a primary credential (Credentials[0]) that resolves to a MiniMax
 // credential. modelID is the upstream model id from the race
@@ -68,7 +97,17 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 	if mc == nil {
 		return false
 	}
-	primaryCredentialID := mc.PrimaryCredentialID()
+	// A-2 (credential-groups / T-23d): the primary credential is read
+	// from the FLATTENED list — for a group-primary model that is the
+	// group's first member, whose provider IS the group provider. The
+	// RAW read (PrimaryCredentialID) returned "" for a group ref, so
+	// the MiniMax reasoning-split gate was silently skipped for every
+	// group-primary model.
+	flatCreds := flatCredentialRefs(cfg.ModelsConfig, mc)
+	if len(flatCreds) == 0 {
+		return false
+	}
+	primaryCredentialID := flatCreds[0].CredentialID
 	if primaryCredentialID == "" {
 		return false
 	}
@@ -252,8 +291,13 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	//
 	// Fall-through on refusal: return (zero, false) and let the
 	// existing failure handling in executeInternalRequest surface it.
+	//
+	// A-2 (credential-groups / T-23d): the membership scan reads the
+	// FLATTENED list — a reselected GROUP MEMBER belongs to the model
+	// (the group expands into its members), so it is accepted instead
+	// of being refused as a "wrong-model spawn".
 	credBelongs := false
-	for _, ref := range modelConfig.Credentials {
+	for _, ref := range flatCredentialRefs(cfg.ModelsConfig, modelConfig) {
 		if ref.CredentialID == credentialID {
 			credBelongs = true
 			break
@@ -306,7 +350,15 @@ func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, engine *credentiallb.
 		return cur
 	}
 	modelCfg := directGetModel(cfg, modelID)
-	if modelCfg == nil || !modelCfg.Internal || len(modelCfg.Credentials) < 2 {
+	if modelCfg == nil || !modelCfg.Internal {
+		return cur
+	}
+	// A-2 (credential-groups / T-23d): the "< 2" gate and the
+	// candidate scan read the FLATTENED list — a group-primary model
+	// has ONE raw ref but N members, so the skip-cache reorder must
+	// run for it and the group members must be reorder candidates.
+	flatCreds := flatCredentialRefs(cfg.ModelsConfig, modelCfg)
+	if len(flatCreds) < 2 {
 		return cur
 	}
 	wireModel := cur.InternalModel
@@ -319,7 +371,7 @@ func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, engine *credentiallb.
 
 	var soonestID string
 	var soonestUntil time.Time
-	for _, ref := range modelCfg.Credentials {
+	for _, ref := range flatCreds {
 		if ref.CredentialID == "" {
 			continue
 		}

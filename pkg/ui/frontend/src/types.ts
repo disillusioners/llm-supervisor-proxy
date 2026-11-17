@@ -20,8 +20,41 @@ export interface Credential {
 // single model must share the same provider.
 export interface CredentialRef {
   credential_id: string;
+  // credential-groups commission (2026-11-16): set ⇒ this ref points at a
+  // CREDENTIAL GROUP, not at a credential. A group ref carries
+  // `credential_id: ""` plus the group's id here; a plain ref leaves it
+  // undefined (⇒ plain lists round-trip byte-identically).
+  group_id?: string;
   weight: number;
   position: number;
+}
+
+// credential-groups commission (2026-11-16): a named bundle of
+// same-provider credentials. Management-only — flattened at model
+// resolution (groups expand in place, dedup keep-first). Wire mirror of
+// the Go CredentialGroup struct (snake_case verbatim). `members` is the
+// ORDERED list of credential ids.
+export interface CredentialGroup {
+  id: string;
+  name: string;
+  provider: string;
+  members: string[];
+  // A-10: server-side on list+detail (cheap at N-group scale). Model ids
+  // referencing this group. FE never derives this from the models cache.
+  used_by?: string[];
+  // The API contract (phase1 §f) carries NO timestamps — declared
+  // optional so the wire shape stays truthful; the FE never renders them.
+  created_at?: string;
+  updated_at?: string;
+}
+
+// FE view model enriching a member id with its credential metadata for
+// rendering (derived client-side from the credentials list; NOT a wire
+// type). Exists so the picker/list never re-derives labels inline.
+export interface CredentialGroupMember {
+  credential_id: string;
+  provider: string;
+  label: string;
 }
 
 export interface LoopDetectionConfig {

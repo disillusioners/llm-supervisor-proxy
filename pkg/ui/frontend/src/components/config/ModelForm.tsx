@@ -1,9 +1,26 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, Credential, CredentialRef } from '../../types';
-import { getCredentials, useProviders } from '../../hooks/useApi';
+import { getCredentials, getCredentialGroups, useProviders } from '../../hooks/useApi';
+import type { Model, Credential, CredentialRef, CredentialGroup } from '../../types';
 import { MultiCredentialEditor } from './MultiCredentialEditor';
 
 const MAX_CREDENTIALS = 16;
+
+// credential-groups commission (O-10): a credential GROUP reference is
+// only valid on a CHAT-kind model — the backend rule is
+// `kindAllowsCredentialGroups` (pkg/ui/server.go), which rejects
+// decision / image-gen / group kinds (their test buttons and resolvers
+// read the RAW credential list, so a group ref would resolve to an empty
+// credential id).
+//
+// The FE kind vocabulary is `Model['kind']` =
+// 'chat' | 'image-gen' | 'decision' | 'group' (src/types.ts). The set is
+// typed as that union so a typo'd literal is a COMPILE error, and the
+// set is an ALLOW-list, so a future kind added to the union fails
+// CLOSED (not offered) instead of silently inheriting the group gate.
+// A literal matching no kind (the backend hit exactly that drift with
+// "imggen" vs the real KindImageGen "image-gen") would silently disable
+// the gate — hence the typed allow-list rather than inline literals.
+const GROUP_ALLOWED_KINDS: ReadonlySet<NonNullable<Model['kind']>> = new Set(['chat']);
 
 // Peak hour time validation (uses UTC)
 function isPeakHourActive(start: string, end: string, offset: string): boolean {
@@ -145,6 +162,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     peak_hour_model: '',
   });
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [groups, setGroups] = useState<CredentialGroup[]>([]);
   const [loadingCredentials, setLoadingCredentials] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -152,20 +170,29 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
   const [currentTimeTick, setCurrentTimeTick] = useState(Date.now());
   const [legacyCredentialNotice, setLegacyCredentialNotice] = useState<string | null>(null);
 
-  // Fetch credentials on mount
   useEffect(() => {
+    let cancelled = false;
     const fetchCredentials = async () => {
       setLoadingCredentials(true);
       try {
-        const data = await getCredentials();
-        setCredentials(data || []);
+        const creds = await getCredentials();
+        if (!cancelled) setCredentials(creds || []);
       } catch (e) {
-        console.error('Failed to fetch credentials:', e);
+        if (!cancelled) console.error('Failed to fetch credentials:', e);
+      }
+      try {
+        const grps = await getCredentialGroups();
+        if (!cancelled) setGroups(grps || []);
+      } catch (e) {
+        if (!cancelled) console.error('Failed to fetch credential groups:', e);
       } finally {
-        setLoadingCredentials(false);
+        if (!cancelled) setLoadingCredentials(false);
       }
     };
-    fetchCredentials();
+    void fetchCredentials();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Time ticker for peak hour status (updates every 60 seconds)
@@ -190,7 +217,8 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       // saving will migrate the value to the new shape.
       const legacyCredId = (initialData as { credential_id?: string }).credential_id;
       let hydCreds: CredentialRef[] = (initialData.credentials ?? []).map((c) => ({
-        credential_id: c.credential_id,
+        credential_id: c.credential_id ?? '',
+        group_id: c.group_id,
         weight: c.weight,
         position: c.position,
       }));
@@ -277,8 +305,8 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
   // override (mirrors the legacy single-credential behavior at line ~231).
   const handleCredentialRowsChange = (next: CredentialRef[]) => {
     setFormData(prev => {
-      const prevPrimary = prev.credentials[0]?.credential_id;
-      const nextPrimary = next[0]?.credential_id;
+      const prevPrimary = prev.credentials[0]?.credential_id || prev.credentials[0]?.group_id;
+      const nextPrimary = next[0]?.credential_id || next[0]?.group_id;
       if (prevPrimary === nextPrimary) {
         return { ...prev, credentials: next };
       }
@@ -315,31 +343,54 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       if (formData.credentials.length === 0) {
         throw new Error('Internal upstream requires at least one credential');
       }
-      if (formData.credentials.length > MAX_CREDENTIALS) {
-        throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed`);
+      // Binding cap is the EXPANDED credential list (R-4: <=16 after
+      // group expansion). Count raw rows would let 2 groups x 16 members
+      // slip through and be rejected by the store.
+      const expandedCount = formData.credentials.reduce((acc, row) => {
+        if (row.group_id) {
+          const g = groups.find((gr) => gr.id === row.group_id);
+          return acc + (g?.members?.length ?? 0);
+        }
+        return acc + 1;
+      }, 0);
+      if (expandedCount > MAX_CREDENTIALS) {
+        throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed (expanded count ${expandedCount})`);
       }
       const seen = new Set<string>();
       for (let i = 0; i < formData.credentials.length; i++) {
         const row = formData.credentials[i];
-        if (!row.credential_id) {
-          throw new Error(`Credential row ${i + 1}: please select a credential`);
+        if (!row.credential_id && !row.group_id) {
+          throw new Error(`Credential row ${i + 1}: please select a credential or credential group`);
         }
-        const resolved = credentials.find(c => c.id === row.credential_id);
-        if (resolved?.provider === '9router') {
-          throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
+        // Resolve provider: credential → credentials.find; group → groups.find.
+        if (row.group_id) {
+          const g = groups.find((gr) => gr.id === row.group_id);
+          if (!g) {
+            throw new Error(`Credential row ${i + 1}: credential group "${row.group_id}" not found`);
+          }
+          if (g.provider === '9router') {
+            throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
+          }
+        } else {
+          const resolved = credentials.find((c) => c.id === row.credential_id);
+          if (resolved?.provider === '9router') {
+            throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
+          }
         }
         if (!Number.isFinite(row.weight) || row.weight < 1) {
           throw new Error(`Credential row ${i + 1}: weight must be at least 1`);
         }
-        if (seen.has(row.credential_id)) {
+        const key = row.credential_id || row.group_id || '';
+        if (seen.has(key)) {
           throw new Error(
-            `Credential row ${i + 1}: duplicate credential "${row.credential_id}"`,
+            `Credential row ${i + 1}: duplicate credential "${key}"`,
           );
         }
-        seen.add(row.credential_id);
+        seen.add(key);
       }
       validatedCredentials = formData.credentials.map((c, i) => ({
-        credential_id: c.credential_id,
+        credential_id: c.credential_id ?? '',
+        ...(c.group_id ? { group_id: c.group_id } : {}),
         weight: c.weight,
         position: i,
       }));
@@ -388,12 +439,16 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
 
       // Test Connection targets the primary credential only (the /fe/api/models/test
       // endpoint is single-credential by design).
-      const primaryCredId = formData.credentials[0]?.credential_id ?? '';
-      const selectedCred = credentials.find(c => c.id === primaryCredId);
+      const primaryRefId =
+        formData.credentials[0]?.credential_id ||
+        formData.credentials[0]?.group_id ||
+        '';
+      const primaryCred = credentials.find(c => c.id === primaryRefId);
+      const selectedCred = primaryCred;
       const baseUrl = formData.internal_base_url || selectedCred?.base_url;
 
       const payload: Record<string, string | undefined> = {
-        credential_id: primaryCredId || undefined,
+        credential_id: primaryRefId || undefined,
         api_key: formData.internal_api_key || undefined,
         internal_base_url: baseUrl,
         internal_model: formData.internal_model,
@@ -426,22 +481,35 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
 
   // Can test if: need primary credential (or API key) and model name
   const canTestConnection = formData.internal_model &&
-    (mode === 'edit' || formData.credentials[0]?.credential_id || formData.internal_api_key);
+    (mode === 'edit' || formData.credentials[0]?.credential_id || formData.credentials[0]?.group_id || formData.internal_api_key);
 
   const isValid = mode === 'add'
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
     : formData.name.trim() !== '';
 
+  // The kind of the model this form edits. `ModelForm` is the CHAT model
+  // form (the only production renderer is ModelsTab.tsx), so the add mode
+  // (no initialData) is a chat model by definition; edit mode carries
+  // the row's own kind. Credential-group options are offered to chat
+  // kinds only (see GROUP_ALLOWED_KINDS above).
+  const formKind: NonNullable<Model['kind']> = initialData?.kind ?? 'chat';
+
   // The "primary" credential drives provider badge, default base URL, and
   // placeholder for the upstream model name.
   const primaryCredentialId = formData.credentials[0]?.credential_id ?? '';
-  const selectedCredential = credentials.find(cred => cred.id === primaryCredentialId);
+  const primaryGroupId = formData.credentials[0]?.group_id;
+  const selectedCredential = primaryGroupId
+    ? undefined
+    : credentials.find((cred) => cred.id === primaryCredentialId);
+  const selectedGroup = primaryGroupId
+    ? groups.find((g) => g.id === primaryGroupId)
+    : undefined;
 
   // Compute the default base URL (from primary credential)
   const defaultBaseUrl = selectedCredential?.base_url || 'Provider default';
 
-  // Get provider display name from primary credential
-  const selectedProvider = selectedCredential?.provider;
+  // Get provider display name from primary credential/group
+  const selectedProvider = selectedGroup?.provider ?? selectedCredential?.provider;
 
   // Compute live status (depends on currentTimeTick to update every minute)
   const peakHourActive = formData.peak_hour_start && formData.peak_hour_end && formData.peak_hour_model
@@ -541,6 +609,9 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
           <MultiCredentialEditor
             credentials={formData.credentials}
             availableCredentials={credentials.filter((c) => c.provider !== '9router')}
+            availableGroups={groups.filter(
+              (g) => g.provider !== '9router' && GROUP_ALLOWED_KINDS.has(formKind),
+            )}
             loading={loadingCredentials}
             onChange={handleCredentialRowsChange}
             onNavigateToCredentials={onNavigateToCredentials}
@@ -551,9 +622,17 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
                 {getProviderName(selectedProvider)}
               </span>
+              {selectedGroup && (
+                <span
+                  data-testid="model-form-primary-group-badge"
+                  class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-900/50 text-indigo-300 border border-indigo-700"
+                >
+                  🗂️ Credential group: {selectedGroup.name}
+                </span>
+              )}
             </div>
           )}
-          {selectedCredential?.base_url && (
+          {selectedCredential?.base_url && !selectedGroup && (
             <p class="text-xs text-gray-500 mt-1">
               Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
             </p>
@@ -754,6 +833,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
             Cancel
           </button>
           <button
+            data-testid="model-form-submit"
             onClick={handleSubmit}
             class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-md transition-colors text-sm font-medium"
             disabled={!isValid || saving}

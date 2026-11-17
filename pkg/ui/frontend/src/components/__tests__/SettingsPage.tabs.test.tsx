@@ -12,6 +12,9 @@ const realFetch = globalThis.fetch;
 beforeEach(() => {
   (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : (input as Request).url;
+    if (url.includes('/credential-groups')) {
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
     if (url.includes('/credentials')) {
       return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
@@ -329,6 +332,32 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decisi
     const groupEmoji = container.querySelector('[data-tab-id="group_models"] span[aria-hidden="true"]');
     expect(groupEmoji).not.toBeNull();
     expect((groupEmoji as HTMLElement).textContent).toBe('🔀');
+  });
+
+  // credential-groups commission 2026-11-16 (F5) — the credentials tab
+  // mounts the CredentialsContainer. This suite NEVER clicked the tab, so
+  // the container never mounted and the suite shipped green over an
+  // unexercised surface. The assertion below is the anti-vacuity pin.
+  it('credential-groups F5 — clicking the Credentials tab mounts the CredentialsContainer', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    // The container is NOT mounted until the credentials tab is clicked.
+    expect(container.querySelector('[data-testid="credential-groups-container"]')).toBeNull();
+
+    const credentialsTab = container.querySelector('[data-tab-id="credentials"]') as HTMLButtonElement;
+    expect(credentialsTab).not.toBeNull();
+    fireEvent.click(credentialsTab);
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="credential-groups-container"]')).not.toBeNull();
+    });
+    // The container's vertical sub-nav is mounted with both children.
+    expect(container.querySelector('[data-testid="credential-groups-nav"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credential-groups-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="credential-groups-tab-credentials"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="credential-groups-tab-groups"]')).not.toBeNull();
   });
 });
 
