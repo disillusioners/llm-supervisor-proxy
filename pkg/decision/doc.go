@@ -3,27 +3,46 @@
 //
 // Architectural rules (binding on the package):
 //
-//   - Import direction: pkg/decision → {pkg/models, pkg/auth,
-//     pkg/usage, pkg/events} ONLY; never pkg/proxy (the chat
-//     supervision exclusion boundary) or pkg/imggen (the
-//     chat-imggen interaction surface). The import guard
-//     runs in `make test` (Makefile:grep + handler_test.go
+//   - Import direction: the chat supervision subtrees are BANNED
+//     from this package (the chat-imggen interaction surface and the
+//     chat supervision exclusion boundary). The import guard runs in
+//     `make test` (Makefile:grep + handler_test.go
 //     TestPackage_ImportGuard_NoProxyImports +
 //     TestPackage_ImportGuard_TransitiveClosure +
 //     TestPackage_ImportGuard_NoImggenImports); the guard is
-//     mechanical and fails the build on any pkg/proxy or
-//     pkg/imggen (transitive) import.
+//     mechanical and fails the build on any banned (transitive)
+//     import. The guard is RAW TEXT over every .go file of the
+//     package (tests included) — so a comment that merely QUOTES a
+//     banned path fails it. Refer to them as "the banned subtrees".
 //
-//   - One upstream attempt per request (no retry, no fallback,
-//     no race coordinator — decisions are cheap+fast, sync, and
-//     not supervised). The handler is shaped off imggen's
-//     skeleton (pkg/imggen/handler.go is the template).
+//     The real import closure is wider than the four packages the
+//     original doc listed: the configuration, the store, the group
+//     engine, the two health layers, the tool-repair, the credential
+//     engine and the crypto packages are all in it (the crypto one
+//     through the credential engine). The doc names the RULE, not an
+//     exhaustive list, so it cannot go stale again.
 //
-//   - Single classifier seam (Outcome{RelayStatus, Reason}) —
+//   - The upstream attempt contract: a SINGLE-MODEL decision request
+//     performs one upstream attempt (no retry, no race coordinator —
+//     decisions are cheap+fast, sync, and not supervised). A GROUP
+//     request performs a member loop instead: the per-member
+//     credential attempts (the failure-class policy mirrors the text
+//     lane: rotation-eligible classes rotate within the member, a 5xx
+//     advances, the client-attributable classes fail fast) and the
+//     group-level member fallback, with exactly ONE client write — at
+//     the winner. There is still no speculative/hedge race engine.
+//     The handler is shaped off imggen's skeleton
+//     (pkg/imggen/handler.go is the template).
+//
+//   - Single classifier seam (Outcome{RelayStatus, Reason,
+//     UpstreamStatus, ErrorType, ErrorCode, ErrorMessage}) —
 //     InspectResponse is called for EVERY upstream response
 //     (no pre-filter on resp.StatusCode). Interface lives at
 //     converter.go with the unified 2-arg typed signature
-//     (finding 5): InspectResponse(respBytes, originalReq).
+//     (finding 5): InspectResponse(respBytes, originalReq). The
+//     handler stamps the raw upstream status onto the Outcome (the
+//     adapter seam never sees it) so the lane can classify the
+//     failure.
 //
 //   - Bounded RAM: request MaxBytesReader 16 MB; response
 //     io.LimitReader 64 MB; one read, classify+relay+meter+event

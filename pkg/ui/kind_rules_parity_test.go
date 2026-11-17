@@ -1065,3 +1065,56 @@ func TestDecision_Vocabulary_OutOfSetProvider_Rejected_AtAllGates(t *testing.T) 
 		t.Errorf("the PUT mirror must reject an out-of-set decision provider (status=%d, err=%q)", status, errSubstr)
 	}
 }
+
+// TestKindRules_Parity_Group_DecisionMembers_MixedProviders — a
+// decision group with an openai member and an openrouter member is
+// accepted by the POST + PUT mirrors (the GROUP row carries no
+// credentials, so no provider gate applies to it — the "no
+// saveable-but-502 hole" acceptance).
+//
+// The DB arm of the same case is
+// TestGroup_AddModel_DecisionMembers_MixedProviders_Accepted.
+func TestKindRules_Parity_Group_DecisionMembers_MixedProviders(t *testing.T) {
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	// Two decision members on DIFFERENT providers (the mixed set).
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-openai", Name: "Decision OpenAI", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-6-luna",
+		Credentials: decisionRefs("openai-cred"),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "dec-openrouter", Name: "Decision OpenRouter", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "anthropic/claude",
+		Credentials: decisionRefs("openrouter-cred"),
+	})
+	srv := ts.serve()
+	defer srv.Close()
+
+	group := models.ModelConfig{
+		ID: "decision-mixed-providers", Name: "Decision Mixed Providers", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dec-openai", Weight: 1}, {ModelID: "dec-openrouter", Weight: 1}},
+	}
+
+	// The helper reference accepts it (the group row carries no
+	// provider).
+	if err := validateGroupRulesCaller(group, ts.mockModels.GetModels()); err != "" {
+		t.Fatalf("the helper must accept a decision group with mixed providers: %v", err)
+	}
+
+	// The POST mirror accepts it.
+	payload := marshalGroupModel(group)
+	payload = strings.Replace(payload, `"id":"group-1"`, `"id":"decision-mixed-providers"`, 1)
+	status, errSubstr := postDecisionModel(t, srv.URL, payload)
+	if status != http.StatusCreated {
+		t.Fatalf("the POST mirror must accept a decision group with mixed providers (status=%d, err=%q)", status, errSubstr)
+	}
+
+	// The PUT mirror accepts it (the POST arm already created the
+	// row — the PUT updates it in place).
+	status, errSubstr = putDecisionModel(t, srv.URL, "decision-mixed-providers", payload)
+	if status != http.StatusOK {
+		t.Fatalf("the PUT mirror must accept a decision group with mixed providers (status=%d, err=%q)", status, errSubstr)
+	}
+}
