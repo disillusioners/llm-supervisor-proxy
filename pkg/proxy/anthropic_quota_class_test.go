@@ -6,14 +6,14 @@ package proxy
 //
 // WHAT THE BRANCH CHANGED (the code under test):
 //
-//   pkg/proxy/handler_anthropic.go:874-901 — the Anthropic
+//   pkg/proxy/handler_anthropic.go:888-905 — the Anthropic
 //   passthrough lane's credential failover now selects the cooldown
 //   CLASS before it reseeds the failed credential:
 //
 //	isAnthropicQuotaFailure(arc) → credentiallb.FailureClassQuota
 //	→ h.credEngine.ExcludeAndReselectForClass(...)
 //
-//   pkg/providers/interface.go:321 — providers.IsQuotaMessage, the
+//   pkg/providers/interface.go:457 — providers.IsQuotaMessage, the
 //   exported twin of the chat lane's message check, so the Anthropic
 //   lane (which holds a RAW body, no *ProviderError) classifies a
 //   quota rejection with the SAME vocabulary the chat lane uses.
@@ -105,7 +105,7 @@ func newAnthropicQuotaEnv(t *testing.T, status int, body string) (*Handler, *ant
 	env := &anthropicQuotaEnv{}
 	stubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The passthrough lane authenticates with the x-api-key header
-		// (handler_anthropic.go:987-997).
+		// (the passthrough branch's request builder).
 		env.record(r.Header.Get("x-api-key"))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
