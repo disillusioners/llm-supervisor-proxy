@@ -38,11 +38,23 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
+
+// credentialGroupRebuildTimeout bounds EVERY DB read in the group
+// rebuild/reconcile path. The sibling budget is the decorator's
+// StrictFillTimeout (pkg/modelscache/models.go:373 — 5s); the same
+// bound applies here so a stalled DB can never hold the reconcile
+// open indefinitely.
+//
+// It is a package-level const (not a literal) so it is tunable and
+// testable.
+const credentialGroupRebuildTimeout = 5 * time.Second
 
 // ---------------------------------------------------------------------------
 // Row shape + JSON codecs (house style: JSON-on-row, no join tables)
@@ -161,8 +173,9 @@ func (m *ModelsManager) getCredentialGroupRow(ctx context.Context, id string) (*
 // NOTE: the READ surface is the persisted truth; the in-memory group map
 // (m.groups) is the FLATTEN authority. The two agree for every write
 // that went through this manager; a group written by DIRECT SQL is
-// visible here but invisible to the flatten until RebuildCredentialGroupsFromDB
-// runs (see the refresh rule on that method).
+// visible here and heals into the flatten via RebuildCredentialGroupsFromDB,
+// which self-heals at the decorator's <=60s reconcile tick (and
+// immediately after a restart) — never mid-request.
 func (m *ModelsManager) GetCredentialGroup(id string) *models.CredentialGroupConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -377,12 +390,47 @@ func (m *ModelsManager) applyCredentialGroupToCache(g models.CredentialGroupConf
 }
 
 // removeCredentialGroupFromCache drops the group from the in-memory
-// cache. Caller holds m.mu (write).
+// cache AND prunes its members from the member-provider snapshot.
+//
+// O-8: the provider snapshot is the A-8 fail-closed input; a member of
+// a REMOVED group that stays in the snapshot is stale state that
+// outlives its group (and it also defeats the rebuild's early-return,
+// which would never see the snapshot compare equal).
+//
+// A member that ANOTHER cached group still lists KEEPS its provider
+// entry — that group still expands it.
+//
+// Caller holds m.mu (write); the prune happens in the SAME groupsMu
+// write span as the removal (no window where the group is gone but its
+// member providers linger).
 func (m *ModelsManager) removeCredentialGroupFromCache(id string) {
 	m.groupsMu.Lock()
 	defer m.groupsMu.Unlock()
 
+	removed, ok := m.groups[id]
 	delete(m.groups, id)
+	if !ok {
+		return
+	}
+	for _, member := range removed.Members {
+		if m.memberInAnyGroupLocked(member) {
+			continue
+		}
+		delete(m.groupMemberProviders, member)
+	}
+}
+
+// memberInAnyGroupLocked reports whether any CACHED group still lists the
+// credential as a member. The caller must hold groupsMu (read or write).
+func (m *ModelsManager) memberInAnyGroupLocked(credID string) bool {
+	for _, g := range m.groups {
+		for _, member := range g.Members {
+			if member == credID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -599,25 +647,6 @@ func (m *ModelsManager) flattenCredentialRefsLocked(model *models.ModelConfig) [
 	return out
 }
 
-// FlattenCredentialRefsByID is the ID-keyed preview accessor: it reads
-// the model row and returns its flattened credential list (nil for an
-// unknown model). Manager-only — it is NOT part of the
-// models.ModelsConfigInterface surface (C3 grows the interface with the
-// eight locked methods).
-//
-// LOCKING: m.mu.RLock for the row read, then groupsMu.RLock inside the
-// flatten — the m.mu → groupsMu order holds.
-func (m *ModelsManager) FlattenCredentialRefsByID(modelID string) []models.CredentialRef {
-	m.mu.RLock()
-	row := m.getModelRowByID(modelID)
-	m.mu.RUnlock()
-
-	if row == nil {
-		return nil
-	}
-	return m.FlattenCredentialRefs(row)
-}
-
 // ---------------------------------------------------------------------------
 // Cache rebuild / reconcile
 // ---------------------------------------------------------------------------
@@ -629,55 +658,251 @@ func (m *ModelsManager) FlattenCredentialRefsByID(modelID string) []models.Crede
 // REBUILD, NEVER MERGE: the R-1 repair writes groups by DIRECT SQL, so a
 // merge-based refresh would keep the stale entry forever.
 //
-// REFRESH RULE (T-13b): the store-side group map has NO reconcile of its
-// own — a group written by DIRECT SQL is invisible to the flatten until
-// this method runs (or the process restarts). C3's decorator reconcile
-// (<=60s) calls this method; until then such a group fails closed (WARN
-// + no members expanded).
+// REFRESH RULE (T-13b): the store-side group map IS reconciled — the
+// decorator's <=60s reconcile tick calls this method (pkg/modelscache/
+// models.go:387) and the boot prime calls it too (pkg/modelscache/
+// models.go:163). A group written by DIRECT SQL is therefore visible to
+// the flatten within <=60s (and immediately after a restart), not only
+// after a restart.
+//
+// LATENCY (the request path must never wait on a reconcile):
+//
+//   - NO DB READ runs under the store's write lock. sync.RWMutex is
+//     writer-preferring: a pending (or held) m.mu.Lock() starves the
+//     m.mu.RLock() readers the LIVE request path takes (GetModelNative
+//     -> m.mu.RLock(), reached from the group rewrite). The reads
+//     therefore happen FIRST, with NO m.mu held; the write lock covers
+//     ONLY the compare + the swap + the engine re-apply.
+//   - EVERY read is bounded by credentialGroupRebuildTimeout.
+//   - The member-provider snapshot is read in ONE round-trip (no N+1).
+//   - An UNCHANGED reconcile returns early: no models scan, no engine
+//     re-apply.
 func (m *ModelsManager) RebuildCredentialGroupsFromDB() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), credentialGroupRebuildTimeout)
+	defer cancel()
 
-	if err := m.rebuildCredentialGroupsCache(context.Background()); err != nil {
+	// PHASE 1 — READ (no m.mu held).
+	byID, providers, err := m.readCredentialGroupsSnapshot(ctx)
+	if err != nil {
 		return err
 	}
-	m.fanOutCredentialGroupsLocked()
+
+	// PHASE 2 — FAST PATH: nothing changed → no models scan, no
+	// engine re-apply. The comparison covers the group rows AND the
+	// member-provider snapshot (a direct-SQL credential-PROVIDER edit
+	// must still be observed — the A-8 fail-closed check depends on
+	// it).
+	if !m.credentialGroupSnapshotChanged(byID, providers) {
+		return nil
+	}
+
+	// PHASE 3 — the models scan (still NO m.mu held): it is a full
+	// table scan and must never sit inside the write lock.
+	scanCtx, scanCancel := context.WithTimeout(context.Background(), credentialGroupRebuildTimeout)
+	modelList, scanErr := m.scanModelsContext(scanCtx, m.qb.GetAllModels())
+	scanCancel()
+	if scanErr != nil {
+		log.Printf("[WARN] [credential-groups] rebuild fan-out skipped — model scan error: %v", scanErr)
+		modelList = nil
+	}
+
+	// PHASE 4 — APPLY: the write lock covers the compare + the swap +
+	// the engine re-apply ONLY.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.applyCredentialGroupSnapshot(byID, providers) {
+		return nil
+	}
+	if scanErr == nil {
+		m.fanOutCredentialGroups(modelList)
+	}
 	return nil
 }
 
-// rebuildCredentialGroupsCache replaces the in-memory group cache (and
-// the member-provider snapshot) from the DB. The DB reads happen BEFORE
-// the swap so the lock is held only for the map replacement.
+// credentialGroupScanHook is a TEST SEAM (package-level func var — the
+// pkg/proxy/race_executor.go:26 newProviderClient precedent). It fires
+// immediately AFTER the credential-group scan returns, i.e. inside the
+// rebuild's READ phase.
 //
-// The caller must NOT hold m.mu if it intends to take it later — this
-// helper takes groupsMu only (lock order m.mu → groupsMu is respected
-// because no m.mu is taken here at all).
-func (m *ModelsManager) rebuildCredentialGroupsCache(ctx context.Context) error {
+// It is the probe for the reconcile-vs-request-path concurrency
+// regression: before the fix the read phase ran INSIDE the store's
+// write lock (m.mu.Lock()), so a pending writer starved the request
+// path's m.mu.RLock() readers (sync.RWMutex is writer-preferring);
+// after the fix the read phase runs OUTSIDE the write lock and the
+// request path is never blocked.
+//
+// nil in production. Restore it (defer) after use — a leaked hook
+// fires in unrelated tests.
+var credentialGroupScanHook func()
+
+// credentialGroupProviderQueryHook is a TEST SEAM: it fires after each
+// provider round-trip in credentialProviderSnapshotForIDs, carrying the
+// number of round-trips performed so far. The one-query proof asserts
+// exactly ONE round-trip for a multi-member group.
+//
+// nil in production.
+var credentialGroupProviderQueryHook func(int)
+
+// credentialGroupRebuildFanOutHook is a TEST SEAM: it fires once per
+// group-referencing model in the rebuild fan-out. The early-return test
+// counts the calls to prove that an UNCHANGED reconcile skips the
+// fan-out (and therefore the full models scan) entirely.
+//
+// nil in production.
+var credentialGroupRebuildFanOutHook func()
+
+// readCredentialGroupsSnapshot reads the credential-group rows AND the
+// member-provider snapshot from the DB.
+//
+// LOCK DISCIPLINE: NO m.mu IS HELD. The reads are IO; the store's
+// write lock must never cover them (the request path's m.mu.RLock()
+// readers would starve behind the pending writer). The callers take
+// m.mu only for the compare + swap + fan-out.
+//
+// The member providers are read in ONE round-trip (`id IN (...)`) — the
+// per-member N+1 read compounded a DB stall by the member count.
+func (m *ModelsManager) readCredentialGroupsSnapshot(ctx context.Context) (map[string]models.CredentialGroupConfig, map[string]string, error) {
 	groups, err := m.scanCredentialGroups(ctx)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	if credentialGroupScanHook != nil {
+		credentialGroupScanHook()
 	}
 
 	memberIDs := make([]string, 0, len(groups))
 	for _, g := range groups {
 		memberIDs = append(memberIDs, g.Members...)
 	}
-	members := m.credentialConfigSnapshotForIDs(memberIDs)
-
-	providers := make(map[string]string, len(members))
-	for id, c := range members {
-		providers[id] = c.Provider
+	providers, err := m.credentialProviderSnapshotForIDs(ctx, memberIDs)
+	if err != nil {
+		return nil, nil, err
 	}
+
 	byID := make(map[string]models.CredentialGroupConfig, len(groups))
 	for _, g := range groups {
 		byID[g.ID] = g
 	}
+	return byID, providers, nil
+}
 
+// rebuildCredentialGroupsCache replaces the in-memory group cache (and
+// the member-provider snapshot) from the DB. It is the BOOT PRIME path
+// (pkg/store/database/store.go:813 — NewModelsManager).
+//
+// The DB reads happen OUTSIDE any m.mu span (readCredentialGroupsSnapshot
+// takes NO lock) — the comment that used to claim "the lock is held
+// only for the map replacement" was FALSE for the reconcile caller,
+// which held m.mu across the whole call. Both callers now read first,
+// then swap.
+//
+// The caller must NOT hold m.mu: this helper takes groupsMu only (the
+// lock order m.mu → groupsMu is respected because no m.mu is taken
+// here at all).
+func (m *ModelsManager) rebuildCredentialGroupsCache(ctx context.Context) error {
+	byID, providers, err := m.readCredentialGroupsSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	m.applyCredentialGroupSnapshot(byID, providers)
+	return nil
+}
+
+// applyCredentialGroupSnapshot swaps the freshly-read group map and the
+// member-provider snapshot into the cache — but ONLY when they differ.
+//
+// The comparison covers BOTH maps:
+//   - the group rows (id / name / provider / members / created_at /
+//     updated_at), and
+//   - the MEMBER→PROVIDER snapshot. The member-provider half is
+//     load-bearing: the A-8 fail-closed expand reads it, so a
+//     direct-SQL credential-PROVIDER edit that leaves the group rows
+//     untouched must still be observed (a group-rows-only comparison
+//     would mask it and the divergent member would keep expanding with
+//     its stale provider).
+//
+// A BEST-EFFORT guard aborts the swap when the cache holds a group row
+// strictly newer than the snapshot's (a manager group write landed
+// during the rebuild's DB read and its cache update must win — the
+// write path stores the row re-read from the DB, so its updated_at is
+// the DB's). The next tick re-scans. This closes the most likely
+// concurrent-write clobber; a group add/remove during the scan is
+// rarer and self-heals at the next tick.
+//
+// Returns true when the cache was replaced.
+//
+// LOCKING: takes groupsMu (write) only — the caller may hold m.mu
+// (write) or hold nothing (the boot prime). The lock order stays
+// m.mu → groupsMu.
+func (m *ModelsManager) applyCredentialGroupSnapshot(byID map[string]models.CredentialGroupConfig, providers map[string]string) bool {
 	m.groupsMu.Lock()
+	defer m.groupsMu.Unlock()
+
+	if credentialGroupSnapshotsEqual(m.groups, m.groupMemberProviders, byID, providers) {
+		return false
+	}
+
+	// Best-effort guard: the cache holds a group row strictly newer
+	// than the snapshot's for the same id → a manager write landed
+	// during the read → abort (its cache update must win).
+	for id, cached := range m.groups {
+		if fresh, ok := byID[id]; ok {
+			if cached.UpdatedAt != "" && fresh.UpdatedAt != "" && cached.UpdatedAt > fresh.UpdatedAt {
+				return false
+			}
+		}
+	}
+
 	m.groups = byID
 	m.groupMemberProviders = providers
-	m.groupsMu.Unlock()
-	return nil
+	return true
+}
+
+// credentialGroupSnapshotChanged reports whether the freshly-read
+// snapshot differs from the cache. LOCK-FREE with respect to m.mu —
+// it takes groupsMu.RLock() only (the request path's flatten takes the
+// same lock).
+func (m *ModelsManager) credentialGroupSnapshotChanged(byID map[string]models.CredentialGroupConfig, providers map[string]string) bool {
+	m.groupsMu.RLock()
+	defer m.groupsMu.RUnlock()
+	return !credentialGroupSnapshotsEqual(m.groups, m.groupMemberProviders, byID, providers)
+}
+
+// credentialGroupSnapshotsEqual reports whether the cached group map and
+// the member-provider snapshot are IDENTICAL to the freshly-read ones.
+//
+// BOTH maps are compared: the group rows (id / name / provider / members
+// / created_at / updated_at) AND the member→provider snapshot. The
+// member-provider half is load-bearing: the A-8 fail-closed expand reads
+// it, so a direct-SQL credential-PROVIDER edit that leaves the group
+// rows untouched must still be observed (a group-rows-only comparison
+// would mask it and the divergent member would keep expanding with its
+// stale provider).
+func credentialGroupSnapshotsEqual(cachedGroups map[string]models.CredentialGroupConfig, cachedProviders map[string]string, newGroups map[string]models.CredentialGroupConfig, newProviders map[string]string) bool {
+	if len(cachedGroups) != len(newGroups) {
+		return false
+	}
+	for id, ng := range newGroups {
+		cg, ok := cachedGroups[id]
+		if !ok {
+			return false
+		}
+		if cg.ID != ng.ID || cg.Name != ng.Name || cg.Provider != ng.Provider ||
+			cg.CreatedAt != ng.CreatedAt || cg.UpdatedAt != ng.UpdatedAt ||
+			!slices.Equal(cg.Members, ng.Members) {
+			return false
+		}
+	}
+	if len(cachedProviders) != len(newProviders) {
+		return false
+	}
+	for id, np := range newProviders {
+		cp, ok := cachedProviders[id]
+		if !ok || cp != np {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -711,15 +936,13 @@ func (m *ModelsManager) fanOutCredentialGroupLocked(groupID string) {
 	}
 }
 
-// fanOutCredentialGroupsLocked refreshes the engine state of EVERY model
-// that references ANY group. Used after a wholesale cache rebuild (the
-// direct-SQL heal path). Caller holds m.mu (write).
-func (m *ModelsManager) fanOutCredentialGroupsLocked() {
-	modelList, err := m.scanModels(m.qb.GetAllModels())
-	if err != nil {
-		log.Printf("[WARN] [credential-groups] fan-out failed — model scan error: %v", err)
-		return
-	}
+// fanOutCredentialGroups refreshes the engine state of EVERY model that
+// references ANY group. Used after a wholesale cache rebuild (the
+// direct-SQL heal path). The model list is scanned by the caller OUTSIDE
+// the write lock; this helper only applies the engine state.
+//
+// Caller holds m.mu (write). groupsMu must NOT be held here.
+func (m *ModelsManager) fanOutCredentialGroups(modelList []models.ModelConfig) {
 	for i := range modelList {
 		mc := &modelList[i]
 		if !modelHasCredentialGroupRef(mc) {
@@ -728,6 +951,9 @@ func (m *ModelsManager) fanOutCredentialGroupsLocked() {
 		flat := m.FlattenCredentialRefs(mc)
 		m.engine.OnModelChanged(mc.ID, flat)
 		m.publishCredentialsChanged(mc.ID)
+		if credentialGroupRebuildFanOutHook != nil {
+			credentialGroupRebuildFanOutHook()
+		}
 	}
 }
 
@@ -763,31 +989,102 @@ func modelHasCredentialGroupRef(mc *models.ModelConfig) bool {
 // Credential snapshot (lock-free DB read)
 // ---------------------------------------------------------------------------
 
+// credentialProviderSnapshotForIDs reads the (credential id → provider)
+// pairs for the given IDs in ONE round-trip.
+//
+// DIALECT: `m.qb.Placeholders(n)` yields `?` for SQLite and `$1..$n`
+// for PostgreSQL.
+//
+// CHUNKING: the ID list is chunked at credentialIDQueryChunk so a
+// pathological member count can never exceed the driver's parameter
+// limit (SQLite: 999 by default). The normal case (a handful of
+// members) is a SINGLE round-trip.
+//
+// LOCK-FREE with respect to m.mu — a direct query on m.store.DB (the
+// same posture as scanModels).
+func (m *ModelsManager) credentialProviderSnapshotForIDs(ctx context.Context, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+
+	roundTrips := 0
+	for start := 0; start < len(unique); start += credentialIDQueryChunk {
+		end := start + credentialIDQueryChunk
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		if len(chunk) == 0 {
+			continue
+		}
+		query := fmt.Sprintf(`SELECT id, provider FROM credentials WHERE id IN (%s)`, m.qb.Placeholders(len(chunk)))
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := m.store.DB.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, provider string
+			if err := rows.Scan(&id, &provider); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan error: %w", err)
+			}
+			out[id] = provider
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("rows error: %w", err)
+		}
+		rows.Close()
+		roundTrips++
+		if credentialGroupProviderQueryHook != nil {
+			credentialGroupProviderQueryHook(roundTrips)
+		}
+	}
+	return out, nil
+}
+
+// credentialIDQueryChunk is the maximum number of IDs sent in a single
+// `id IN (...)` round-trip. SQLite's default parameter limit is 999;
+// keep a generous margin. A single group with more members than this
+// chunk size costs ceil(n/chunk) round-trips — still bounded, and never
+// one round-trip per member.
+const credentialIDQueryChunk = 500
+
 // credentialConfigSnapshotForIDs reads the credential rows (id + provider)
 // for the given IDs WITHOUT taking m.mu.
+//
+// ONE round-trip (no N+1): the providers are read via
+// credentialProviderSnapshotForIDs (an `id IN (...)` query). A read
+// failure yields an EMPTY snapshot (the members are then simply absent,
+// exactly as when a row is missing) — the caller validates against it.
 //
 // LOCK DISCIPLINE: the group write path holds m.mu.Lock(); a nested
 // m.mu.RLock() would self-deadlock (Go's RWMutex is non-reentrant). The
 // read is a direct query on m.store.DB — the same lock-free posture as
-// scanModels. A missing row is simply absent from the result.
+// scanModels.
 func (m *ModelsManager) credentialConfigSnapshotForIDs(ids []string) map[string]models.CredentialConfig {
-	out := make(map[string]models.CredentialConfig, len(ids))
-	if len(ids) == 0 {
+	ctx, cancel := context.WithTimeout(context.Background(), credentialGroupRebuildTimeout)
+	defer cancel()
+
+	providers, err := m.credentialProviderSnapshotForIDs(ctx, ids)
+	out := make(map[string]models.CredentialConfig, len(providers))
+	if err != nil {
+		log.Printf("[WARN] [credential-groups] credential snapshot read failed (%v) — the member set is empty", err)
 		return out
 	}
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		query := `SELECT id, provider FROM credentials WHERE id = ?`
-		if m.store.Dialect == PostgreSQL {
-			query = `SELECT id, provider FROM credentials WHERE id = $1`
-		}
-		var rowID, provider string
-		if err := m.store.DB.QueryRowContext(context.Background(), query, id).Scan(&rowID, &provider); err != nil {
-			continue
-		}
-		out[rowID] = models.CredentialConfig{ID: rowID, Provider: provider}
+	for id, provider := range providers {
+		out[id] = models.CredentialConfig{ID: id, Provider: provider}
 	}
 	return out
 }

@@ -751,7 +751,7 @@ func TestCredentialGroup_LockDiscipline_NoDeadlock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			mgr.FlattenCredentialRefsByID("m1")
+			mgr.FlattenCredentialRefs(mgr.GetModelNative("m1"))
 			mgr.ResolveInternalConfigWithAffinity("m1", "")
 			mgr.GroupsContainingCredential("cred-A")
 		}
