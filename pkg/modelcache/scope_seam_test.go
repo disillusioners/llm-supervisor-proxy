@@ -1,7 +1,7 @@
 package modelcache
 
 // ─────────────────────────────────────────────────────────────────────────────
-// scope_export_test.go — the MINT-SCOPE test seam (wi-4b8d21e7).
+// scope_seam_test.go — the MINT-SCOPE test seam (wi-4b8d21e7).
 //
 // The seam lives in a _test.go file on PURPOSE: it must NOT be part of
 // the production binary. The production model-scope vocabulary is EMPTY
@@ -20,6 +20,14 @@ package modelcache
 //
 // The injected marker is a TEST FIXTURE, never a production class: it
 // is removed again by the returned restore func.
+//
+// NOT PARALLEL-SAFE: the seam mutates the package-level
+// modelScopeMarkers slice WITHOUT a lock. Only tests that install the
+// seam may run concurrently with each other — a test that reads the
+// scope vocabulary while the seam is installed would observe the
+// synthetic marker. The modelcache tests are sequential (no
+// t.Parallel()), so the seam is safe there; a future parallel test
+// must not read the vocabulary while the seam is installed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // InjectModelScopeMarkerForTest appends a model-scope marker to the

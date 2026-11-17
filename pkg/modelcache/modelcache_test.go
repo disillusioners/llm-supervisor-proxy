@@ -153,13 +153,13 @@ func TestModelWall_AccountQuotaNotModelMarked(t *testing.T) {
 	}
 }
 
-// TestApplyWall_ResetWindowCappedAtKnob: a parsed 5h reset is capped at the
+// TestApplyWallPrimitive_ResetWindowCappedAtKnob: a parsed 5h reset is capped at the
 // configured knob (30m).
-func TestApplyWall_ResetWindowCappedAtKnob(t *testing.T) {
+func TestApplyWallPrimitive_ResetWindowCappedAtKnob(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Hour).Format("2006-01-02 15:04:05")
 	c := New()
-	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	applyWall(c, "m", msg, 30*time.Minute, now)
 	until, ok := c.Until("m")
 	if !ok {
 		t.Fatal("expected mark")
@@ -170,13 +170,13 @@ func TestApplyWall_ResetWindowCappedAtKnob(t *testing.T) {
 	}
 }
 
-// TestApplyWall_SoonerResetHonored: a stated reset sooner than the cap is
+// TestApplyWallPrimitive_SoonerResetHonored: a stated reset sooner than the cap is
 // honored exactly (not extended to the knob).
-func TestApplyWall_SoonerResetHonored(t *testing.T) {
+func TestApplyWallPrimitive_SoonerResetHonored(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(10*time.Minute).Format("2006-01-02 15:04:05")
 	c := New()
-	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	applyWall(c, "m", msg, 30*time.Minute, now)
 	until, ok := c.Until("m")
 	if !ok {
 		t.Fatal("expected mark")
@@ -187,12 +187,25 @@ func TestApplyWall_SoonerResetHonored(t *testing.T) {
 	}
 }
 
-// TestApplyWall_NoResetUsesKnob: no parseable reset uses the knob as the
+// TestApplyWallPrimitive_NoResetUsesKnob: no parseable reset uses the knob as the
 // fixed window.
-func TestApplyWall_NoResetUsesKnob(t *testing.T) {
+//
+// The fixture is a MODEL-SCOPED body (the test seam installs the
+// model-scope marker): the wall-shape primitive is exercised on a body
+// the scope layer classifies as model-scoped.
+//
+// The ACCOUNT body of the 2026-11-17 03:56:55Z incident ("Token Plan
+// usage limit") must NOT appear in a wall-shape test — it is pinned as
+// REJECTED at the scoped entry point instead
+// (TestApplyScopedWall_AccountScopedBodiesNeverMark in scope_test.go).
+func TestApplyWallPrimitive_NoResetUsesKnob(t *testing.T) {
+	const marker = "zz-synthetic-model-scope-marker-zz"
+	restore := InjectModelScopeMarkerForTest(marker)
+	defer restore()
+
 	now := time.Now()
 	c := New()
-	ApplyWall(c, "m", "Token Plan usage limit", 30*time.Minute, now)
+	applyWall(c, "m", "Usage limit reached for 5 hour "+marker, 30*time.Minute, now)
 	until, ok := c.Until("m")
 	if !ok {
 		t.Fatal("expected mark")
@@ -202,12 +215,12 @@ func TestApplyWall_NoResetUsesKnob(t *testing.T) {
 	}
 }
 
-// TestApplyWall_ResetFloorOneMinute: a sub-minute reset is floored at 1m.
-func TestApplyWall_ResetFloorOneMinute(t *testing.T) {
+// TestApplyWallPrimitive_ResetFloorOneMinute: a sub-minute reset is floored at 1m.
+func TestApplyWallPrimitive_ResetFloorOneMinute(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Second).Format("2006-01-02 15:04:05")
 	c := New()
-	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	applyWall(c, "m", msg, 30*time.Minute, now)
 	until, ok := c.Until("m")
 	if !ok {
 		t.Fatal("expected mark")
@@ -218,12 +231,16 @@ func TestApplyWall_ResetFloorOneMinute(t *testing.T) {
 	}
 }
 
-// TestApplyWall_KnobAboveHardCeilingClamped: a knob above the 24h hard
+// TestApplyWallPrimitive_KnobAboveHardCeilingClamped: a knob above the 24h hard
 // ceiling is clamped to 24h.
-func TestApplyWall_KnobAboveHardCeilingClamped(t *testing.T) {
+func TestApplyWallPrimitive_KnobAboveHardCeilingClamped(t *testing.T) {
+	const marker = "zz-synthetic-model-scope-marker-zz"
+	restore := InjectModelScopeMarkerForTest(marker)
+	defer restore()
+
 	now := time.Now()
 	c := New()
-	ApplyWall(c, "m", "Token Plan usage limit", 48*time.Hour, now)
+	applyWall(c, "m", "Usage limit reached for 5 hour "+marker, 48*time.Hour, now)
 	until, ok := c.Until("m")
 	if !ok {
 		t.Fatal("expected mark")
@@ -239,7 +256,7 @@ func TestCache_ExpiryThenRetryIsImmediate(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second).Add(-31 * time.Minute)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(40*time.Minute).Format("2006-01-02 15:04:05")
 	c := New()
-	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	applyWall(c, "m", msg, 30*time.Minute, now)
 	if c.Marked("m") {
 		t.Fatal("expired mark should not suppress")
 	}

@@ -248,11 +248,66 @@ func IsRateLimitError(err error) bool {
 	return false
 }
 
-// quotaTypeVocabulary / quotaCodeVocabulary / quotaMessageVocabulary are
-// the quota-class (credit/plan exhaustion) vocabularies consumed by
-// IsQuotaError. Split by FIELD so each field's precision can differ:
-// type/code are structured (low noise ⇒ substring-safe), the message is
-// free text (higher noise ⇒ bounded phrases only).
+// ─────────────────────────────────────────────────────────────────────────────
+// THE CANONICAL QUOTA-CLASS VOCABULARY (wi-4b8d21e7, review S-1 / S-4).
+//
+// ONE canonical vocabulary, three consumers:
+//
+//   - the CHAT lane's IsQuotaError (the *ProviderError classifier);
+//   - the ANTHROPIC lane's decode-first classifier (it calls
+//     ClassifyQuotaBody — no local list);
+//   - the MINT-SCOPE layer's subset invariant (pkg/modelcache's scope
+//     vocabulary must cover every token here).
+//
+// WHY THE CLASS LIST IS TIGHT (the asymmetry that matters):
+//
+//	over-breadth in the SCOPE list resolves to the SAFE narrow scope
+//	(a model mark is simply not minted);
+//	over-breadth in the CLASS list benches a HEALTHY credential for
+//	15m instead of 60s — the "cooldown trap" this commission exists to
+//	close (a walled account that returns to the pool after a minute).
+//
+// Every token below is EVIDENCE-BACKED: a body in the corpus (a live
+// upstream body or a test pin of one) carries it. Tokens without an
+// observed instance were DROPPED (the shipped v197 list carried a few;
+// the Anthropic lane's local list carried three more, one of them
+// INVENTED — "insufficient_parameters" is a CLIENT error, not a quota).
+//
+// PROVENANCE per token (the observed instance):
+//
+//	"insufficient_credit"  — providers/interface_quota_test.go (type)
+//	"insufficient_quota"   — providers/interface_quota_test.go (type/code);
+//	                         pkg/proxy/sticky_scenario_test.go (live-shaped body)
+//	"quota"                — providers/interface_quota_test.go (the
+//	                         "quota_exceeded" type is matched by this token);
+//	                         the 9router live body
+//	"payment_required"     — the review's drift probe (code=payment_required
+//	                         classified QUOTA in the race lane, NOT in the
+//	                         Anthropic lane — the drift this list ends);
+//	                         BOTH spellings are kept on purpose
+//	"resource_exhausted"   — pkg/imggen/ninerouter.go:290 (the 9router
+//	                         nested body: "status":"RESOURCE_EXHAUSTED")
+//	"insufficient credit"  — providers/interface_quota_test.go (message)
+//	"quota exceeded"       — providers/interface_quota_test.go (message)
+//	"quota exhausted"      — pkg/proxy/race_reason_test.go (message)
+//	"token plan usage limit" — the z.ai live bodies (codes 2056 / 2067)
+//	"token plan"           — the z.ai live bodies (codes 2056 / 2067)
+//	"payment required"     — providers/interface_quota_test.go (message)
+//	"your quota will reset" — the 9router live body
+//	"your limit will reset" — the z.ai 5-hour plan-window body
+//	"exhausted your capacity" — the 9router live body
+//
+// DROPPED (no observed instance — the class list is the narrow, safe
+// side; the SCOPE vocabulary in pkg/modelcache keeps the account-subject
+// knowledge so the mint scope stays correct):
+//
+//	"insufficient_quota" / "insufficient_balance" (message spellings),
+//	"insufficient_credits", "exceeded your quota", "credit exhausted",
+//	"credits exhausted", "out of credit", "billing",
+//	"credit_exhausted", "insufficient_balance" (type spelling),
+//	"insufficient_parameters" (INVENTED — a client-side parameter
+//	complaint, never a quota), "credit_balance_too_low" and
+//	"billing_error" (Anthropic-lane-only, no corpus instance).
 //
 // Observed live vocabulary (job 8d852270): HTTP 402 / code 2067 /
 // "Token Plan usage limit" — the code arrives as a NUMBER on the wire
@@ -264,38 +319,119 @@ func IsRateLimitError(err error) bool {
 // workhorse for numeric-code upstreams.
 var (
 	quotaTypeVocabulary = []string{
-		"quota",
 		"insufficient_credit",
 		"insufficient_quota",
-		"insufficient_balance",
+		"quota",
 		"payment_required",
-		"credit_exhausted",
 		"billing",
+		"resource_exhausted",
 	}
 	quotaCodeVocabulary    = quotaTypeVocabulary // structured fields share the set
 	quotaMessageVocabulary = []string{
 		"insufficient credit",
-		"insufficient credits",
-		"insufficient balance",
-		"insufficient quota",
 		"quota exceeded",
 		"quota exhausted",
-		"exceeded your quota",
-		"credit exhausted",
-		"credits exhausted",
-		"out of credit",
-		// W1 (pre-merge review): the former bare "usage limit" phrase was
-		// removed — a PLAIN rate-limit body uses it for per-minute
-		// throttling ("you have reached your usage limit for this
-		// minute"), which must classify rate_limit (60s/Retry-After),
-		// NOT quota. The specific observed live shape replaces it.
+		// The specific observed live shape replaces the former bare
+		// "usage limit" phrase — a PLAIN rate-limit body uses "usage
+		// limit" for per-minute throttling ("you have reached your
+		// usage limit for this minute"), which must classify rate_limit
+		// (60s/Retry-After), NOT quota.
 		"token plan usage limit",
 		// "token plan" stays its own status-agnostic phrase BY DESIGN: a
 		// token-plan body means the plan is exhausted at ANY status.
 		"token plan",
 		"payment required",
+		// The account-subject shapes the SCOPE layer already knows
+		// (review S-1): the z.ai plan window and the 9router account
+		// quota are ACCOUNT walls — they must seed the QUOTA cooldown
+		// (15m), not the flat rate-limit one (60s), or the dry account
+		// re-enters the pool after a minute.
+		"your quota will reset",
+		"your limit will reset",
+		"exhausted your capacity",
 	}
 )
+
+// QuotaBodyKind — WHICH part of an upstream error body carried the
+// quota classification. The Anthropic lane needs the distinction: its
+// MESSAGE-driven path is gated on a credential-attributable status
+// (review S-3), while its type/code-driven path is pre-existing
+// behavior and is not re-gated.
+type QuotaBodyKind int
+
+const (
+	// QuotaBodyNone — no quota vocabulary in any field.
+	QuotaBodyNone QuotaBodyKind = iota
+	// QuotaBodyStructured — the error type or code carried the quota
+	// vocabulary (the precise, structured signal).
+	QuotaBodyStructured
+	// QuotaBodyMessage — only the free-text message carried it.
+	QuotaBodyMessage
+)
+
+// String renders the kind for the operator-facing log lines.
+func (k QuotaBodyKind) String() string {
+	switch k {
+	case QuotaBodyStructured:
+		return "structured"
+	case QuotaBodyMessage:
+		return "message"
+	default:
+		return "none"
+	}
+}
+
+// ClassifyQuotaBody is the CANONICAL quota-body classifier: it reads
+// the three fields of an upstream error body and reports WHICH of them
+// carried the quota vocabulary.
+//
+// The structured fields (type / code) are matched against the shared
+// structured vocabulary (substring-safe, low noise); the free-text
+// message is matched against the bounded message vocabulary. The
+// structured signal wins the tie: a body whose type says quota is
+// classified structured even when its message also matches.
+//
+// This is the ONE classifier both protocol lanes use — the chat lane
+// through IsQuotaError, the Anthropic lane through
+// ClassifyQuotaBody (it no longer carries a local list).
+func ClassifyQuotaBody(errorType, errorCode, message string) QuotaBodyKind {
+	if containsAny(strings.ToLower(errorType), quotaTypeVocabulary) ||
+		containsAny(strings.ToLower(errorCode), quotaCodeVocabulary) {
+		return QuotaBodyStructured
+	}
+	if IsQuotaMessage(message) {
+		return QuotaBodyMessage
+	}
+	return QuotaBodyNone
+}
+
+// IsQuotaBody is the boolean form of ClassifyQuotaBody: true when any
+// field of the upstream error body carries the quota vocabulary.
+//
+// The canonical entry point for a caller that holds the body's fields
+// separately (the Anthropic lane); a caller that holds a raw body uses
+// IsQuotaMessage.
+func IsQuotaBody(errorType, errorCode, message string) bool {
+	return ClassifyQuotaBody(errorType, errorCode, message) != QuotaBodyNone
+}
+
+// QuotaVocabularyTokens returns a COPY of the canonical quota-class
+// tokens (the structured set + the message set).
+//
+// It exists for the MINT-SCOPE subset invariant: the class vocabulary
+// decides the cooldown policy, the scope vocabulary decides whether a
+// model mark is minted — and every class token must be covered by the
+// scope vocabulary, or a body the class layer treats as an account
+// quota could be scoped as model-scoped and mint a model mark.
+//
+// Read-only: the returned slice is a copy, so a caller cannot mutate
+// the canonical vocabulary.
+func QuotaVocabularyTokens() []string {
+	out := make([]string, 0, len(quotaTypeVocabulary)+len(quotaMessageVocabulary))
+	out = append(out, quotaTypeVocabulary...)
+	out = append(out, quotaMessageVocabulary...)
+	return out
+}
 
 // containsAny reports whether the lowercased haystack contains any of the
 // (already-lowercase) vocabulary entries.
@@ -376,11 +512,8 @@ func IsQuotaError(err error) bool {
 	if pe.StatusCode == 402 {
 		return true
 	}
-	if containsAny(strings.ToLower(pe.ErrorType), quotaTypeVocabulary) {
-		return true
-	}
-	if containsAny(strings.ToLower(pe.ErrorCode), quotaCodeVocabulary) {
-		return true
-	}
-	return IsQuotaMessage(pe.Message)
+	// The CANONICAL classifier (review S-4): the structured fields win
+	// the tie over the free-text message — one vocabulary, one
+	// decision, shared with the Anthropic lane.
+	return ClassifyQuotaBody(pe.ErrorType, pe.ErrorCode, pe.Message) != QuotaBodyNone
 }
