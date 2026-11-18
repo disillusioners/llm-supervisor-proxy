@@ -297,7 +297,10 @@ type raceCoordinator struct {
 	lastFailReason failureReason
 }
 
-func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
+// newRaceCoordinator is the test-oriented 6-arg wrapper. It forwards
+// the error verbatim (PD-10): an empty model list is a contract
+// violation, never an invitation to guess.
+func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) (*raceCoordinator, error) {
 	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "", false, nil)
 }
 
@@ -334,9 +337,16 @@ func newRaceCoordinatorWithEvents(
 	conversationKey string,
 	liveFirstByteGate bool,
 	sticky *stickyorder.Engine,
-) *raceCoordinator {
+) (*raceCoordinator, error) {
+	// PD-10: an empty list is a CONTRACT VIOLATION, never an invitation
+	// to guess. The callers must have already decided 403 (scope) or
+	// 502 (unservability) BEFORE construction; the retired fallback
+	// silently re-expanded the list to the snapshot's primary model and
+	// re-introduced an OUT-OF-SCOPE model — converting the intended 403
+	// ScopeExcluded into a real upstream attempt and a 502. The refusal
+	// is the second line of defence (the caller guard is the first).
 	if len(models) == 0 {
-		models = []string{cfg.ModelID}
+		return nil, fmt.Errorf("race coordinator: empty model list (the caller must resolve 403/502 before construction)")
 	}
 	return &raceCoordinator{
 		baseCtx:           ctx,
@@ -365,7 +375,7 @@ func newRaceCoordinatorWithEvents(
 		soonestExpiryAttemptedByModel: make(map[string]bool),
 		eventBus:                      eventBus,
 		requestID:                     requestID,
-	}
+	}, nil
 }
 
 // publishEvent publishes an event to the event bus if available

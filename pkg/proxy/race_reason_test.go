@@ -516,12 +516,15 @@ func TestRaceFailureReason_FailingUpstreamEndToEnd(t *testing.T) {
 	cfg := newTestConfigSnapshot("m1")
 	cfg.ModelsConfig = mc
 
-	coord := newRaceCoordinatorWithEvents(
+	coord, err := newRaceCoordinatorWithEvents(
 		context.Background(), cfg, newTestRequest(),
 		[]byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}]}`),
 		[]string{"m1"}, bus, "req-reason-e2e", false, nil, "", false,
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	coord.Start()
 	select {
@@ -603,11 +606,14 @@ func TestRaceSpawnEvent_ReasonAdditiveOnly(t *testing.T) {
 	evCh := collectReasonEvents(t, bus)
 
 	cfg := newTestConfigSnapshot("m1")
-	coord := newRaceCoordinatorWithEvents(
+	coord, err := newRaceCoordinatorWithEvents(
 		context.Background(), cfg, newTestRequest(), []byte("{}"),
 		[]string{"m1", "fallback"}, bus, "req-reason-spawn", false, nil, "", false,
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Idle-timeout spawn (no error to classify — W4).
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{

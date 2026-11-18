@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credclass"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -113,11 +114,96 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 		return
 	}
 
+	// THE SCOPE (ADR D2/D7): resolved INSIDE the group arm, right after
+	// the lane gate, so the handler keeps no cross-request state.
+	//
+	// The membersOf adapter reads the IN-MEMORY model rows
+	// (models.GroupMembershipReader — the modelscache decorator's
+	// non-copying accessor; the fallback is the claim-blind
+	// currentModelRows()): NO DB read on the request path (Ruling 5).
+	scope := authz.Resolve(authToken, h.membersOf())
+
+	// NEW ARM #1 — the GROUP itself must be in reach.
+	//
+	// It runs AFTER the lane gate (a chat-kind group stays a 400
+	// decision_misroute — the precedence is preserved) and BEFORE any
+	// candidate construction (no pick, no binding, no attempt).
+	//
+	// PD-9 (T2.16): authorize the RESOLVED target — here the group id.
+	// NEVER the client-requested string: a claimed id resolves INTO
+	// this group arm (the resolve is claims-first), so group.ID is the
+	// row that would be contacted (ADR D1). The 403 QUOTES the
+	// client-requested string (req.Model) — for a non-claimed request
+	// that equals the group id, and for a claimed request the canonical
+	// group id never appears in the body.
+	if scope != nil && !scope.Allows(groupID) {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome": "model_not_allowed", "model": req.Model,
+			"duration_ms": time.Since(startTime).Milliseconds(), "upstream_status": 0,
+		})
+		h.sendModelNotAllowedError(w, req.Model)
+		return
+	}
+
+	// NEW ARM #2 — filter a COPY of the member slice, BEFORE
+	// buildGroupPolicy. The policy's doctrine is "may reorder
+	// candidates, never exclude them", so the exclusion happens HERE,
+	// on the copy — policy.go stays BYTE-UNCHANGED (P7/A4).
+	//
+	// PD-15: the copy is built with make(..., 0, len(group.Members)) —
+	// a FRESH backing array. The cached row's member slice is never
+	// mutated (group.Members[:0] would keep the source array's
+	// capacity and the appends would write into it).
+	filtered := *group
+	filtered.Members = make([]models.GroupMember, 0, len(group.Members))
+	scopeExcluded := 0
+	for _, mbr := range group.Members {
+		if scope == nil || scope.Allows(mbr.ModelID) {
+			filtered.Members = append(filtered.Members, mbr)
+			continue
+		}
+		scopeExcluded++
+	}
+
+	// PD-5 counting rule: how many members would buildGroupPolicy have
+	// admitted on the UNFILTERED row? Counted on `group` (NOT on
+	// `filtered`), with the SAME candidacy predicate the policy uses
+	// (the row exists AND the row is enabled AND the member's lane
+	// matches — policy.go:65-92). If that number is > 0 and
+	// scopeExcluded > 0 and the final order is empty, the emptiness is
+	// SCOPE-CAUSED.
+	// ONE live-row read for BOTH the base-servable count and the policy
+	// (currentModelRows() deep-copies the model set, so it must not be
+	// called twice on the same request).
+	rows := h.currentModelRows()
+	baseServable := countBaseServableMembers(group.Members, rows, lane)
+
 	// The GROUP-layer policy facts (no failure state) and the attempt
 	// order (the policy head first).
-	policy := buildGroupPolicy(group, h.currentModelRows(), lane)
+	policy := buildGroupPolicy(&filtered, rows, lane)
 	order := policy.order()
 	if len(order) == 0 {
+		// NEW ARM #3 — "empty by scope" (403) vs "empty by
+		// unservability" (502).
+		//
+		// The verdict is ATTEMPT-COUNT-KEYED (leader ruling): the order
+		// is computed BEFORE the first attempt, so ZERO upstream
+		// attempts ran here ⇒ a scope-caused emptiness is a PERMISSION
+		// failure (403 access_denied), never the availability envelope.
+		//
+		// baseServable is counted on the UNFILTERED row: if the group's
+		// members are all DISABLED, baseServable == 0 ⇒ the empty order
+		// is genuine unservability ⇒ 502, even if scopeExcluded > 0 (a
+		// disabled out-of-scope member is still a disabled member —
+		// availability, not permission).
+		if scope != nil && scopeExcluded > 0 && baseServable > 0 {
+			h.publishEvent(eventTypeDecision, map[string]interface{}{
+				"outcome": "model_not_allowed", "model": req.Model,
+				"duration_ms": time.Since(startTime).Milliseconds(), "upstream_status": 0,
+			})
+			h.sendModelNotAllowedError(w, req.Model)
+			return
+		}
 		h.exhaustDecisionGroup(w, groupID, 0, 0, 0, startTime)
 		return
 	}
@@ -503,6 +589,77 @@ func (h *Handler) rotateMemberCredential(memberID string, cred models.ResolvedCr
 	// The credential key is (memberID, memberID) — the lane's stable
 	// per-model credential key (no conversation binding on this lane).
 	h.credEngine.ExcludeAndReselectForClass(memberID, memberID, cred.CredentialID, class, 0)
+}
+
+// membersOf returns the CURRENT member ids of a group — the adapter
+// pkg/authz.Resolve consumes to expand a granted group into its
+// members.
+//
+// The accessor is the OPTIONAL models.GroupMembershipReader seam: the
+// modelscache decorator implements it with a NON-COPYING read of its
+// in-memory snapshot (one small allocation — the member-id slice). The
+// deep-copying currentModelRows() is only the FALLBACK (the structural
+// test fakes and the JSON twin), so the production path copies nothing
+// (Ruling 5: the membership must come from the in-memory snapshot —
+// never a live SELECT under m.mu.RLock).
+//
+// The expansion is CLAIM-BLIND by construction: the member ids are the
+// group's own member list, never a claims-first resolution.
+func (h *Handler) membersOf() func(string) []string {
+	return func(groupID string) []string {
+		if h.modelsConfig == nil {
+			return nil
+		}
+		if r, ok := h.modelsConfig.(models.GroupMembershipReader); ok {
+			return r.GroupMembers(groupID)
+		}
+		for _, row := range h.currentModelRows() {
+			if row.ID != groupID || !row.IsGroup() {
+				continue
+			}
+			out := make([]string, 0, len(row.Members))
+			for _, m := range row.Members {
+				out = append(out, m.ModelID)
+			}
+			return out
+		}
+		return nil
+	}
+}
+
+// countBaseServableMembers counts the members buildGroupPolicy WOULD
+// have admitted on the UNFILTERED row — the SAME candidacy predicate
+// the policy uses (the row exists AND the row is enabled AND the
+// member's lane matches the group's lane — policy.go's buildGroupPolicy
+// candidacy block).
+//
+// It is the discriminator between "empty by scope" (403) and "empty by
+// unservability" (502): a group whose members are ALL disabled has
+// baseServable == 0, so its empty order is an AVAILABILITY failure even
+// when the scope also excluded members.
+//
+// The count is computed on the UNFILTERED member list — the filtered
+// copy would make the two counts indistinguishable.
+func countBaseServableMembers(members []models.GroupMember, rows []models.ModelConfig, lane models.GroupLane) int {
+	byID := make(map[string]models.ModelConfig, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	n := 0
+	for _, member := range members {
+		if member.ModelID == "" {
+			continue
+		}
+		row, ok := byID[member.ModelID]
+		if !ok || !row.Enabled {
+			continue
+		}
+		if memberLane, ok := models.MemberLane(row.Kind); !ok || memberLane != lane {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // memberRow returns the member's CURRENT row (claim-blind: the live

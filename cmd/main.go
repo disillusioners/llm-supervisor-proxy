@@ -318,6 +318,14 @@ func main() {
 		// single-credential resolution on the nil-engine branch.
 		return modelsConfig.ResolveInternalConfigWithAffinity(modelID, modelID)
 	}))
+	// The AUTH COMMISSION's group-membership seam: the image-gen lane's
+	// scope resolution needs the CURRENT members of a granted group.
+	// The membership is read from the IN-MEMORY models snapshot (the
+	// decorator's non-copying accessor) — NEVER a live DB read (the
+	// raw manager's GetModelNative issues a SELECT under m.mu.RLock and
+	// stalls every reader). Mirrors the decision lane's SetModelsConfig
+	// wiring below.
+	imggenHandler.SetModelsConfig(modelsConfig)
 
 	// Initialize Decision Handler (Decision Models commission /
 	// §3.2 + §3.3 + §10 P1.7). Constructed next to imggenHandler

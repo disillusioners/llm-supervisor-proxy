@@ -431,7 +431,10 @@ func newSepCoord(t *testing.T, chain []sepModel, provider providers.Provider, st
 		tune(cfg)
 	}
 	rawBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%v}`, modelIDs[0], stream))
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "sep-req", false, engine, convKey, liveGate, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "sep-req", false, engine, convKey, liveGate, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	return coord, bus
 }
 
@@ -1055,7 +1058,10 @@ func TestCacheLayer_D1_Wiring_AttemptPrefersUnmarkedCredential(t *testing.T) {
 	cfg.MaxGenerationTime = 5 * time.Second
 	cfg.StreamDeadline = 5 * time.Second
 	raw := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), raw, []string{"m1"}, events.NewBus(), "d1-wire", false, engine, "conv-d1-wire", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), raw, []string{"m1"}, events.NewBus(), "d1-wire", false, engine, "conv-d1-wire", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	coord.Start()
 	if w := coord.WaitForWinner(); w == nil {

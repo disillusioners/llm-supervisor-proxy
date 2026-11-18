@@ -17,7 +17,10 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
+	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
@@ -45,6 +48,80 @@ type groupPickInfo struct {
 	BindingStale bool
 }
 
+// membersOf returns the CURRENT member ids of a group, read from the
+// IN-MEMORY models snapshot (Ruling 5 — NEVER a live DB read).
+//
+// The accessor is the OPTIONAL models.GroupMembershipReader seam: the
+// modelscache decorator implements it with a NON-COPYING read of its
+// in-memory snapshot (one small allocation — the member-id slice).
+// GetModels() would answer the same question but DEEP-COPIES the whole
+// model set (every row plus its chain / credential-ref / member slices)
+// on every call — per-request garbage on the hot path.
+//
+// A backend without the seam (the structural test fakes, the JSON
+// twin) falls back to the deep-copying snapshot: correct, slower.
+//
+// FRESHNESS: the decorator's snapshot is rebuilt on every group write
+// (the write-through mutators) and on every reconciler tick, so a
+// membership change takes effect on the next request without re-minting
+// the token (ADR D12).
+func (h *Handler) membersOf(conf *ConfigSnapshot) func(string) []string {
+	return func(groupID string) []string {
+		if conf == nil || conf.ModelsConfig == nil {
+			return nil
+		}
+		if r, ok := conf.ModelsConfig.(models.GroupMembershipReader); ok {
+			return r.GroupMembers(groupID)
+		}
+		for _, row := range conf.ModelsConfig.GetModels() {
+			if row.ID != groupID || !row.IsGroup() {
+				continue
+			}
+			out := make([]string, 0, len(row.Members))
+			for _, m := range row.Members {
+				out = append(out, m.ModelID)
+			}
+			return out
+		}
+		return nil
+	}
+}
+
+// excludeGroupMemberScoped is the shared offer-walk helper (the chat
+// and Anthropic re-entry walks both use it).
+//
+// It uses the SCOPED exclude when the backend provides it (the
+// production modelscache decorator does) and falls back to the legacy
+// exclude otherwise.
+//
+// THE FALLBACK'S REACH CHECK: the legacy exclude cannot scope its
+// offer, so an out-of-reach replacement is refused — and it is NOT
+// excluded in turn, because the legacy API's only "advance" mechanism
+// is a cooldown write, and cooling a member that was never attempted
+// would create cross-request state from a permission decision (Ruling
+// 1). The fallback therefore ends the walk (the caller keeps its
+// terminal availability path) instead of advancing.
+func (h *Handler) excludeGroupMemberScoped(conf *ConfigSnapshot, reach models.ReachFilter, groupID, conversationKey, memberID string, cooldown time.Duration) models.GroupExcludeOutcome {
+	if conf == nil || conf.ModelsConfig == nil {
+		return models.GroupExcludeOutcome{}
+	}
+	if grs, ok := conf.ModelsConfig.(models.GroupRewriterScoped); ok {
+		return grs.ExcludeGroupMemberScoped(groupID, conversationKey, memberID, cooldown, reach)
+	}
+	gr, ok := conf.ModelsConfig.(models.GroupRewriter)
+	if !ok {
+		return models.GroupExcludeOutcome{}
+	}
+	replacement, pool, avail := gr.ExcludeGroupMember(groupID, conversationKey, memberID, cooldown)
+	if !avail || replacement == "" {
+		return models.GroupExcludeOutcome{}
+	}
+	if reach != nil && !reach.Allows(replacement) {
+		return models.GroupExcludeOutcome{}
+	}
+	return models.GroupExcludeOutcome{Replacement: replacement, Pool: pool, OK: true}
+}
+
 // applyGroupRewrite is the ONE shared rewrite entry point (Am21).
 // Both protocol sites call it AFTER their conversation-key
 // derivation — the sticky pick needs the request's key (group-salted
@@ -65,32 +142,156 @@ type groupPickInfo struct {
 //     pick came from the configured default sub-pool and "backup"
 //     when the defaults had all been excluded/failed; the Q15
 //     event site reads it for the additive payload field.
-func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, conversationKey string) (newList []string, pick *groupPickInfo, failGroupID string) {
+//
+// THE REACH PARAMETER: reach is the token's scope (ADR D6/D7). It is
+// handed to the SCOPED rewrite so the member PICK itself is
+// scope-aware (an out-of-reach member is never offered and never
+// cooled). A nil reach (wildcard / anonymous) keeps today's behaviour
+// byte-for-byte.
+func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, conversationKey string, reach models.ReachFilter) rewriteOutcome {
 	if conf == nil || conf.ModelsConfig == nil {
-		return modelList, nil, ""
+		return rewriteOutcome{list: modelList}
 	}
 	gr, ok := conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {
-		return modelList, nil, ""
+		return rewriteOutcome{list: modelList}
 	}
-	res := gr.RewriteGroupEntries(modelList, conversationKey)
+	var res models.GroupRewriteResult
+	if grs, scoped := conf.ModelsConfig.(models.GroupRewriterScoped); scoped {
+		res = grs.RewriteGroupEntriesScoped(modelList, conversationKey, reach)
+	} else {
+		if reach != nil {
+			// LOUD ONCE per request: the backend cannot scope its pick,
+			// so the request-layer list filter (applyReachFilter) is the
+			// fail-closed backstop. The pick may be sub-optimal, but no
+			// out-of-scope candidate can reach an upstream attempt.
+			log.Printf("[authz] models backend lacks the scoped rewrite — permission filtering falls back to the request-layer list filter")
+		}
+		res = gr.RewriteGroupEntries(modelList, conversationKey)
+	}
 	if res.FailedGroupID != "" {
-		return nil, nil, res.FailedGroupID
+		// The group had no servable member. scopeExcluded distinguishes
+		// the two reasons: reach (403 access_denied) vs availability
+		// (502 group_unservable) — ADR D14.
+		return rewriteOutcome{list: nil, pick: nil, failGroupID: res.FailedGroupID, scopeExcluded: res.ScopeExcluded}
 	}
 	if !res.AnyGroup {
-		return modelList, nil, ""
+		return rewriteOutcome{list: modelList}
+	}
+	// PD-12 / arch PD-7: a rewrite that produced NO group pick must
+	// NOT mint a phantom pick. No GroupID ⇒ no group context, and
+	// every downstream group path is gated on `rc.groupPick != nil`.
+	// (The dropped fallback-position group leaves AnyGroup true with
+	// GroupID empty — minting a pick there would blank the route model
+	// of a perfectly healthy request and emit group events with an
+	// empty id.)
+	if res.GroupID == "" {
+		return rewriteOutcome{list: res.ModelList}
+	}
+	// T3 pick/list consistency: the stamped pick must be present in the
+	// list that will be executed. A divergence is a fail-closed
+	// condition — never serve a list whose stamped pick is absent.
+	if res.MemberID != "" && !containsModelID(res.ModelList, res.MemberID) {
+		log.Printf("[authz] PICK/LIST DIVERGENCE group=%s member=%s — the stamped pick is absent from the execution list", res.GroupID, res.MemberID)
+		return rewriteOutcome{list: nil, pick: nil, failGroupID: res.GroupID, scopeExcluded: true}
 	}
 	pool := res.MemberPool
 	if pool == "" {
 		pool = models.PoolDefault // back-compat: groups created before D5 rewrite ⇒ no pool tag ⇒ default.
 	}
-	return res.ModelList, &groupPickInfo{
-		GroupID:      res.GroupID,
-		MemberID:     res.MemberID,
-		NewlyBound:   res.MemberNewlyBound,
-		Pool:         pool,
-		BindingStale: res.BindingStale,
-	}, ""
+	return rewriteOutcome{
+		list: res.ModelList,
+		pick: &groupPickInfo{
+			GroupID:      res.GroupID,
+			MemberID:     res.MemberID,
+			NewlyBound:   res.MemberNewlyBound,
+			Pool:         pool,
+			BindingStale: res.BindingStale,
+		},
+	}
+}
+
+// rewriteOutcome is the result of the shared rewrite: the rewritten
+// list, the (optional) group pick, the failed group id and the
+// SCOPE-vs-AVAILABILITY discriminator.
+//
+// The struct exists instead of a 4-value return so the "pick must be
+// nil whenever there is no group" rule (PD-12 / arch PD-7) and the
+// scope-exclusion flag are both explicit at the call site.
+type rewriteOutcome struct {
+	// list is the rewritten execution list (nil when the rewrite
+	// failed — the caller must fail clean).
+	list []string
+	// pick is the group pick, or nil when no group was picked.
+	pick *groupPickInfo
+	// failGroupID is non-empty when a group entry had no servable
+	// member (the caller surfaces the failure envelope).
+	failGroupID string
+	// scopeExcluded is true when the failure was caused by the token's
+	// REACH (every candidate was out of reach), not by availability.
+	// The caller must then answer 403 access_denied — NEVER the 502
+	// group_unservable envelope (ADR D14 / PD-14).
+	scopeExcluded bool
+}
+
+// containsModelID reports whether id is in list.
+func containsModelID(list []string, id string) bool {
+	for _, v := range list {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+// applyReachFilter removes every candidate outside the token's reach.
+//
+//	scope == nil  (wildcard / anonymous) => the list is returned
+//	             UNTOUCHED — same slice identity, ZERO allocation.
+//	scope != nil  => the out-of-scope entries are removed, the
+//	             relative order is preserved, and a dupe is collapsed
+//	             onto its FIRST occurrence (the coordinator's index
+//	             math must stay stable).
+//
+// The removed ids are named ONCE per call in the proxy log (ids only —
+// NEVER in an HTTP response body: a response body must not disclose
+// the existence of out-of-scope models).
+//
+// The caller decides what an EMPTY result means: an empty list at the
+// coordinator is a contract violation (the constructor refuses it), so
+// the empty case must be answered with 403/502 BEFORE construction.
+func (h *Handler) applyReachFilter(scope *authz.Scope, list []string) []string {
+	if scope == nil || len(list) == 0 {
+		return list
+	}
+	// Fast path: nothing to remove ⇒ the list passes through untouched
+	// (same slice identity, no allocation).
+	dropped := false
+	for _, id := range list {
+		if !scope.Allows(id) {
+			dropped = true
+			break
+		}
+	}
+	if !dropped {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	seen := make(map[string]bool, len(list))
+	excluded := make([]string, 0, len(list))
+	for _, id := range list {
+		if !scope.Allows(id) {
+			excluded = append(excluded, id)
+			continue
+		}
+		if seen[id] {
+			continue // keep the first occurrence, drop the rest
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	log.Printf("[authz] dropped %d out-of-scope candidate(s) from the execution list: %s", len(excluded), strings.Join(excluded, ","))
+	return out
 }
 
 // stickyActive is the ONE feature gate shared by every sticky
@@ -450,8 +651,7 @@ func groupFailMessage(groupID string) string {
 // (headersSent is non-committing — the lazy preamble fires on
 // framing-only progress).
 func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
-	gr, ok := arc.conf.ModelsConfig.(models.GroupRewriter)
-	if !ok {
+	if _, ok := arc.conf.ModelsConfig.(models.GroupRewriter); !ok {
 		return false
 	}
 	if arc.groupTriedMembers == nil {
@@ -460,13 +660,24 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	// F3 (wi-7769a812 part 3) — bounded offer walk: each refused offer
 	// already failed THIS request, so excluding it genuinely advances
 	// the ordering sweep's head. Mirrors the OpenAI-lane iterate.
+	//
+	// The offer is SCOPED (ADR D6): the walk never offers an
+	// out-of-reach member, and an out-of-reach member is never cooled.
 	replacement, pool, avail := "", "", false
 	excludeTarget := arc.groupPick.MemberID
 	for iter := 0; iter <= models.MaxGroupMembers; iter++ {
-		replacement, pool, avail = gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, excludeTarget, arc.conf.UpstreamSkipCacheTTL)
-		if !avail || replacement == "" {
+		outcome := h.excludeGroupMemberScoped(&arc.conf, arc.scope, arc.groupPick.GroupID, arc.conversationKey, excludeTarget, arc.conf.UpstreamSkipCacheTTL)
+		if !outcome.OK || outcome.Replacement == "" {
+			if outcome.ScopeOnly {
+				// EVERY remaining candidate was out of reach: a SCOPE
+				// exhaustion, not an availability failure. The verdict
+				// is attempt-count-keyed at the terminal site.
+				arc.scopeExhausted = true
+				log.Printf("[authz] anthropic request %s: group %s exhausted ON SCOPE (every remaining member is outside this token's reach)", arc.reqID, arc.groupPick.GroupID)
+			}
 			return false
 		}
+		replacement, pool, avail = outcome.Replacement, outcome.Pool, true
 		if !arc.groupTriedMembers[replacement] {
 			break
 		}
@@ -477,11 +688,21 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 		log.Printf("[grouplb] anthropic request %s: offer walk exhausted without a fresh member — group fallback exhausted", arc.reqID)
 		return false
 	}
-	newList, pick, failGroup := h.applyGroupRewrite(&arc.conf, arc.modelListOriginal, arc.conversationKey)
-	if failGroup != "" || pick == nil {
+	outcome := h.applyGroupRewrite(&arc.conf, arc.modelListOriginal, arc.conversationKey, arc.scope)
+	if outcome.failGroupID != "" || outcome.pick == nil {
+		if outcome.scopeExcluded {
+			// SCOPE exhaustion at the rebuild. The verdict is
+			// attempt-count-keyed (leader ruling): ZERO upstream
+			// attempts ⇒ 403 access_denied; >= 1 attempt ⇒ the terminal
+			// availability path is unchanged.
+			arc.scopeExhausted = true
+			log.Printf("[authz] anthropic request %s: group %s rebuild exhausted ON SCOPE — no member of this group is inside the token's reach", arc.reqID, arc.groupPick.GroupID)
+			return false
+		}
 		log.Printf("[grouplb] anthropic request %s: re-entry rebuild failed for group %s — treating as real failure", arc.reqID, arc.groupPick.GroupID)
 		return false
 	}
+	pick := outcome.pick
 	// F3 post-rebuild guard — the tried-mark lands HERE (after the
 	// guard, on the member actually served) so offer/rebuild agreement
 	// passes and only divergence onto an already-attempted member is
@@ -492,7 +713,7 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	}
 	arc.groupTriedMembers[pick.MemberID] = true
 	arc.groupAdvances++
-	arc.modelList = newList
+	arc.modelList = outcome.list
 	arc.groupPick = pick
 	// Sticky last-success race ORDER (design site (d) — MANDATORY): the
 	// Anthropic re-entry restarts the inner walk WITHOUT re-passing
@@ -501,6 +722,11 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	// rebuilt list here, after the ExcludeGroupMember reselect (this
 	// covers the backup-pool reselect variant identically — both
 	// rebuild paths land on this line).
+	// C3 — THE REACH FILTER: the rebuild re-materialises the member
+	// list, so the filter runs again here (BEFORE the sticky ordering
+	// — sticky promotion must never promote an entry the filter would
+	// remove).
+	arc.modelList = h.applyReachFilter(arc.scope, arc.modelList)
 	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
 	if pick.MemberID != arc.reqLog.Model {
 		arc.reqLog.RouteModel = pick.MemberID

@@ -338,7 +338,7 @@ func TestRaceMinimaxFallback_E2E_Primary429_FallbackTranslated(t *testing.T) {
 	// inert (single-credential-per-model ⇒ credFailoverEligibleLocked
 	// returns false anyway, but nil engine keeps the path
 	// single-source-of-truth and avoids any binding churn).
-	coord := newRaceCoordinatorWithEvents(
+	coord, err := newRaceCoordinatorWithEvents(
 		ctx, cfg, req, body,
 		[]string{"glm-agentic", "minimax-coding"},
 		nil, // bus — irrelevant for this test
@@ -349,6 +349,9 @@ func TestRaceMinimaxFallback_E2E_Primary429_FallbackTranslated(t *testing.T) {
 		true, // liveFirstByteGate — matches live mode (no buffer header)
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	winner := coord.WaitForWinner()
@@ -495,7 +498,7 @@ func TestRaceMinimaxFallback_E2E_NonMiniMaxFallback_NotTranslated(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
 
-	coord := newRaceCoordinatorWithEvents(
+	coord, err := newRaceCoordinatorWithEvents(
 		ctx, cfg, req, body,
 		[]string{"glm-agentic", "openai-coding"},
 		nil,
@@ -506,6 +509,9 @@ func TestRaceMinimaxFallback_E2E_NonMiniMaxFallback_NotTranslated(t *testing.T) 
 		true, // liveFirstByteGate
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	winner := coord.WaitForWinner()

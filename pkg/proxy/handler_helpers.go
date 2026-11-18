@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
@@ -83,6 +84,39 @@ type requestContext struct {
 	groupPick         *groupPickInfo
 	groupAdvances     int
 	groupTriedMembers map[string]bool
+
+	// scope is THE authorization scope of this request (ADR D2/D7): the
+	// token's reach set, resolved ONCE after auth and BEFORE any
+	// candidate construction.
+	//
+	//	nil    => UNRESTRICTED (anonymous or wildcard token)
+	//	denyAll => DENY-ALL (an unreadable grant row)
+	//	else   => restricted: Allows(id) is a set lookup
+	//
+	// It is resolved through pkg/authz.Resolve — the ONE resolver — and
+	// consumed through the ONE predicate (Scope.Allows). No lane may
+	// re-implement the wildcard rule or read the raw grant slices.
+	scope *authz.Scope
+
+	// upstreamAttempts counts the upstream attempts this request has
+	// made (across every race iteration — the group re-entry builds a
+	// FRESH coordinator, so the counter lives on the REQUEST context).
+	//
+	// It is the seam for the attempt-count-keyed terminal verdict
+	// (leader ruling): ZERO attempts + every remaining candidate
+	// scope-excluded => 403 access_denied (a permission failure);
+	// >= 1 attempt => the terminal availability envelope (502) is
+	// UNCHANGED. The count is NEVER inferred from the model list or
+	// from the presence of a group pick.
+	upstreamAttempts int
+
+	// scopeExhausted records that the group re-entry exhausted ON
+	// SCOPE (every remaining member was outside this token's reach) —
+	// as opposed to an availability exhaustion. The terminal verdict
+	// combines it with upstreamAttempts: zero attempts + scope
+	// exhaustion => 403 access_denied; >= 1 attempt => the unchanged
+	// 502 availability envelope.
+	scopeExhausted bool
 
 	// F6 (wi-7769a812 part 3) — the credential-layer tried-set,
 	// REQUEST-SCOPED: each re-entry iteration constructs a FRESH race
@@ -235,6 +269,13 @@ func (rc *requestContext) reset() {
 	// coordinator.
 	rc.leadingUserRun = ""
 	rc.conversationKey = ""
+	// AUTH COMMISSION: the per-request scope and the attempt counter
+	// must never leak from a recycled requestContext into the next
+	// request lifecycle — a stale scope would silently re-apply the
+	// PREVIOUS token's reach set.
+	rc.scope = nil
+	rc.upstreamAttempts = 0
+	rc.scopeExhausted = false
 }
 
 // tokenIDDisplay renders the token ID for log output. Empty tokenID

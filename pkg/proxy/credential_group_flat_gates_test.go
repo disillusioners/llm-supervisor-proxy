@@ -165,7 +165,10 @@ func TestA2_Gate_GroupPrimaryModelIsFailoverEligible(t *testing.T) {
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, "conv-group", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, "conv-group", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Row 9 (LOG-ONLY budget): the reported budget is the FLATTENED
 	// count − 1 (2 members ⇒ 1), not the raw count − 1 (1 − 1 = 0).

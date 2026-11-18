@@ -36,6 +36,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1403,6 +1404,102 @@ func TestMigration034_PGGuardShape(t *testing.T) {
 	if !strings.Contains(sqlText, "RAISE WARNING") {
 		t.Error("PG 034 has no RAISE WARNING — the skipped row would be invisible in pod stdout")
 	}
+}
+
+// TestMigration034_PGuardShape_DownTwinAndGlobalScan extends the PD-2
+// structural pin (approver correction §4a — TEST-ONLY, the SQL is frozen).
+//
+// It adds the two assertions the up-file pin cannot express:
+//
+//  1. the DOWN artifact carries the SAME per-row guard — the reverse
+//     repartition casts allowed_groups::jsonb, so a malformed row could
+//     abort the reversal exactly as it could abort the forward pass;
+//  2. `pg_input_is_valid` appears in NO executable migration SQL — the
+//     function is PG-16+, and the whole migration set must stay
+//     version-agnostic (a future edit must not reintroduce it in any
+//     file, not just 034).
+func TestMigration034_PGuardShape_DownTwinAndGlobalScan(t *testing.T) {
+	// (1) the DOWN twin.
+	downBytes, err := postgresMigrations.ReadFile("migrations/postgres/034_add_allowed_groups.down.sql")
+	if err != nil {
+		t.Fatalf("read the PG 034 down file: %v", err)
+	}
+	downText := stripSQLLineComments(string(downBytes))
+	if !strings.Contains(downText, "DO $$") {
+		t.Error("PG 034 down has no DO $$ block — a malformed allowed_groups row would abort the reverse repartition")
+	}
+	if !strings.Contains(downText, "EXCEPTION WHEN invalid_text_representation") {
+		t.Error("PG 034 down has no `EXCEPTION WHEN invalid_text_representation` handler — the reversal must skip a malformed row, never abort")
+	}
+	downLoop := strings.Index(downText, "LOOP")
+	downExc := strings.Index(downText, "EXCEPTION WHEN invalid_text_representation")
+	if downLoop < 0 {
+		t.Error("PG 034 down has no FOR ... LOOP — the row-by-row guard is missing")
+	}
+	if downExc >= 0 && downLoop >= 0 && downExc < downLoop {
+		t.Errorf("PG 034 down: the EXCEPTION handler (byte %d) appears BEFORE the LOOP (byte %d) — it must be INSIDE the loop", downExc, downLoop)
+	}
+
+	// (2) the global scan: pg_input_is_valid must appear in NO
+	// executable migration SQL (both dialects, every version).
+	for _, fs := range []struct {
+		name string
+		fsys interface {
+			ReadDir(string) ([]os.DirEntry, error)
+			ReadFile(string) ([]byte, error)
+		}
+	}{
+		{"postgres", postgresMigrationsFS{}},
+		{"sqlite", sqliteMigrationsFS{}},
+	} {
+		entries, err := fs.fsys.ReadDir("migrations/" + fs.name)
+		if err != nil {
+			t.Fatalf("read %s migrations dir: %v", fs.name, err)
+		}
+		scanned := 0
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+				continue
+			}
+			scanned++
+			b, err := fs.fsys.ReadFile("migrations/" + fs.name + "/" + e.Name())
+			if err != nil {
+				t.Fatalf("read %s/%s: %v", fs.name, e.Name(), err)
+			}
+			// Strip line comments: the version-agnostic RATIONALE names
+			// the function in prose, and a prose mention is not an
+			// executable use.
+			if strings.Contains(stripSQLLineComments(string(b)), "pg_input_is_valid") {
+				t.Errorf("%s/%s uses pg_input_is_valid in executable SQL — that function is PG 16+; the migration set must stay version-agnostic", fs.name, e.Name())
+			}
+		}
+		if scanned == 0 {
+			t.Errorf("scanned zero %s migration files — the guard is vacuous", fs.name)
+		}
+	}
+}
+
+// postgresMigrationsFS / sqliteMigrationsFS adapt the embed.FS values to
+// the tiny interface the global scan needs (embed.FS already has both
+// methods; the adapter keeps the call site readable).
+type postgresMigrationsFS struct{}
+
+func (postgresMigrationsFS) ReadDir(name string) ([]os.DirEntry, error) {
+	return postgresMigrations.ReadDir(name)
+}
+
+func (postgresMigrationsFS) ReadFile(name string) ([]byte, error) {
+	return postgresMigrations.ReadFile(name)
+}
+
+type sqliteMigrationsFS struct{}
+
+func (sqliteMigrationsFS) ReadDir(name string) ([]os.DirEntry, error) {
+	return sqliteMigrations.ReadDir(name)
+}
+
+func (sqliteMigrationsFS) ReadFile(name string) ([]byte, error) {
+	return sqliteMigrations.ReadFile(name)
 }
 
 // TestMigration034_SQLiteDialectParity is the PD-4 behavioural pin: a token

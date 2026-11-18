@@ -143,7 +143,10 @@ func TestToolRepair_StreamingIntegration(t *testing.T) {
 			rawBody := []byte(`{"model":"test-model","stream":true}`)
 			models := []string{"test-model"}
 
-			coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
+			coordinator, err := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
+			if err != nil {
+				t.Fatalf("newRaceCoordinator: %v", err)
+			}
 			coordinator.Start()
 
 			winner := coordinator.WaitForWinner()
@@ -312,7 +315,10 @@ func TestToolRepair_NonStreamingIntegration(t *testing.T) {
 			rawBody := []byte(`{"model":"test-model","stream":false}`)
 			models := []string{"test-model"}
 
-			coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
+			coordinator, err := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
+			if err != nil {
+				t.Fatalf("newRaceCoordinator: %v", err)
+			}
 			coordinator.Start()
 
 			winner := coordinator.WaitForWinner()
