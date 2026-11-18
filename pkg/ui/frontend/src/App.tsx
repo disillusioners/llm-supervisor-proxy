@@ -280,9 +280,12 @@ function SettingsRoute({
     groupError?: string | null;
     onRetryGroupModels?: () => void;
     tokens: any[];
-    onCreateToken: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<any>;
+    // The two grant axes are independent and tri-state: null = Unrestricted
+    // (no allow-list on that axis), [] = Restricted with an empty selection
+    // (grants NOTHING), ids = Restricted with exactly those ids.
+    onCreateToken: (name: string, expiresAt: string | null, allowedModels?: string[] | null, allowedGroups?: string[] | null) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
-    onUpdateTokenPermission: (id: string, allowedModels?: string[]) => Promise<boolean>;
+    onUpdateTokenPermission: (id: string, allowedModels?: string[] | null, allowedGroups?: string[] | null) => Promise<boolean>;
     onRefetchTokens: () => void;
 }) {
     return (

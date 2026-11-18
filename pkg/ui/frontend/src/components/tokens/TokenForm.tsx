@@ -1,15 +1,31 @@
 import { useState } from 'preact/hooks';
-import { ModelMultiSelect } from './ModelMultiSelect';
 import type { ApiToken } from '../../types';
+import {
+  AxisGrantControls,
+  AxisMode,
+  TokenModelRow,
+  effectiveGrantNote,
+  modeOfStored,
+  splitByAxis,
+  wireValue,
+} from './grantAxes';
 
 interface TokenFormProps {
-  // kind flows through from SettingsPage's models.map so the chat-kind
-  // filter below actually fires (load-balance-groups found the Decision
-  // commission's amendment-7 filter was dead code from this wiring —
-  // the mapped object dropped `kind`, so every row passed `!m.kind`).
-  models: { name: string; id: string; kind?: 'chat' | 'image-gen' | 'decision' | 'group' }[];
+  // kind flows through from SettingsPage's models.map, so the axis split can
+  // be made by ROW KIND at submit (a group id must never land in
+  // allowed_models, and a model id must never land in allowed_groups).
+  models: TokenModelRow[];
   token?: ApiToken;  // For editing existing tokens
-  onSubmit: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<void>;
+  // The two axes are INDEPENDENT and TRI-STATE:
+  //   null => Unrestricted (no allow-list on that axis — the axis is open)
+  //   []   => Restricted with an empty selection (grants NOTHING)
+  //   ids  => Restricted with exactly those ids
+  onSubmit: (
+    name: string,
+    expiresAt: string | null,
+    allowedModels: string[] | null,
+    allowedGroups: string[] | null,
+  ) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
@@ -22,16 +38,52 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
     }
     return '';
   });
-  const [selectedModels, setSelectedModels] = useState<string[]>(token?.allowed_models || []);
+
+  // ── Per-axis grant state ──────────────────────────────────────────────────
+  // CREATE: the operator picks a mode per axis. The default is Unrestricted
+  // (null = no allow-list on that axis), which is also today's outcome for a
+  // token whose pickers are left alone — and the escalation is spelled out
+  // in the mode control itself.
+  // EDIT: the mode is DERIVED from the stored value and may only ever
+  // NARROW (a restricted axis can never be widened back — the PATCH
+  // contract maps an omitted key AND an explicit null to KEEP).
+  const [modelMode, setModelMode] = useState<AxisMode>(() => modeOfStored(token?.allowed_models));
+  const [selectedModels, setSelectedModels] = useState<string[]>(() => token?.allowed_models ?? []);
+  const [groupMode, setGroupMode] = useState<AxisMode>(() => modeOfStored(token?.allowed_groups));
+  const [selectedGroups, setSelectedGroups] = useState<string[]>(() => token?.allowed_groups ?? []);
   const [saving, setSaving] = useState(false);
 
   const isEditing = !!token;
 
-  // load-balance-groups 2026-10-16 (plan §6.4 arm 4 of 4 — P3.7):
-  // the positive filter shape `!m.kind || m.kind === 'chat'` matches
-  // the chat-kind baseline and excludes image-gen, decision, and
-  // group kinds (defense-in-depth + operator clarity).
-  const chatModels = models.filter((m) => !m.kind || m.kind === 'chat');
+  // A DENY-ALL axis (an allow-list the proxy could not read) is NEVER
+  // rendered as unrestricted/wildcard — the fail-closed state is shown and the
+  // axis can only be repaired by narrowing it.
+  const modelsInvalid = token?.allowed_models_invalid === true;
+  const groupsInvalid = token?.allowed_groups_invalid === true;
+
+  const effectiveModelMode: AxisMode = modelsInvalid ? 'restricted' : modelMode;
+  const effectiveGroupMode: AxisMode = groupsInvalid ? 'restricted' : groupMode;
+
+  // Unrestricted cannot be selected on an existing RESTRICTED axis: the BE
+  // maps both an omitted key and an explicit null to KEEP, so promotion is
+  // inexpressible on PATCH. The option is disabled rather than offered as a
+  // dead end.
+  const modelPromotionBlocked =
+    isEditing && (modelsInvalid || modeOfStored(token?.allowed_models) === 'restricted');
+  const groupPromotionBlocked =
+    isEditing && (groupsInvalid || modeOfStored(token?.allowed_groups) === 'restricted');
+
+  // All kinds are selectable. The picker emits ids; the SPLIT into
+  // allowed_models vs allowed_groups happens at submit, by row kind
+  // (plan §12.2). A kind filter here would be a trap: it would exclude
+  // nothing after the widening and mislead the next reader. The pickers are
+  // split by SURFACE only — group rows live in the group picker, every other
+  // row (chat, image-gen, decision, legacy rows with no kind) in the model
+  // picker — and the submit-time split is applied to BOTH selections, so a
+  // group id can never land in allowed_models whichever control it was
+  // picked in.
+  const modelRows = models.filter((m) => m.kind !== 'group');
+  const groupRows = models.filter((m) => m.kind === 'group');
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -43,8 +95,19 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
       setSaving(true);
       onStatus(null);
       const expires = expiresAt ? new Date(expiresAt).toISOString() : null;
-      // When selectedModels is empty, it means all models are allowed
-      await onSubmit(name.trim(), expires, selectedModels);
+      // The axis split is made by ROW KIND (the `models` prop is the
+      // authority), and a stored grant never moves between axes.
+      const { modelIds, groupIds } = splitByAxis(
+        [...selectedModels, ...selectedGroups],
+        models,
+        token,
+      );
+      // Unrestricted => null (no allow-list on that axis). Restricted => the
+      // ids, or [] when nothing is selected — [] grants NOTHING and is NEVER
+      // null.
+      const allowedModels = wireValue(effectiveModelMode, modelIds);
+      const allowedGroups = wireValue(effectiveGroupMode, groupIds);
+      await onSubmit(name.trim(), expires, allowedModels, allowedGroups);
     } catch (e) {
       onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save token' });
     } finally {
@@ -54,15 +117,6 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
 
   // Calculate min date (today) for the date input
   const today = new Date().toISOString().split('T')[0];
-
-  // Get model display name from ID
-  const getModelDisplayName = (modelId: string) => {
-    return models.find(m => m.id === modelId)?.name ?? modelId;
-  };
-
-  const selectedModelsDisplay = selectedModels.length > 0
-    ? selectedModels.map(id => getModelDisplayName(id)).join(', ')
-    : '';
 
   return (
     <div class="bg-gray-700/50 rounded-lg p-5 border border-gray-600">
@@ -98,27 +152,43 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
           <p class="text-xs text-gray-400 mt-1">Leave empty for no expiration</p>
         </div>
 
-        {/* Allowed Models Multi-Select — Decision Commission 2026-10-15
-            (plan §6.7.a / P3.8 / amendment 7): filtered to chat-only models
-            so image-gen + decision models never leak into the allowed-models
-            picker. Same filter shape as ModelsTab.tsx:157 / C-16. */}
-        <div>
-          <label class="block text-sm font-medium text-gray-300 mb-1">
-            Allowed Models <span class="text-gray-500">(optional)</span>
-          </label>
-          <ModelMultiSelect
-            models={chatModels}
-            selected={selectedModels}
-            onChange={setSelectedModels}
-          />
-          <p class="text-xs text-gray-400 mt-1">
-            {selectedModels.length === 0
-              ? 'No selection means all models are allowed'
-              : `Only these models are allowed: ${selectedModelsDisplay}`
-            }
-          </p>
-        </div>
+        {/* ── The two grant axes ───────────────────────────────────────────
+            The model axis and the group axis are INDEPENDENT. Each one is
+            either Unrestricted (no allow-list on that axis) or Restricted
+            (an allow-list — which may be EMPTY, and an empty allow-list
+            grants NOTHING). */}
+        <AxisGrantControls
+          axis="models"
+          mode={effectiveModelMode}
+          onModeChange={setModelMode}
+          rows={modelRows}
+          selected={selectedModels}
+          onSelectedChange={setSelectedModels}
+          disableUnrestricted={modelPromotionBlocked}
+          invalid={modelsInvalid}
+          showCreateOnlyNote={isEditing}
+        />
 
+        <AxisGrantControls
+          axis="groups"
+          mode={effectiveGroupMode}
+          onModeChange={setGroupMode}
+          rows={groupRows}
+          selected={selectedGroups}
+          onSelectedChange={setSelectedGroups}
+          disableUnrestricted={groupPromotionBlocked}
+          invalid={groupsInvalid}
+          showCreateOnlyNote={isEditing}
+        />
+
+        <p class="text-xs text-gray-300 bg-gray-800/60 border border-gray-700 rounded px-2 py-1.5">
+          {effectiveGrantNote(
+            effectiveModelMode,
+            effectiveGroupMode,
+            selectedModels.length,
+            selectedGroups.length,
+          )}
+        </p>
 
         <div class="flex justify-end gap-3 pt-2">
           <button
