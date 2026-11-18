@@ -64,7 +64,8 @@ func newAuthRoutingTestEnv(t *testing.T) *authRoutingTestEnv {
 			created_by TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 						ultimate_model TEXT,
-			allowed_models TEXT
+			allowed_models TEXT,
+			allowed_groups TEXT DEFAULT NULL
 		)
 	`
 	if _, err := authDB.Exec(createTable); err != nil {
@@ -76,7 +77,7 @@ func newAuthRoutingTestEnv(t *testing.T) *authRoutingTestEnv {
 	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
 
 	// Create a valid test token
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", nil)
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
 	if err != nil {
 		db.Close()
 		authDB.Close()

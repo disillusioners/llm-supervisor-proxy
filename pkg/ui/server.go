@@ -2575,9 +2575,11 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	// Get current token first to handle partial updates
-	currentToken, err := s.tokenStore.GetTokenByID(ctx, id)
-	if err != nil {
+	// 404 FIRST (unchanged error precedence). The stored grant axes are NOT
+	// read into the merge: an omitted axis stays nil so the store skips that
+	// column, which is what keeps an unreadable (DENY-ALL) axis from being
+	// healed to NULL by a merge that does not mention it.
+	if _, err := s.tokenStore.GetTokenByID(ctx, id); err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
 			return
@@ -2586,17 +2588,16 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	// Determine allowed_models to set:
-	// - If AllowedModels is nil in request, keep existing value
-	// - If AllowedModels is non-nil (including empty array), use the provided value
-	var allowedModelsToSet []string
+	// Merge per axis (compile-forced by the auth.TokenPermission write shape;
+	// the full admin-API contract lands with the phase-1 completion commit):
+	// a nil axis is left nil so the store SKIPS that SQL column — a keep must
+	// never overwrite an unreadable (DENY-ALL) axis with NULL.
+	perm := auth.TokenPermission{}
 	if req.AllowedModels != nil {
-		allowedModelsToSet = *req.AllowedModels
-	} else {
-		allowedModelsToSet = currentToken.AllowedModels
+		perm.AllowedModels = *req.AllowedModels
 	}
 
-	err = s.tokenStore.UpdateTokenPermission(ctx, id, allowedModelsToSet)
+	err := s.tokenStore.UpdateTokenPermission(ctx, id, perm)
 	if err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -2683,7 +2684,7 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 		allowedModels = *req.AllowedModels
 	}
 
-	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, allowedModels)
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, auth.TokenPermission{AllowedModels: allowedModels})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
 		return

@@ -285,11 +285,11 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 
 	// Authenticated tokens (historically one per permission tier).
 	ctx := context.Background()
-	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", nil)
+	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
-	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", nil)
+	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
 	if err != nil {
 		t.Fatalf("create plain token: %v", err)
 	}

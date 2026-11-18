@@ -274,7 +274,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 	}
 
 	ctx := context.Background()
-	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", nil)
+	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
 	if err != nil {
 		t.Fatalf("create plain token: %v", err)
 	}

@@ -24,6 +24,11 @@ type fakeTokenStore struct {
 	infraErr error // when non-nil, ValidateToken returns it
 	innerErr error // when non-nil (and infraErr nil), returned as-is
 	listErr  error
+	// lastPerm / lastPermID record the last UpdateTokenPermission call so a
+	// decorator test can prove the payload was forwarded verbatim (not
+	// re-derived). Token-authz T1.4.
+	lastPerm   *auth.TokenPermission
+	lastPermID string
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -54,10 +59,10 @@ func (f *fakeTokenStore) ValidateToken(ctx context.Context, plaintext string) (*
 	return tok, nil
 }
 
-func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
 	plaintext, _, _ := auth.GenerateToken()
 	hash := auth.HashToken(plaintext)
-	tok := &auth.AuthToken{ID: "id-" + name, Name: name, TokenHash: hash, ExpiresAt: expiresAt, CreatedBy: createdBy}
+	tok := &auth.AuthToken{ID: "id-" + name, Name: name, TokenHash: hash, ExpiresAt: expiresAt, CreatedBy: createdBy, AllowedModels: perm.AllowedModels, AllowedGroups: perm.AllowedGroups}
 	f.mu.Lock()
 	f.tokens[hash] = tok
 	f.mu.Unlock()
@@ -101,7 +106,12 @@ func (f *fakeTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Aut
 	return nil, auth.ErrTokenNotFound
 }
 
-func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
+func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := perm
+	f.lastPerm = &p
+	f.lastPermID = id
 	return nil
 }
 
@@ -394,7 +404,7 @@ func TestCachedTokenStore_WriteThrough_CreateToken(t *testing.T) {
 	inner := newFakeTokenStore()
 	c := NewCachedTokenStore(inner, Options{})
 
-	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", nil)
+	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", auth.TokenPermission{})
 	if err != nil || tok == nil {
 		t.Fatalf("CreateToken: %v %v", tok, err)
 	}

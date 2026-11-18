@@ -57,7 +57,8 @@ func runTestMigrations(db *sql.DB) error {
 			expires_at TEXT,
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL,
-			allowed_models TEXT
+			allowed_models TEXT,
+			allowed_groups TEXT DEFAULT NULL
 		)
 	`)
 	if err != nil {
@@ -95,7 +96,7 @@ func TestCreateToken(t *testing.T) {
 	store := NewTokenStore(db.DB, database.SQLite)
 	ctx := context.Background()
 
-	plaintext, token, err := store.CreateToken(ctx, "test-token", nil, "admin", nil)
+	plaintext, token, err := store.CreateToken(ctx, "test-token", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -141,7 +142,7 @@ func TestCreateTokenWithExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	futureTime := time.Now().Add(24 * time.Hour)
-	plaintext, token, err := store.CreateToken(ctx, "expiring-token", &futureTime, "admin", nil)
+	plaintext, token, err := store.CreateToken(ctx, "expiring-token", &futureTime, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -171,7 +172,7 @@ func TestValidateTokenValid(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	plaintext, _, err := store.CreateToken(ctx, "valid-test", nil, "admin", nil)
+	plaintext, _, err := store.CreateToken(ctx, "valid-test", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -252,7 +253,7 @@ func TestValidateTokenExpired(t *testing.T) {
 
 	// Create token with past expiration
 	pastTime := time.Now().Add(-24 * time.Hour)
-	plaintext, _, err := store.CreateToken(ctx, "expired-token", &pastTime, "admin", nil)
+	plaintext, _, err := store.CreateToken(ctx, "expired-token", &pastTime, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -290,7 +291,7 @@ func TestListTokensReturnsAll(t *testing.T) {
 
 	// Create multiple tokens
 	for i := 0; i < 5; i++ {
-		_, _, err := store.CreateToken(ctx, "token-"+string(rune('a'+i)), nil, "admin", nil)
+		_, _, err := store.CreateToken(ctx, "token-"+string(rune('a'+i)), nil, "admin", TokenPermission{})
 		if err != nil {
 			t.Fatalf("CreateToken() error = %v", err)
 		}
@@ -322,7 +323,7 @@ func TestListTokensOrderedByCreatedAtDesc(t *testing.T) {
 
 	// Create tokens with slight delays to ensure different timestamps
 	for i := 0; i < 3; i++ {
-		_, _, err := store.CreateToken(ctx, "order-test-"+string(rune('a'+i)), nil, "admin", nil)
+		_, _, err := store.CreateToken(ctx, "order-test-"+string(rune('a'+i)), nil, "admin", TokenPermission{})
 		if err != nil {
 			t.Fatalf("CreateToken() error = %v", err)
 		}
@@ -351,7 +352,7 @@ func TestDeleteToken(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	plaintext, token, err := store.CreateToken(ctx, "delete-test", nil, "admin", nil)
+	plaintext, token, err := store.CreateToken(ctx, "delete-test", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -390,7 +391,7 @@ func TestGetTokenByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	_, created, err := store.CreateToken(ctx, "get-by-id-test", nil, "creator", nil)
+	_, created, err := store.CreateToken(ctx, "get-by-id-test", nil, "creator", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -444,12 +445,12 @@ func TestTokenStoreMultipleOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// Create multiple tokens
-	token1, _, err := store.CreateToken(ctx, "multi-1", nil, "admin", nil)
+	token1, _, err := store.CreateToken(ctx, "multi-1", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken(1) error = %v", err)
 	}
 
-	token2, _, err := store.CreateToken(ctx, "multi-2", nil, "admin", nil)
+	token2, _, err := store.CreateToken(ctx, "multi-2", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken(2) error = %v", err)
 	}
@@ -475,7 +476,7 @@ func TestTokenStoreMultipleOperations(t *testing.T) {
 	}
 
 	// Delete one
-	_, deleteToken, _ := store.CreateToken(ctx, "to-delete", nil, "admin", nil)
+	_, deleteToken, _ := store.CreateToken(ctx, "to-delete", nil, "admin", TokenPermission{})
 	store.DeleteToken(ctx, deleteToken.ID)
 
 	tokens, err = store.ListTokens(ctx)
@@ -495,7 +496,7 @@ func TestTokenStoreCreateTokenWithNoExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with nil expiration
-	_, token, err := store.CreateToken(ctx, "no-expire", nil, "admin", nil)
+	_, token, err := store.CreateToken(ctx, "no-expire", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -505,7 +506,7 @@ func TestTokenStoreCreateTokenWithNoExpiration(t *testing.T) {
 	}
 
 	// Should validate successfully (not expired)
-	plaintext, _, _ := store.CreateToken(ctx, "for-plaintext", nil, "admin", nil)
+	plaintext, _, _ := store.CreateToken(ctx, "for-plaintext", nil, "admin", TokenPermission{})
 	validated, err := store.ValidateToken(ctx, plaintext)
 	if err != nil {
 		t.Fatalf("ValidateToken() error = %v", err)
@@ -531,14 +532,14 @@ func TestUpdateTokenPermission(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with no allowed_models restriction (all allowed)
-	_, created, err := store.CreateToken(ctx, "update-test", nil, "admin", nil)
+	_, created, err := store.CreateToken(ctx, "update-test", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
 
 	// Restrict to a model list
 	models := []string{"model-a", "model-b"}
-	err = store.UpdateTokenPermission(ctx, created.ID, models)
+	err = store.UpdateTokenPermission(ctx, created.ID, TokenPermission{AllowedModels: models})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission(restrict) error = %v, want nil", err)
 	}
@@ -547,14 +548,17 @@ func TestUpdateTokenPermission(t *testing.T) {
 		t.Errorf("AllowedModels = %v, want [model-a model-b]", retrieved.AllowedModels)
 	}
 
-	// Back to all-allowed (nil)
-	err = store.UpdateTokenPermission(ctx, created.ID, nil)
+	// An OMITTING update (both axes nil) writes NO column — it keeps the
+	// stored value (column-skip merge, plan §6.1 PD-3). Under the frozen wire
+	// contract an axis can only return to ABSENT via creation; a PATCH that
+	// says nothing about a grant axis must never widen it.
+	err = store.UpdateTokenPermission(ctx, created.ID, TokenPermission{})
 	if err != nil {
-		t.Fatalf("UpdateTokenPermission(all-allowed) error = %v, want nil", err)
+		t.Fatalf("UpdateTokenPermission(omit both) error = %v, want nil", err)
 	}
 	retrieved, _ = store.GetTokenByID(ctx, created.ID)
-	if retrieved.AllowedModels != nil {
-		t.Errorf("AllowedModels = %v, want nil (all allowed)", retrieved.AllowedModels)
+	if len(retrieved.AllowedModels) != 2 || retrieved.AllowedModels[0] != "model-a" {
+		t.Errorf("AllowedModels after an omitting update = %v, want [model-a model-b] (unchanged)", retrieved.AllowedModels)
 	}
 }
 
@@ -565,7 +569,7 @@ func TestUpdateTokenPermissionNotFound(t *testing.T) {
 	store := NewTokenStore(db.DB, database.SQLite)
 	ctx := context.Background()
 
-	err := store.UpdateTokenPermission(ctx, "nonexistent-id", nil)
+	err := store.UpdateTokenPermission(ctx, "nonexistent-id", TokenPermission{})
 	if err != ErrTokenNotFound {
 		t.Errorf("UpdateTokenPermission() error = %v, want ErrTokenNotFound", err)
 	}
@@ -583,7 +587,7 @@ func TestCreateTokenWithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"gpt-4", "claude-3"}
-	_, token, err := store.CreateToken(ctx, "allowed-models-test", nil, "admin", allowedModels)
+	_, token, err := store.CreateToken(ctx, "allowed-models-test", nil, "admin", TokenPermission{AllowedModels: allowedModels})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -609,7 +613,7 @@ func TestValidateTokenReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"gpt-4", "gemini-pro"}
-	plaintext, _, err := store.CreateToken(ctx, "validate-allowed", nil, "admin", allowedModels)
+	plaintext, _, err := store.CreateToken(ctx, "validate-allowed", nil, "admin", TokenPermission{AllowedModels: allowedModels})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -637,17 +641,17 @@ func TestListTokensReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create tokens with different allowed_models
-	_, _, err := store.CreateToken(ctx, "list-allowed-1", nil, "admin", []string{"gpt-4"})
+	_, _, err := store.CreateToken(ctx, "list-allowed-1", nil, "admin", TokenPermission{AllowedModels: []string{"gpt-4"}})
 	if err != nil {
 		t.Fatalf("CreateToken(1) error = %v", err)
 	}
 
-	_, _, err = store.CreateToken(ctx, "list-allowed-2", nil, "admin", []string{"claude-3", "gemini-pro"})
+	_, _, err = store.CreateToken(ctx, "list-allowed-2", nil, "admin", TokenPermission{AllowedModels: []string{"claude-3", "gemini-pro"}})
 	if err != nil {
 		t.Fatalf("CreateToken(2) error = %v", err)
 	}
 
-	_, _, err = store.CreateToken(ctx, "list-allowed-nil", nil, "admin", nil)
+	_, _, err = store.CreateToken(ctx, "list-allowed-nil", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken(3) error = %v", err)
 	}
@@ -691,7 +695,7 @@ func TestGetTokenByIDReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"o3-mini", "o1", "claude-sonnet"}
-	_, created, err := store.CreateToken(ctx, "get-allowed-test", nil, "admin", allowedModels)
+	_, created, err := store.CreateToken(ctx, "get-allowed-test", nil, "admin", TokenPermission{AllowedModels: allowedModels})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -719,7 +723,7 @@ func TestUpdateTokenPermissionWithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with nil allowed_models
-	_, created, err := store.CreateToken(ctx, "update-allowed-test", nil, "admin", nil)
+	_, created, err := store.CreateToken(ctx, "update-allowed-test", nil, "admin", TokenPermission{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -732,7 +736,7 @@ func TestUpdateTokenPermissionWithAllowedModels(t *testing.T) {
 
 	// Update with allowed_models
 	newAllowedModels := []string{"gpt-4-turbo", "claude-3-5-sonnet"}
-	err = store.UpdateTokenPermission(ctx, created.ID, newAllowedModels)
+	err = store.UpdateTokenPermission(ctx, created.ID, TokenPermission{AllowedModels: newAllowedModels})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
 	}
@@ -755,7 +759,7 @@ func TestUpdateTokenPermissionClearAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models
-	_, created, err := store.CreateToken(ctx, "clear-allowed-test", nil, "admin", []string{"gpt-4"})
+	_, created, err := store.CreateToken(ctx, "clear-allowed-test", nil, "admin", TokenPermission{AllowedModels: []string{"gpt-4"}})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -766,16 +770,23 @@ func TestUpdateTokenPermissionClearAllowedModels(t *testing.T) {
 		t.Errorf("Initial AllowedModels length = %d, want 1", len(retrieved.AllowedModels))
 	}
 
-	// Update with nil to clear
-	err = store.UpdateTokenPermission(ctx, created.ID, nil)
+	// Clear with an EXPLICIT EMPTY slice: under the explicit-empty encoding
+	// (plan §2.8 / decisions.md Q13) this writes '[]' — PRESENT-and-empty,
+	// which grants NOTHING. It is deliberately NOT nil: under the conjunctive
+	// wildcard rule nil+ABSENT-everywhere means UNRESTRICTED, so collapsing a
+	// clear into NULL would escalate the token (R-6).
+	err = store.UpdateTokenPermission(ctx, created.ID, TokenPermission{AllowedModels: []string{}})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
 	}
 
-	// Verify cleared
+	// Verify cleared-to-explicit-empty (never nil).
 	retrieved, _ = store.GetTokenByID(ctx, created.ID)
-	if retrieved.AllowedModels != nil {
-		t.Errorf("After clear AllowedModels = %v, want nil", retrieved.AllowedModels)
+	if retrieved.AllowedModels == nil {
+		t.Fatalf("After clear AllowedModels is nil — an explicit-empty clear must never become ABSENT (wildcard escalation)")
+	}
+	if len(retrieved.AllowedModels) != 0 {
+		t.Errorf("After clear AllowedModels = %v, want empty (explicit-empty)", retrieved.AllowedModels)
 	}
 }
 
@@ -787,22 +798,26 @@ func TestCreateTokenWithEmptyAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty slice
-	_, token, err := store.CreateToken(ctx, "empty-allowed-test", nil, "admin", []string{})
+	_, token, err := store.CreateToken(ctx, "empty-allowed-test", nil, "admin", TokenPermission{AllowedModels: []string{}})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
 
-	// Empty slice should serialize to NULL in DB
-	// After retrieval, it should be nil
-	plaintext, _, _ := store.CreateToken(ctx, "for-validate", nil, "admin", []string{})
+	// Empty slice serializes to '[]' (PRESENT-and-empty), NOT NULL.
+	// After retrieval it is a non-nil empty slice — the fail-open class this
+	// commission kills is precisely "empty reads back as nil => wildcard".
+	plaintext, _, _ := store.CreateToken(ctx, "for-validate", nil, "admin", TokenPermission{AllowedModels: []string{}})
 	validated, err := store.ValidateToken(ctx, plaintext)
 	if err != nil {
 		t.Fatalf("ValidateToken() error = %v", err)
 	}
 
-	// Empty slice stored returns nil
-	if validated.AllowedModels != nil {
-		t.Errorf("Empty []string stored returns %v, want nil", validated.AllowedModels)
+	// Empty slice stored returns non-nil-empty (PRESENT, grants nothing).
+	if validated.AllowedModels == nil {
+		t.Fatalf("Empty []string stored returned nil — '[]' must read back as PRESENT-empty, never ABSENT")
+	}
+	if len(validated.AllowedModels) != 0 {
+		t.Errorf("Empty []string stored returns %v, want empty", validated.AllowedModels)
 	}
 
 	// Original token object has empty slice (before DB round-trip)

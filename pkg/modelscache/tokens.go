@@ -109,6 +109,30 @@ func (c *CachedTokenStore) rememberID(id, hash string) {
 	c.idToHash[id] = hash
 }
 
+// cloneAuthToken returns a deep copy of t (nil-safe) so the cached entry is
+// never aliased by a caller.
+//
+// The grant slices AND the two INVALID flags must survive the cache boundary
+// (token-authz plan §2.6, ADR D10): the flags live on the struct precisely
+// because a separately returned value would be dropped right here. Copying
+// the slices means one request's append cannot widen another request's
+// reach.
+func cloneAuthToken(t *auth.AuthToken) *auth.AuthToken {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	if t.AllowedModels != nil {
+		cp.AllowedModels = make([]string, len(t.AllowedModels))
+		copy(cp.AllowedModels, t.AllowedModels)
+	}
+	if t.AllowedGroups != nil {
+		cp.AllowedGroups = make([]string, len(t.AllowedGroups))
+		copy(cp.AllowedGroups, t.AllowedGroups)
+	}
+	return &cp
+}
+
 // storePositive caches a successful inner verdict as a fresh positive
 // and records id→hash (W4). clampExpiry is the freshness ceiling:
 // ValidateToken passes token.ExpiresAt; CreateToken passes the
@@ -122,7 +146,7 @@ func (c *CachedTokenStore) storePositive(hash string, token *auth.AuthToken, cla
 	c.mu.Lock()
 	c.entries.Put(hash, &tokenEntry{
 		kind:       tierPositive,
-		token:      token,
+		token:      cloneAuthToken(token),
 		freshUntil: freshUntil,
 		cachedAt:   now,
 	})
@@ -161,8 +185,12 @@ func (c *CachedTokenStore) cachedVerdict(hash string, now time.Time) (*auth.Auth
 	switch e.kind {
 	case tierPositive:
 		if now.Before(e.freshUntil) {
-			// Fresh positive — serve from cache, zero DB.
-			return e.token, nil, true
+			// Fresh positive — serve from cache, zero DB. Hand the caller a
+			// DEEP CLONE: the cached *AuthToken is shared state, and the
+			// grant slices + the two Invalid flags must reach every caller
+			// intact and un-aliased (a caller appending to AllowedGroups
+			// must never mutate the cached entry for the next request).
+			return cloneAuthToken(e.token), nil, true
 		}
 	case tierNegative:
 		if now.Sub(e.cachedAt) <= c.opts.NegativeTTL {
@@ -236,7 +264,7 @@ func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 			if e.kind == tierPositive && e.token != nil &&
 				now.Sub(e.cachedAt) <= c.opts.StaleCap {
 				log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
-				return e.token, nil
+				return cloneAuthToken(e.token), nil
 			}
 		}
 		return nil, err
@@ -260,8 +288,8 @@ func isVerdictClass(err error) bool {
 
 // CreateToken delegates to the inner store, then caches the returned
 // token as a positive (write-through) and records id→hash.
-func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
-	plaintext, token, err := c.inner.CreateToken(ctx, name, expiresAt, createdBy, allowedModels)
+func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
+	plaintext, token, err := c.inner.CreateToken(ctx, name, expiresAt, createdBy, perm)
 	if err != nil {
 		return "", nil, err
 	}
@@ -292,10 +320,18 @@ func (c *CachedTokenStore) DeleteToken(ctx context.Context, id string) error {
 }
 
 // UpdateTokenPermission delegates to the inner store, then drops the
-// cached entry for the token (permission changes must not be masked
-// by a stale positive; the next ValidateToken re-reads).
-func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
-	if err := c.inner.UpdateTokenPermission(ctx, id, allowedModels); err != nil {
+// cached entry for the token.
+//
+// THE DROP IS THE INVALIDATION, not a courtesy: a granted-group change is
+// stored on the token row, and a still-cached positive would keep serving
+// the OLD grants (old AllowedGroups / stale Invalid flags) for up to
+// TokensPositiveTTL — a permission change that takes a minute to bite is a
+// permission change that leaks. Dropping the entry means the very next
+// ValidateToken re-reads the row, so a group-grant change is visible within
+// ONE validation. The idToHash entry is deliberately kept: the token still
+// exists, only its permissions changed.
+func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
+	if err := c.inner.UpdateTokenPermission(ctx, id, perm); err != nil {
 		return err
 	}
 	c.mu.Lock()

@@ -15,7 +15,7 @@ import (
 type mockTokenStore struct {
 	tokens        map[string]*auth.AuthToken
 	updateErr     error
-	createTokenFn func(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error)
+	createTokenFn func(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error)
 }
 
 func newMockTokenStore() *mockTokenStore {
@@ -32,9 +32,9 @@ func (m *mockTokenStore) ValidateToken(ctx context.Context, plaintext string) (*
 	return nil, nil
 }
 
-func (m *mockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *mockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
 	if m.createTokenFn != nil {
-		return m.createTokenFn(ctx, name, expiresAt, createdBy, allowedModels)
+		return m.createTokenFn(ctx, name, expiresAt, createdBy, perm)
 	}
 	return "", nil, nil
 }
@@ -63,7 +63,7 @@ func (m *mockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Aut
 	return token, nil
 }
 
-func (m *mockTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
+func (m *mockTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
 	if m.updateErr != nil {
 		return m.updateErr
 	}
@@ -71,7 +71,15 @@ func (m *mockTokenStore) UpdateTokenPermission(ctx context.Context, id string, a
 	if !ok {
 		return auth.ErrTokenNotFound
 	}
-	token.AllowedModels = allowedModels
+	// COLUMN-SKIP merge, mirroring auth.TokenStore.UpdateTokenPermission: a nil
+	// axis is not written at all (a keep must not heal an INVALID axis to NULL,
+	// nor clobber a retained value). A non-nil axis replaces, [] included.
+	if perm.AllowedModels != nil {
+		token.AllowedModels = perm.AllowedModels
+	}
+	if perm.AllowedGroups != nil {
+		token.AllowedGroups = perm.AllowedGroups
+	}
 	return nil
 }
 

@@ -65,6 +65,14 @@ type GroupRewriteResult struct {
 	// set — all stale/disabled/deleted). The caller surfaces the
 	// normal resolve-failure envelope; never a panic.
 	FailedGroupID string
+
+	// ScopeExcluded is true when the group had base-servable members but
+	// EVERY one of them was outside the caller's reach set. It is the
+	// "empty because scope" signal that must surface as 403 access_denied,
+	// never as the 502 group_unservable exhaustion (token-authz plan §9;
+	// ADR D14/I9) — the two empty outcomes have different owners and
+	// different operator actions.
+	ScopeExcluded bool
 }
 
 // Pool constants (group-backup-members / D5): the only two strings
