@@ -293,7 +293,7 @@ func (m *memTokenStore) ValidateToken(ctx context.Context, plaintext string) (*a
 	return nil, auth.ErrTokenNotFound
 }
 
-func (m *memTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
+func (m *memTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.OptionalTokenPermission) (string, *auth.AuthToken, error) {
 	plaintext, hash, err := auth.GenerateToken()
 	if err != nil {
 		return "", nil, err
@@ -305,8 +305,8 @@ func (m *memTokenStore) CreateToken(ctx context.Context, name string, expiresAt 
 		ExpiresAt:     expiresAt,
 		CreatedAt:     time.Now(),
 		CreatedBy:     createdBy,
-		AllowedModels: perm.AllowedModels,
-		AllowedGroups: perm.AllowedGroups,
+		AllowedModels: perm.AllowedModels.Value(),
+		AllowedGroups: perm.AllowedGroups.Value(),
 	}
 	m.add(tok)
 	return plaintext, tok, nil
@@ -339,15 +339,15 @@ func (m *memTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Auth
 	return t, nil
 }
 
-func (m *memTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
+func (m *memTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.OptionalTokenPermission) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.tokens[id]
 	if !ok {
 		return auth.ErrTokenNotFound
 	}
-	t.AllowedModels = perm.AllowedModels
-	t.AllowedGroups = perm.AllowedGroups
+	t.AllowedModels = perm.AllowedModels.Value()
+	t.AllowedGroups = perm.AllowedGroups.Value()
 	return nil
 }
 

@@ -2102,7 +2102,7 @@ func (m *modelAccessMockTokenStore) ValidateToken(ctx context.Context, plaintext
 	return token, nil
 }
 
-func (m *modelAccessMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
+func (m *modelAccessMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.OptionalTokenPermission) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 
@@ -2118,7 +2118,7 @@ func (m *modelAccessMockTokenStore) GetTokenByID(ctx context.Context, id string)
 	panic("not implemented")
 }
 
-func (m *modelAccessMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
+func (m *modelAccessMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.OptionalTokenPermission) error {
 	panic("not implemented")
 }
 

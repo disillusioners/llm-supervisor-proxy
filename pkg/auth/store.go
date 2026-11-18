@@ -21,16 +21,18 @@ type TokenStore struct {
 // TokenStoreInterface defines the interface for token operations
 // This allows for mocking in tests
 //
-// The write methods take ONE auth.TokenPermission struct — never two
-// adjacent []string parameters. A positional swap of two slices would be a
-// silent privilege change; a field swap is a compile error (plan §4.3).
+// The write methods take ONE auth.OptionalTokenPermission payload — never two
+// adjacent []string parameters, and one type for both methods (fix-pass 2, A4).
+// A positional swap of two slices would be a silent privilege change; a field
+// swap is a compile error. The per-axis Set flag is what makes "keep this
+// axis" expressible without a sentinel (PD-3 column-skip).
 type TokenStoreInterface interface {
 	ValidateToken(ctx context.Context, plaintext string) (*AuthToken, error)
-	CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm TokenPermission) (string, *AuthToken, error)
+	CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm OptionalTokenPermission) (string, *AuthToken, error)
 	DeleteToken(ctx context.Context, id string) error
 	ListTokens(ctx context.Context) ([]AuthToken, error)
 	GetTokenByID(ctx context.Context, id string) (*AuthToken, error)
-	UpdateTokenPermission(ctx context.Context, id string, perm TokenPermission) error
+	UpdateTokenPermission(ctx context.Context, id string, perm OptionalTokenPermission) error
 }
 
 // Ensure TokenStore implements TokenStoreInterface at compile time
@@ -68,7 +70,7 @@ func marshalGrant(axis []string) (interface{}, error) {
 
 // CreateToken creates a new API token
 // Returns the plaintext token (show once) and the stored token info
-func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm TokenPermission) (string, *AuthToken, error) {
+func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm OptionalTokenPermission) (string, *AuthToken, error) {
 	plaintext, hash, err := GenerateToken()
 	if err != nil {
 		return "", nil, err
@@ -82,11 +84,14 @@ func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *ti
 		expiresAtStr = expiresAt.Format(time.RFC3339)
 	}
 
-	allowedModelsJSON, err := marshalGrant(perm.AllowedModels)
+	// CreateToken is a FULL write: both axes are Set by construction
+	// (FullPermission), so both columns are written. The value keeps the
+	// nil-vs-empty distinction (nil -> NULL/ABSENT, [] -> '[]'/PRESENT-empty).
+	allowedModelsJSON, err := marshalGrant(perm.AllowedModels.Value())
 	if err != nil {
 		return "", nil, err
 	}
-	allowedGroupsJSON, err := marshalGrant(perm.AllowedGroups)
+	allowedGroupsJSON, err := marshalGrant(perm.AllowedGroups.Value())
 	if err != nil {
 		return "", nil, err
 	}
@@ -110,8 +115,8 @@ func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *ti
 		ExpiresAt:     expiresAt,
 		CreatedAt:     now,
 		CreatedBy:     createdBy,
-		AllowedModels: perm.AllowedModels,
-		AllowedGroups: perm.AllowedGroups,
+		AllowedModels: perm.AllowedModels.Value(),
+		AllowedGroups: perm.AllowedGroups.Value(),
 	}
 
 	return plaintext, token, nil
@@ -293,8 +298,8 @@ func (s *TokenStore) GetTokenByID(ctx context.Context, id string) (*AuthToken, e
 // UpdateTokenPermission updates the grant axes for a token.
 //
 // COLUMN-SKIP MERGE (plan §6.1 PD-3, ADR §4.2 + §7, D10 — the fail-closed
-// preservation rule): a nil axis is NOT written at all. It skips that SQL
-// column, so the stored bytes are untouched.
+// preservation rule): a Set:false axis is NOT written at all. It skips that
+// SQL column, so the stored bytes are untouched.
 //
 // That is what keeps DENY-ALL sticky across an omitting merge: a token whose
 // allowed_models column holds unreadable bytes is DENY-ALL; a PATCH that
@@ -302,15 +307,16 @@ func (s *TokenStore) GetTokenByID(ctx context.Context, id string) (*AuthToken, e
 // wildcard rule would read as ABSENT, i.e. full access). The operator's
 // repair path is to submit a valid array for that axis explicitly.
 //
-// A non-nil axis IS written: [] -> '[]' (PRESENT-empty, grants nothing),
-// ids -> JSON array. Never `len(x) > 0` (decisions.md R-6: that would turn
-// "clear the groups" into NULL-on-both-axes ⇒ wildcard escalation).
+// A Set:true axis IS written: [] -> '[]' (PRESENT-empty, grants nothing),
+// ids -> JSON array, nil -> NULL (store-level reset; the PATCH wire cannot
+// express it). Never `len(x) > 0` (decisions.md R-6: that would turn "clear
+// the groups" into NULL-on-both-axes ⇒ wildcard escalation).
 //
 // NOTE: this means an already-PRESENT axis can never be returned to ABSENT
-// via PATCH — the frozen wire contract (plan §2.8) defines
-// null/omitted = KEEP, [] = REPLACE WITH EMPTY. Only creation can leave an
-// axis ABSENT.
-func (s *TokenStore) UpdateTokenPermission(ctx context.Context, id string, perm TokenPermission) error {
+// through the PATCH wire — the frozen contract (plan §2.8, Ruling 2) defines
+// omitted/explicit-null = KEEP, [] = REPLACE WITH EMPTY. Only creation can
+// leave an axis ABSENT (and only a store-level caller can reset one).
+func (s *TokenStore) UpdateTokenPermission(ctx context.Context, id string, perm OptionalTokenPermission) error {
 	var sets []string
 	var args []interface{}
 
@@ -328,21 +334,30 @@ func (s *TokenStore) UpdateTokenPermission(ctx context.Context, id string, perm 
 		return nil
 	}
 
-	if perm.AllowedModels != nil {
-		if err := addSet("allowed_models", perm.AllowedModels); err != nil {
+	// PD-3: assemble the statement from the SET axes ONLY. A Set:false axis is
+	// omitted from the SQL entirely — value and column alike — so untouched
+	// raw bytes stay untouched. That is what keeps a DENY-ALL (unreadable) row
+	// un-healable by an unrelated edit.
+	if perm.AllowedModels.Set {
+		if err := addSet("allowed_models", perm.AllowedModels.Value()); err != nil {
 			return err
 		}
 	}
-	if perm.AllowedGroups != nil {
-		if err := addSet("allowed_groups", perm.AllowedGroups); err != nil {
+	if perm.AllowedGroups.Set {
+		if err := addSet("allowed_groups", perm.AllowedGroups.Value()); err != nil {
 			return err
 		}
 	}
 
-	// Neither axis supplied: nothing to write. Still honour the not-found
-	// contract so callers keep a deterministic 404.
+	// Both axes Set:false: NO column is written, so no UPDATE is executed at all.
+	// This is a SUCCESS (a no-op PATCH), never ErrTokenNotFound — the 404
+	// contract belongs to the API layer, which keeps its GetTokenByID
+	// pre-check (pkg/ui/server.go updateTokenPermission). Pinned by
+	// TestUpdateTokenPermission_OmitsNilColumn + TestTokenAPI_PatchNonexistent_404
+	// so a future refactor cannot delete the pre-check believing the store
+	// covers it.
 	if len(sets) == 0 {
-		return s.tokenExists(ctx, id)
+		return nil
 	}
 
 	var query string
@@ -367,20 +382,4 @@ func (s *TokenStore) UpdateTokenPermission(ctx context.Context, id string, perm 
 	}
 
 	return nil
-}
-
-// tokenExists reports ErrTokenNotFound when no row carries id.
-func (s *TokenStore) tokenExists(ctx context.Context, id string) error {
-	var query string
-	if s.dialect == database.PostgreSQL {
-		query = `SELECT 1 FROM auth_tokens WHERE id = $1`
-	} else {
-		query = `SELECT 1 FROM auth_tokens WHERE id = ?`
-	}
-	var one int
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&one)
-	if err == sql.ErrNoRows {
-		return ErrTokenNotFound
-	}
-	return err
 }

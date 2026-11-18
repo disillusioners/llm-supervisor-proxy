@@ -130,17 +130,22 @@ func TestMigration028_Backfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Run 001..027 + 029..031 (insert two test rows first against a
-	// pre-028 schema, then run 028 to verify the backfill). The loop
-	// pattern `len(migrations)-2` excludes the two most-recent
-	// entries (032 post-P4 and 033 credential groups); benign
-	// because 031 columns are additive (the pre-028 fixture
-	// inserts do not reference them).
+	// pre-028 schema, then run 028 to verify the backfill).
+	//
+	// The skip list is EXPLICIT (per-version), not `len(migrations)-N`
+	// arithmetic: the arithmetic form silently changes meaning every time a
+	// migration is appended — appending 034 made it run 032 against a
+	// schema with no credentials_json (028 skipped) and fail. 032 and 033
+	// are excluded because their fixtures are irrelevant here and 032
+	// depends on 028's column.
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-2; i++ {
-		// Skip 028 — we want a pre-028 schema.
-		if migrations[i].version == "028" {
+	for i := 0; i < len(migrations); i++ {
+		// Skip 028 — we want a pre-028 schema. Skip the post-031 data
+		// migrations (032 needs 028's column; 033/034 are unrelated).
+		if migrations[i].version == "028" || migrations[i].version == "032" ||
+			migrations[i].version == "033" || migrations[i].version == "034" {
 			continue
 		}
 		if err := store.runMigration(ctx, migrations[i]); err != nil {
@@ -243,14 +248,15 @@ func TestMigration028_EscapeSafeBackfill(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Run 001..027 + 029..031 (the loop pattern `len(migrations)-2`
-	// excludes the two most-recent entries — 032 post-P4 and 033
-	// credential groups; benign because 031 columns are additive).
+	// Run 001..027 + 029..031 (explicit per-version skips — see the note in
+	// TestMigration028_Backfill on why the `len(migrations)-N` arithmetic was
+	// replaced).
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-2; i++ {
-		if migrations[i].version == "028" {
+	for i := 0; i < len(migrations); i++ {
+		if migrations[i].version == "028" || migrations[i].version == "032" ||
+			migrations[i].version == "033" || migrations[i].version == "034" {
 			continue
 		}
 		if err := store.runMigration(ctx, migrations[i]); err != nil {
@@ -514,14 +520,15 @@ func TestMigration028_FileLevelTransactionSQLite_Rollback(t *testing.T) {
 
 	// Bring up migrations 001..027 + 029..031 only (skip 028 — we want
 	// to test the column-add step in isolation, against a pre-028
-	// schema). The loop pattern `len(migrations)-2` excludes the two most-recent
-	// entries — 032 post-P4 and 033 credential groups; benign because
-	// 031 columns are additive.
+	// schema). Explicit per-version skips — see the note in
+	// TestMigration028_Backfill on why `len(migrations)-N` arithmetic was
+	// replaced.
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-2; i++ {
-		if migrations[i].version == "028" {
+	for i := 0; i < len(migrations); i++ {
+		if migrations[i].version == "028" || migrations[i].version == "032" ||
+			migrations[i].version == "033" || migrations[i].version == "034" {
 			continue
 		}
 		if err := store.runMigration(ctx, migrations[i]); err != nil {
@@ -1025,4 +1032,450 @@ func TestMigration033_ForwardFreshDB(t *testing.T) {
 	if err := store.RunMigrations(ctx); err != nil {
 		t.Fatalf("second RunMigrations (idempotency): %v", err)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration 034 — auth_tokens.allowed_groups + the token-grant repartition
+// (token-authz plan T1.10).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// migrationByVersion returns the registry entry for version, failing the test
+// when the registry append is missing (the "Amendment-1 trap" — the registry is
+// an ordered slice, so a SQL file without an append is silently inert).
+func migrationByVersion(t *testing.T, version string) migration {
+	t.Helper()
+	for _, m := range migrations {
+		if m.version == version {
+			return m
+		}
+	}
+	t.Fatalf("%s not found in the migrations registry — the Amendment-1 registry append is missing, so the SQL files are inert", version)
+	return migration{}
+}
+
+// migrateUpTo033 brings a store to the pre-034 schema (used by the seeded
+// repartition tests so the fixtures can be inserted in their legacy shape).
+func migrateUpTo033(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.ensureMigrationsTable(ctx); err != nil {
+		t.Fatalf("ensureMigrationsTable: %v", err)
+	}
+	for _, m := range migrations {
+		if m.version == "034" {
+			continue
+		}
+		if err := store.runMigration(ctx, m); err != nil {
+			t.Fatalf("migration %s: %v", m.version, err)
+		}
+	}
+	if columnExists(t, store.DB, "auth_tokens", "allowed_groups") {
+		t.Fatal("precondition: allowed_groups exists before 034 — the fixture DB is not pre-034")
+	}
+}
+
+// seedGroupAndModel inserts a models row so the repartition's
+// `kind='group'` filter has something to match.
+func seedModelRow(t *testing.T, store *Store, id, kind string) {
+	t.Helper()
+	if _, err := store.DB.Exec(
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, kind, members_json, shadow_model_id) VALUES (?, ?, 1, '[]', '[]', 1, '[]', '', '', '', ?, '[]', '')`,
+		id, id, kind,
+	); err != nil {
+		t.Fatalf("insert models row %s (kind=%s): %v", id, kind, err)
+	}
+}
+
+// seedToken inserts an auth_tokens row with the given raw allowed_models bytes.
+// allowedModelsRaw == nil inserts SQL NULL.
+func seedToken(t *testing.T, store *Store, id string, allowedModelsRaw interface{}) {
+	t.Helper()
+	if _, err := store.DB.Exec(
+		`INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by, allowed_models) VALUES (?, ?, ?, NULL, ?, 'seed', ?)`,
+		id, "hash-"+id, id, "2026-01-01T00:00:00Z", allowedModelsRaw,
+	); err != nil {
+		t.Fatalf("insert auth_tokens row %s (%v): %v", id, allowedModelsRaw, err)
+	}
+}
+
+// grantColumns reads (allowed_models, allowed_groups) raw, as strings with
+// "<NULL>" for SQL NULL.
+func grantColumns(t *testing.T, store *Store, id string) (string, string) {
+	t.Helper()
+	var models, groups interface{}
+	if err := store.DB.QueryRow(
+		`SELECT allowed_models, allowed_groups FROM auth_tokens WHERE id = ?`, id,
+	).Scan(&models, &groups); err != nil {
+		t.Fatalf("read grant columns for %s: %v", id, err)
+	}
+	render := func(v interface{}) string {
+		switch x := v.(type) {
+		case nil:
+			return "<NULL>"
+		case string:
+			return x
+		case []byte:
+			return string(x)
+		default:
+			return "<?>"
+		}
+	}
+	return render(models), render(groups)
+}
+
+// TestMigration034_ForwardFreshDB pins that 034 is IN THE REGISTRY (so it is
+// not inert) and that a fresh boot lands the column + the schema_migrations
+// row. Same shape as TestMigration031_ForwardFreshDB.
+func TestMigration034_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.RunMigrations(ctx); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	versions, err := store.GetAppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "034" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 034 (registry append missing) — applied versions: %v", versions)
+	}
+
+	if !columnExists(t, store.DB, "auth_tokens", "allowed_groups") {
+		t.Error("allowed_groups column missing from auth_tokens (034 SQL not applied)")
+	}
+	// The repartition must not have disturbed the pre-existing column.
+	if !columnExists(t, store.DB, "auth_tokens", "allowed_models") {
+		t.Error("allowed_models column vanished during 034")
+	}
+}
+
+// TestMigration034_SQLiteJSON1Available makes the OI-1 probe a permanent CI
+// fact rather than a runbook promise: the repartition's SQL depends on
+// json_each / json_group_array / json_valid being compiled into the shipped
+// modernc.org/sqlite build. If this fails, the documented fallback is the
+// idempotent Go-side backfill (plan §5.5) — do NOT improvise a schema.
+func TestMigration034_SQLiteJSON1Available(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	var aggregated string
+	if err := store.DB.QueryRow(`SELECT json_group_array(value) FROM json_each('["a","b"]')`).Scan(&aggregated); err != nil {
+		t.Fatalf("json_group_array over json_each failed — JSON1 unavailable on modernc.org/sqlite: %v", err)
+	}
+	if aggregated != `["a","b"]` {
+		t.Errorf(`json_group_array(json_each(...)) = %q, want ["a","b"]`, aggregated)
+	}
+
+	var valid int
+	if err := store.DB.QueryRow(`SELECT json_valid('["a"]')`).Scan(&valid); err != nil {
+		t.Fatalf("json_valid failed — JSON1 unavailable: %v", err)
+	}
+	if valid != 1 {
+		t.Errorf("json_valid('[\"a\"]') = %d, want 1", valid)
+	}
+	if err := store.DB.QueryRow(`SELECT json_valid('not-json')`).Scan(&valid); err != nil {
+		t.Fatalf("json_valid on invalid input errored (it must RETURN 0, not fail): %v", err)
+	}
+	if valid != 0 {
+		t.Errorf("json_valid('not-json') = %d, want 0", valid)
+	}
+
+	// The NULLIF-over-zero-rows property the repartition relies on (PD-4).
+	var empty interface{}
+	if err := store.DB.QueryRow(
+		`SELECT NULLIF((SELECT json_group_array(value) FROM json_each('[]')), '[]')`,
+	).Scan(&empty); err != nil {
+		t.Fatalf("NULLIF(json_group_array over zero rows) failed: %v", err)
+	}
+	if empty != nil {
+		t.Errorf("json_group_array over zero rows wrapped in NULLIF = %v, want NULL", empty)
+	}
+}
+
+// seedRepartitionFixtures inserts the five shapes the repartition must handle
+// and returns their ids.
+func seedRepartitionFixtures(t *testing.T, store *Store) {
+	t.Helper()
+	seedModelRow(t, store, "g1", "group")
+	seedModelRow(t, store, "m1", "chat")
+
+	seedToken(t, store, "wildcard", nil)                // (1) NULL — untouched
+	seedToken(t, store, "group-only", `["g1"]`)         // (2) pure group id
+	seedToken(t, store, "mixed", `["m1","g1"]`)         // (3) model + group id
+	seedToken(t, store, "explicit-empty", `[]`)         // (4) '[]' — untouched
+	seedToken(t, store, "malformed", `not-json`)        // (5) corrupt — untouched
+	seedToken(t, store, "malformed-bracket", `[broken`) // (6) PD-2 exact shape — untouched, no abort
+	seedToken(t, store, "model-only", `["m1"]`)         // (6) no group id — untouched
+}
+
+// assertRepartitionPostState asserts the post-034 shape of all six fixtures.
+func assertRepartitionPostState(t *testing.T, store *Store) {
+	t.Helper()
+
+	type want struct{ models, groups string }
+	wants := map[string]want{
+		"wildcard":       {"<NULL>", "<NULL>"},
+		"group-only":     {"<NULL>", `["g1"]`},
+		"mixed":          {"[\"m1\"]", `["g1"]`},
+		"explicit-empty": {"[]", "<NULL>"},
+		"malformed":      {"not-json", "<NULL>"},
+		// PD-2's shape: passes PG's `^\s*\[` row filter but is not valid
+		// JSON. The migration must SKIP it (never abort), leaving it
+		// byte-identical; the scanner then classifies it INVALID ⇒ DENY-ALL.
+		"malformed-bracket": {"[broken", "<NULL>"},
+		"model-only":        {`["m1"]`, "<NULL>"},
+	}
+	for id, w := range wants {
+		gotModels, gotGroups := grantColumns(t, store, id)
+		if gotModels != w.models {
+			t.Errorf("%s: allowed_models = %q, want %q", id, gotModels, w.models)
+		}
+		if gotGroups != w.groups {
+			t.Errorf("%s: allowed_groups = %q, want %q", id, gotGroups, w.groups)
+		}
+	}
+}
+
+// TestMigration034_Repartition proves the data repartition moves group ids out
+// of allowed_models and leaves every other shape alone.
+func TestMigration034_Repartition(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	migrateUpTo033(t, store)
+	seedRepartitionFixtures(t, store)
+
+	if err := store.runMigration(ctx, migrationByVersion(t, "034")); err != nil {
+		t.Fatalf("runMigration 034: %v", err)
+	}
+
+	assertRepartitionPostState(t, store)
+}
+
+// TestMigration034_RepartitionIdempotent runs the repartition a SECOND time and
+// requires zero rows affected + byte-identical state (the idempotency proof
+// obligation, plan §5.4).
+func TestMigration034_RepartitionIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	migrateUpTo033(t, store)
+	seedRepartitionFixtures(t, store)
+
+	mig := migrationByVersion(t, "034")
+	if err := store.runMigration(ctx, mig); err != nil {
+		t.Fatalf("first runMigration 034: %v", err)
+	}
+	assertRepartitionPostState(t, store)
+
+	// Re-execute ONLY the repartition statement (the migration itself is
+	// skipped by isMigrationApplied, so re-running the whole file would prove
+	// nothing about the UPDATE).
+	sqlText, err := store.loadMigrationSQL(mig.name)
+	if err != nil {
+		t.Fatalf("loadMigrationSQL: %v", err)
+	}
+	start := strings.Index(sqlText, "UPDATE auth_tokens")
+	if start < 0 {
+		t.Fatal("repartition UPDATE not found in the 034 SQL")
+	}
+	end := strings.Index(sqlText[start:], ";")
+	if end < 0 {
+		t.Fatal("repartition UPDATE is not terminated by ';'")
+	}
+	updateStmt := sqlText[start : start+end]
+
+	res, err := store.DB.ExecContext(ctx, updateStmt)
+	if err != nil {
+		t.Fatalf("second repartition run: %v", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("RowsAffected: %v", err)
+	}
+	if affected != 0 {
+		t.Errorf("second repartition affected %d row(s), want 0 — the repartition is not idempotent", affected)
+	}
+
+	assertRepartitionPostState(t, store)
+}
+
+// TestMigration034_NullNotEmptyArray pins PD-4: an allowed_models column left
+// with zero ids becomes NULL (ABSENT), never '[]' (which would be
+// PRESENT-and-empty under the explicit-empty contract).
+func TestMigration034_NullNotEmptyArray(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	migrateUpTo033(t, store)
+	seedModelRow(t, store, "g1", "group")
+	seedToken(t, store, "group-only", `["g1"]`)
+
+	if err := store.runMigration(ctx, migrationByVersion(t, "034")); err != nil {
+		t.Fatalf("runMigration 034: %v", err)
+	}
+
+	gotModels, gotGroups := grantColumns(t, store, "group-only")
+	if gotModels != "<NULL>" {
+		t.Fatalf("emptied allowed_models = %q, want NULL — '[]' would mean PRESENT-and-empty and would change the token's semantics", gotModels)
+	}
+	if gotGroups != `["g1"]` {
+		t.Errorf("allowed_groups = %q, want [\"g1\"]", gotGroups)
+	}
+}
+
+// TestMigration034_PGGuardShape is the PD-2 pin, asserted STRUCTURALLY on the
+// PostgreSQL SQL file. The SQLite harness cannot execute plpgsql, so a
+// behavioural PG test would need a live PG in the unit pack — but the real
+// regression class (an edit that moves the EXCEPTION outside the loop, drops
+// it, or swaps in the PG-16-only pg_input_is_valid) is fully catchable by
+// reading the file.
+//
+// Behavioural coverage for the skip semantics comes from
+// TestMigration034_Repartition case (6) on SQLite plus the G0 dry-run against
+// the live hosts (Phase 3 T3.10).
+func TestMigration034_PGGuardShape(t *testing.T) {
+	sqlBytes, err := postgresMigrations.ReadFile("migrations/postgres/034_add_allowed_groups.up.sql")
+	if err != nil {
+		t.Fatalf("read the PG 034 up file: %v", err)
+	}
+	sqlText := stripSQLLineComments(string(sqlBytes))
+
+	// (a) the version-agnostic DO $$ block is present.
+	if !strings.Contains(sqlText, "DO $$") {
+		t.Error("PG 034 has no DO $$ block — the per-row guard is missing (a malformed row would abort the in-process boot migration)")
+	}
+
+	// (b) the EXCEPTION handler must appear AFTER the loop opens, i.e. INSIDE
+	// the per-row block. Hoisted outside the loop, one bad row would abort the
+	// whole batch — the exact PD-2 defect.
+	loopIdx := strings.Index(sqlText, "LOOP")
+	excIdx := strings.Index(sqlText, "EXCEPTION WHEN invalid_text_representation")
+	if loopIdx < 0 {
+		t.Fatal("PG 034 has no FOR ... LOOP — the row-by-row guard is missing")
+	}
+	if excIdx < 0 {
+		t.Fatal("PG 034 has no `EXCEPTION WHEN invalid_text_representation` handler")
+	}
+	if excIdx < loopIdx {
+		t.Errorf("the EXCEPTION handler appears at byte %d, before the LOOP at byte %d — it must be INSIDE the loop so one malformed row cannot abort the batch", excIdx, loopIdx)
+	}
+
+	// (c) version-agnostic: no PG-16-only function.
+	if strings.Contains(sqlText, "pg_input_is_valid") {
+		t.Error("PG 034 uses pg_input_is_valid — that requires PG 16+, an assumption this migration must not make (leader ruling: version-agnostic form)")
+	}
+
+	// (d) the skip must be observable at default log level.
+	if !strings.Contains(sqlText, "RAISE WARNING") {
+		t.Error("PG 034 has no RAISE WARNING — the skipped row would be invisible in pod stdout")
+	}
+}
+
+// TestMigration034_SQLiteDialectParity is the PD-4 behavioural pin: a token
+// whose allowed_models names ONLY group ids must end with allowed_models IS
+// NULL (ABSENT) and allowed_groups a NON-EMPTY array (PRESENT). That is the
+// shape PG's json_agg (NULL over zero rows) produces too — SQLite reaches it
+// via NULLIF(..., '[]').
+func TestMigration034_SQLiteDialectParity(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	migrateUpTo033(t, store)
+	seedModelRow(t, store, "g1", "group")
+	seedModelRow(t, store, "g2", "group")
+	seedToken(t, store, "group-only-two", `["g1","g2"]`)
+
+	if err := store.runMigration(ctx, migrationByVersion(t, "034")); err != nil {
+		t.Fatalf("runMigration 034: %v", err)
+	}
+
+	// IS NULL — not = '', not = '[]'. '[]' would be PRESENT-empty, a
+	// different permission state from the ABSENT that PG produces.
+	var isNull int
+	if err := store.DB.QueryRow(
+		`SELECT COUNT(*) FROM auth_tokens WHERE id = 'group-only-two' AND allowed_models IS NULL`,
+	).Scan(&isNull); err != nil {
+		t.Fatalf("IS NULL check: %v", err)
+	}
+	if isNull != 1 {
+		gotModels, _ := grantColumns(t, store, "group-only-two")
+		t.Fatalf("allowed_models = %q, want SQL NULL (PD-4: '[]' would be PRESENT-empty and would diverge from PG's json_agg)", gotModels)
+	}
+
+	// The populated axis must be PRESENT and carry both group ids, and must
+	// parse as PRESENT (not INVALID) through the real scanner.
+	_, gotGroups := grantColumns(t, store, "group-only-two")
+	if gotGroups == "<NULL>" {
+		t.Fatal("allowed_groups is NULL — the repartition dropped the grants it was supposed to move")
+	}
+	var groupIDs []string
+	if err := json.Unmarshal([]byte(gotGroups), &groupIDs); err != nil {
+		t.Fatalf("allowed_groups is not a JSON array (%q): %v", gotGroups, err)
+	}
+	if len(groupIDs) != 2 {
+		t.Errorf("allowed_groups = %v, want 2 ids", groupIDs)
+	}
+
+	// NOTE: pkg/auth imports pkg/store/database, so this in-package test may
+	// NOT import pkg/auth to call ScanGrant (import cycle). The scanner's
+	// view of the same bytes is covered in pkg/auth; here the shape assertion
+	// is "non-NULL, valid JSON array, non-empty" — which is exactly PRESENT.
+	if gotGroups == "[]" {
+		t.Error("allowed_groups = '[]' — the repartition emptied the populated axis")
+	}
+}
+
+// stripSQLLineComments removes `--` line comments so a structural pin tests
+// the EXECUTABLE shape of a migration, not the prose that explains it (a
+// comment naming a rejected function must neither satisfy nor violate a
+// shape assertion).
+func stripSQLLineComments(sqlText string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(sqlText, "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }

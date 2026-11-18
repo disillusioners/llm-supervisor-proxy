@@ -78,7 +78,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
 
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", auth.FullPermission(nil, nil))
 	if err != nil {
 		db.Close()
 		authDB.Close()

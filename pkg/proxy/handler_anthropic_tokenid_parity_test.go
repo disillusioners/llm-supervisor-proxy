@@ -227,7 +227,7 @@ func (r *recordingTokenStore) ValidateToken(_ context.Context, plaintext string)
 }
 
 // Unused methods — panic if hit, mirroring mockTokenStore pattern.
-func (r *recordingTokenStore) CreateToken(context.Context, string, *time.Time, string, auth.TokenPermission) (string, *auth.AuthToken, error) {
+func (r *recordingTokenStore) CreateToken(context.Context, string, *time.Time, string, auth.OptionalTokenPermission) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 func (r *recordingTokenStore) DeleteToken(context.Context, string) error { panic("not implemented") }
@@ -237,7 +237,7 @@ func (r *recordingTokenStore) ListTokens(context.Context) ([]auth.AuthToken, err
 func (r *recordingTokenStore) GetTokenByID(context.Context, string) (*auth.AuthToken, error) {
 	panic("not implemented")
 }
-func (r *recordingTokenStore) UpdateTokenPermission(context.Context, string, auth.TokenPermission) error {
+func (r *recordingTokenStore) UpdateTokenPermission(context.Context, string, auth.OptionalTokenPermission) error {
 	panic("not implemented")
 }
 

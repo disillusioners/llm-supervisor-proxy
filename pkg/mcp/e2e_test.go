@@ -91,7 +91,7 @@ func setupE2EEnv(t *testing.T) *e2eTestEnv {
 	env.authTokenStore = auth.NewTokenStore(authDB, database.SQLite)
 
 	// Create a test token
-	plaintext, _, err := env.authTokenStore.CreateToken(context.Background(), "e2e-test-token", nil, "e2e-test", auth.TokenPermission{AllowedModels: nil})
+	plaintext, _, err := env.authTokenStore.CreateToken(context.Background(), "e2e-test-token", nil, "e2e-test", auth.FullPermission(nil, nil))
 	if err != nil {
 		mcpDB.Close()
 		authDB.Close()

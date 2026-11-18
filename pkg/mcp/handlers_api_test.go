@@ -68,7 +68,7 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, string, func()) {
 	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
 
 	// Create a test token
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "api-test-token", nil, "api-test", auth.TokenPermission{AllowedModels: nil})
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "api-test-token", nil, "api-test", auth.FullPermission(nil, nil))
 	if err != nil {
 		authDB.Close()
 		cleanup()

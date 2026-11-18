@@ -91,9 +91,20 @@ func (c *CachedTokenStore) Stop() {
 }
 
 // rememberID records id→hash for DeleteToken fan-out (W4), evicting
-// the oldest entries beyond defaultIDIndexCap (straight FIFO; losing
-// a stale mapping just falls back to TTL expiry for that token —
-// accepted residual per planner ruling F).
+// the oldest entries beyond defaultIDIndexCap = 50000 (pkg/modelscache/
+// models.go:25; straight FIFO).
+//
+// THE BOUND, AND WHAT IT COSTS (token-authz PD-7(b) — documented, not
+// fixed): UpdateTokenPermission drops the cached entry by looking the hash
+// up in THIS index. If a token's id→hash entry was evicted, that lookup
+// misses and the drop is a SILENT MISS ⇒ the old grants stay cached for up
+// to TokensPositiveTTL (60s, models.go:19), or up to defaultStaleCap (24h,
+// models.go:21) when the stale-positive tier is serving during a DB
+// infrastructure outage. 50000 tokens is far beyond this deployment's token
+// count, so this is a documented ceiling rather than a live defect — do NOT
+// "fix" it by widening the cap (that moves the memory bound, not the race).
+// A strict bound would need an id-keyed permission generation counter,
+// which is out of scope for this commission.
 func (c *CachedTokenStore) rememberID(id, hash string) {
 	if id == "" {
 		return
@@ -109,7 +120,7 @@ func (c *CachedTokenStore) rememberID(id, hash string) {
 	c.idToHash[id] = hash
 }
 
-// cloneAuthToken returns a deep copy of t (nil-safe) so the cached entry is
+// cloneToken returns a deep copy of t (nil-safe) so the cached entry is
 // never aliased by a caller.
 //
 // The grant slices AND the two INVALID flags must survive the cache boundary
@@ -117,7 +128,14 @@ func (c *CachedTokenStore) rememberID(id, hash string) {
 // because a separately returned value would be dropped right here. Copying
 // the slices means one request's append cannot widen another request's
 // reach.
-func cloneAuthToken(t *auth.AuthToken) *auth.AuthToken {
+//
+// NIL-VS-EMPTY IS PRESERVED ON PURPOSE (token-authz PD-7): the copy is
+// make+copy, guarded by a nil check, so a nil (ABSENT) axis stays nil and a
+// non-nil empty (PRESENT-empty) axis stays non-nil empty. `append([]string(nil),
+// x...)` would silently collapse PRESENT-empty into ABSENT — the exact
+// escalation trap this commission kills, in miniature, inside the cache.
+// Pinned by TestCachedTokenStore_ClonePreservesPresentEmpty.
+func cloneToken(t *auth.AuthToken) *auth.AuthToken {
 	if t == nil {
 		return nil
 	}
@@ -146,7 +164,7 @@ func (c *CachedTokenStore) storePositive(hash string, token *auth.AuthToken, cla
 	c.mu.Lock()
 	c.entries.Put(hash, &tokenEntry{
 		kind:       tierPositive,
-		token:      cloneAuthToken(token),
+		token:      cloneToken(token),
 		freshUntil: freshUntil,
 		cachedAt:   now,
 	})
@@ -190,7 +208,7 @@ func (c *CachedTokenStore) cachedVerdict(hash string, now time.Time) (*auth.Auth
 			// grant slices + the two Invalid flags must reach every caller
 			// intact and un-aliased (a caller appending to AllowedGroups
 			// must never mutate the cached entry for the next request).
-			return cloneAuthToken(e.token), nil, true
+			return cloneToken(e.token), nil, true
 		}
 	case tierNegative:
 		if now.Sub(e.cachedAt) <= c.opts.NegativeTTL {
@@ -264,7 +282,7 @@ func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 			if e.kind == tierPositive && e.token != nil &&
 				now.Sub(e.cachedAt) <= c.opts.StaleCap {
 				log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
-				return cloneAuthToken(e.token), nil
+				return cloneToken(e.token), nil
 			}
 		}
 		return nil, err
@@ -288,7 +306,7 @@ func isVerdictClass(err error) bool {
 
 // CreateToken delegates to the inner store, then caches the returned
 // token as a positive (write-through) and records id→hash.
-func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.TokenPermission) (string, *auth.AuthToken, error) {
+func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.OptionalTokenPermission) (string, *auth.AuthToken, error) {
 	plaintext, token, err := c.inner.CreateToken(ctx, name, expiresAt, createdBy, perm)
 	if err != nil {
 		return "", nil, err
@@ -330,7 +348,7 @@ func (c *CachedTokenStore) DeleteToken(ctx context.Context, id string) error {
 // ValidateToken re-reads the row, so a group-grant change is visible within
 // ONE validation. The idToHash entry is deliberately kept: the token still
 // exists, only its permissions changed.
-func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.TokenPermission) error {
+func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.OptionalTokenPermission) error {
 	if err := c.inner.UpdateTokenPermission(ctx, id, perm); err != nil {
 		return err
 	}

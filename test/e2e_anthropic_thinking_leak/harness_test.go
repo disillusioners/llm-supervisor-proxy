@@ -300,7 +300,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	// (the /v1/messages lane enforces auth since the security hotfix —
 	// defect v191 / anomaly 4a231ed0).
 	ctx := context.Background()
-	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", auth.TokenPermission{AllowedModels: nil})
+	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", auth.FullPermission(nil, nil))
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}

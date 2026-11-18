@@ -80,6 +80,19 @@ var migrations = []migration{
 	// files. Without this append the 033 files are silently inert and
 	// credential groups are unavailable.
 	{"033", "033_add_credential_groups.up"},
+	// Amendment-1 trap (sixth occurrence): this registry is an ordered
+	// slice, NOT a directory scanner; this append activates the 034 SQL
+	// files (auth_tokens.allowed_groups + the token-grant data
+	// repartition). Without this append the 034 files are silently inert
+	// and the allowed_groups token scope does not exist — and nothing in
+	// the build fails; the failure surfaces at the first allowed_groups
+	// SELECT.
+	//
+	// ORDER NOTE: 034 must run AFTER 030_add_model_kind (models.kind) and
+	// 031_add_group_fields, because the repartition's WHERE clause filters
+	// on `models.kind = 'group'`. Runner order is slice order, so this is
+	// automatic — do not re-number.
+	{"034", "034_add_allowed_groups.up"},
 }
 
 // RunMigrations executes database schema migrations
