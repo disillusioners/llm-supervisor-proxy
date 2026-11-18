@@ -199,6 +199,54 @@ func TestAuthzScope_AllowsEmptyID(t *testing.T) {
 	}
 }
 
+// TestAuthzResolve_EmptyTextGrantIsDenyAll_NotWildcard is the PAIRED pin
+// for the scanner rule (Phase-1.1 item A): a whitespace-only
+// `allowed_models` column is UNREADABLE, and an unreadable axis collapses
+// the WHOLE token to DENY-ALL.
+//
+// The pair matters because the two states are indistinguishable at the
+// struct level once scanned: `AllowedModels == nil` means ABSENT (a
+// wildcard when the group axis is absent too) while `ModelsInvalid == true`
+// means DENY-ALL. If the scanner ever maps an empty column back to ABSENT,
+// this token silently regains FULL ACCESS on public /v1/* — the exact
+// escalation class the commission closes. The pin therefore asserts both
+// halves: the scanner says INVALID, and the resolver says DENY-ALL (never
+// WILDCARD).
+func TestAuthzResolve_EmptyTextGrantIsDenyAll_NotWildcard(t *testing.T) {
+	for _, raw := range []interface{}{"", "   ", "\t\n", []byte("  ")} {
+		ids, present, invalid := auth.ScanGrant(raw)
+		if present {
+			t.Errorf("ScanGrant(%q) present = true, want false (an empty column is not a grant list)", raw)
+		}
+		if !invalid {
+			t.Errorf("ScanGrant(%q) invalid = false, want true (an empty column is UNREADABLE, not ABSENT)", raw)
+		}
+		if len(ids) != 0 {
+			t.Errorf("ScanGrant(%q) returned ids %v alongside invalid=true", raw, ids)
+		}
+
+		// The pair: a whitespace model axis + an ABSENT group axis.
+		tok := &auth.AuthToken{
+			AllowedModels: ids,
+			AllowedGroups: nil, // ABSENT — the other axis is clean
+			ModelsInvalid: invalid,
+		}
+		s := Resolve(tok, nil)
+		if s == nil {
+			t.Fatalf("Resolve(whitespace models axis, absent groups axis) = nil — the token collapsed to WILDCARD")
+		}
+		if s.IsUnrestricted() {
+			t.Error("an unreadable grant axis must never resolve to UNRESTRICTED")
+		}
+		if !s.IsDenyAll() {
+			t.Error("an unreadable grant axis must resolve to DENY-ALL")
+		}
+		if s.Allows("any-model") {
+			t.Error("a DENY-ALL scope must not allow any id")
+		}
+	}
+}
+
 // TestReachFilter_InterfaceShape pins models.ReachFilter's implementation by
 // *authz.Scope at COMPILE time. It lives here (not in pkg/models) because
 // pkg/models must not import pkg/authz — the seam exists precisely to keep

@@ -46,10 +46,35 @@ type Scope struct {
 //	otherwise                      -> restricted set = allowed_models ∪ allowed_groups ∪ ⋃ Members(g)
 //
 // membersOf returns a group's CURRENT member row ids; it MUST be
-// cache-backed (pkg/proxy: directGetModel/GetModelNative; pkg/decision:
-// h.currentModelRows()). It is called ONLY for group ids present in
-// t.AllowedGroups — a token with an ABSENT/empty group axis never touches
-// membership at all (the hot-path guarantee).
+// backed by the IN-MEMORY models snapshot the cache layer already
+// maintains — NEVER a per-member live DB read:
+//
+//   - pkg/proxy: conf.ModelsConfig.GetModels() (the modelscache
+//     decorator's in-memory snapshot — pkg/modelscache/models.go
+//     GetModels: a RLock over the cached snapshot, ZERO DB SELECT on a
+//     hit). The group→member index is built ONCE per request from that
+//     snapshot.
+//   - pkg/decision: h.currentModelRows() (the decorator-forwarded
+//     GetModels — pkg/decision/group.go).
+//
+// It is called ONLY for group ids present in t.AllowedGroups — a token
+// with an ABSENT/empty group axis never touches membership at all (the
+// hot-path guarantee).
+//
+// WHY NOT GetModelNative: the RAW manager's GetModelNative
+// (pkg/store/database) is a live `SELECT … FROM models` issued UNDER
+// m.mu.RLock — the writer-preferring RWMutex queues every reader behind
+// it, so a per-request membership read can stall the whole live request
+// path for the duration of the query (the ~90s reader-stall pattern).
+// The in-memory snapshot has the same freshness semantics (it is
+// invalidated on every group write — the modelscache decorator's
+// write-through mutators rebuild the snapshot under the write lock) and
+// no read cost.
+//
+// The member expansion is injected as `membersOf` so this package stays a
+// leaf: it imports pkg/auth (plus stdlib) and nothing else — no pkg/proxy,
+// no pkg/decision, no pkg/store/database, no pkg/modelscache. That is
+// enforced by TestPackage_ImportGuard_AuthzStaysLeaf.
 func Resolve(t *auth.AuthToken, membersOf func(groupID string) []string) *Scope {
 	if t == nil {
 		return nil

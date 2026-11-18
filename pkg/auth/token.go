@@ -53,7 +53,7 @@ type AuthToken struct {
 //
 //	raw == nil                                   -> (nil,  present=false, invalid=false)  ABSENT
 //	unknown raw type (not string / []byte)        -> (nil,  present=false, invalid=true )  INVALID   [old :52-55]
-//	""                                            -> (nil,  present=false, invalid=false)  ABSENT    [old :57-59]
+//	"" / whitespace-only TEXT                     -> (nil,  present=false, invalid=true )  INVALID   (fail closed — see below)
 //	valid JSON array (incl. "[]")                 -> (ids,  present=true,  invalid=false)  PRESENT
 //	malformed JSON / non-array JSON literal       -> (nil,  present=false, invalid=true )  INVALID   [old :62-66]
 //
@@ -62,6 +62,23 @@ type AuthToken struct {
 // into `[]string{}` (the pre-change behaviour) made a corrupt row
 // indistinguishable from a wildcard grant — full access on a row the log
 // claimed to be denying.
+//
+// THE EMPTY-STRING ARM (Phase-1.1 item A, fail closed): an EMPTY or
+// whitespace-only TEXT value is UNREADABLE, never ABSENT. Only SQL NULL
+// means ABSENT. An empty string used to read as ABSENT, which made a
+// legacy `""` row indistinguishable from a NULL row — and a NULL row on
+// BOTH axes is the WILDCARD state (ADR D3/D11). Reading `""` as ABSENT
+// therefore turned a legacy empty column into a full-access wildcard, the
+// exact escalation class this commission closes. It now lands in INVALID
+// (DENY-ALL) like every other unreadable grant.
+//
+// OPERATIONAL CONSEQUENCE (stated, not silently absorbed): any PRE-EXISTING
+// row whose column holds `""` (rather than NULL) becomes DENY-ALL under
+// the new scanner — such a token can no longer reach anything until the
+// column is repaired (NULL for "no grant on this axis", or a JSON array
+// for a real grant). Migration 034 does NOT normalize legacy `""` rows
+// (the SQL is frozen — Ruling 6); the repair is an operator-side
+// inspection/reconciliation step, reported as an escalation item.
 //
 // This is a PARSER, not an authorization decision: the token-level state
 // (wildcard / restricted / deny-all) is computed by authz.Resolve, which
@@ -91,7 +108,14 @@ func scanGrant(raw interface{}, axis string) (ids []string, present bool, invali
 	}
 
 	if strings.TrimSpace(str) == "" {
-		return nil, false, false
+		// Fail closed (Phase-1.1 item A): an empty / whitespace-only TEXT
+		// value is UNREADABLE, never ABSENT. Only SQL NULL means ABSENT.
+		// Reading `""` as ABSENT made a legacy empty column
+		// indistinguishable from NULL — and NULL on BOTH axes is the
+		// WILDCARD state (ADR D3/D11). An empty column is therefore
+		// DENY-ALL, exactly like a malformed or unknown-typed column.
+		log.Printf("SECURITY: empty %s column (empty or whitespace-only text), denying all models on this axis", axisLabel(axis))
+		return nil, false, true
 	}
 
 	// A non-array JSON literal ('null', '123', '"x"', '{...}') is NOT a

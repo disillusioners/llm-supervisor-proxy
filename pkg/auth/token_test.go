@@ -117,8 +117,9 @@ func TestScanGrant_TriState(t *testing.T) {
 		wantInvalid bool
 	}{
 		{name: "nil is ABSENT", input: nil, wantIDs: nil, wantPresent: false, wantInvalid: false},
-		{name: "empty string is ABSENT", input: "", wantIDs: nil, wantPresent: false, wantInvalid: false},
-		{name: "whitespace string is ABSENT", input: "   ", wantIDs: nil, wantPresent: false, wantInvalid: false},
+		{name: "empty string is INVALID", input: "", wantIDs: nil, wantPresent: false, wantInvalid: true},
+		{name: "whitespace string is INVALID", input: "   ", wantIDs: nil, wantPresent: false, wantInvalid: true},
+		{name: "tab/newline string is INVALID", input: "\t\n", wantIDs: nil, wantPresent: false, wantInvalid: true},
 		{name: "empty array is PRESENT-empty", input: "[]", wantIDs: []string{}, wantPresent: true, wantInvalid: false},
 		{name: "array with ids is PRESENT", input: `["a"]`, wantIDs: []string{"a"}, wantPresent: true, wantInvalid: false},
 		{name: "byte slice with ids is PRESENT", input: []byte(`["byte-model"]`), wantIDs: []string{"byte-model"}, wantPresent: true, wantInvalid: false},
@@ -160,6 +161,37 @@ func TestScanGrant_TriState(t *testing.T) {
 	}
 }
 
+// TestScanGrant_OnlySQLNullIsAbsent pins the Phase-1.1 item A rule at the
+// exact boundary: ONLY a SQL NULL (raw == nil) means ABSENT. An empty or
+// whitespace-only TEXT value is UNREADABLE (INVALID ⇒ DENY-ALL), because
+// reading it as ABSENT made a legacy `""` column indistinguishable from a
+// NULL column — and NULL on BOTH axes is the WILDCARD state (ADR D3/D11).
+//
+// The paired resolver-side proof lives in pkg/authz
+// (TestAuthzResolve_EmptyTextGrantIsDenyAll_NotWildcard): this test pins
+// the parser, that one pins the consequence.
+func TestScanGrant_OnlySQLNullIsAbsent(t *testing.T) {
+	// The ABSENT boundary: SQL NULL.
+	ids, present, invalid := ScanGrant(nil)
+	if ids != nil || present || invalid {
+		t.Errorf("ScanGrant(nil) = (%v, %v, %v), want (nil, false, false) — SQL NULL is ABSENT", ids, present, invalid)
+	}
+
+	// Everything else that is "empty" is UNREADABLE.
+	for _, raw := range []interface{}{"", " ", "   ", "\t", "\n", "\r\n\t ", []byte(""), []byte("  ")} {
+		ids, present, invalid := ScanGrant(raw)
+		if present {
+			t.Errorf("ScanGrant(%q) present = true, want false", raw)
+		}
+		if !invalid {
+			t.Errorf("ScanGrant(%q) invalid = false, want true (empty/whitespace TEXT is UNREADABLE, never ABSENT)", raw)
+		}
+		if len(ids) != 0 {
+			t.Errorf("ScanGrant(%q) = %v, want no ids alongside invalid=true", raw, ids)
+		}
+	}
+}
+
 // TestScanAllowedModels_ShimPreservesIDs pins the deprecated []string shim:
 // it must keep returning ids for readable rows, an empty slice for unreadable
 // ones (its legacy contract), and nil for ABSENT — while remaining explicitly
@@ -168,8 +200,11 @@ func TestScanAllowedModels_ShimPreservesIDs(t *testing.T) {
 	if got := ScanAllowedModels(nil); got != nil {
 		t.Errorf("ScanAllowedModels(nil) = %v, want nil (ABSENT)", got)
 	}
-	if got := ScanAllowedModels(""); got != nil {
-		t.Errorf(`ScanAllowedModels("") = %v, want nil (ABSENT)`, got)
+	// Phase-1.1 item A: an empty TEXT column is UNREADABLE (INVALID), not
+	// ABSENT — the shim therefore returns its legacy empty slice for it
+	// (nil is reserved for a real ABSENT/NULL column).
+	if got := ScanAllowedModels(""); got == nil || len(got) != 0 {
+		t.Errorf(`ScanAllowedModels("") = %v, want non-nil empty (INVALID, not ABSENT)`, got)
 	}
 	if got := ScanAllowedModels(`["a","b"]`); len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf(`ScanAllowedModels(["a","b"]) = %v, want [a b]`, got)

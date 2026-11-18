@@ -18,14 +18,35 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+// goToolPath returns the ABSOLUTE path of the Go toolchain that is
+// running THIS test binary.
+//
+// HERMETIC BY CONSTRUCTION (Phase-1.1 item D): the guard must not depend
+// on whatever `go` happens to be first on PATH. The build toolchain for
+// this module is Go 1.26 (go.mod), while a developer box (or CI image)
+// can easily carry an older `go` earlier on PATH — the guard would then
+// either skip (toolchain mismatch → "go list unavailable") or evaluate the
+// dependency list with the WRONG compiler, silently weakening the pin.
+// runtime.GOROOT() is the toolchain that compiled this binary, so the
+// sub-process is the same toolchain by construction.
+//
+// GOTOOLCHAIN=local keeps the sub-process from switching toolchains
+// behind our back (the pinned toolchain IS the local one; a toolchain
+// download would be a network dependency in a unit test).
+func goToolPath() string {
+	return filepath.Join(runtime.GOROOT(), "bin", "go")
+}
+
 // runGoListDeps returns the transitive dependency list of pkg/authz.
 func runGoListDeps(moduleRoot string) ([]string, error) {
-	cmd := exec.Command("go", "list", "-deps", "./pkg/authz/...")
+	cmd := exec.Command(goToolPath(), "list", "-deps", "./pkg/authz/...")
 	cmd.Dir = moduleRoot
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -45,6 +66,33 @@ func runGoListDeps(moduleRoot string) ([]string, error) {
 var bannedAuthzImports = regexp.MustCompile(
 	`github\.com/disillusioners/llm-supervisor-proxy/pkg/(proxy|decision|modelscache|store/database)(/|")`,
 )
+
+// TestPackage_ImportGuard_UsesPinnedToolchain pins the hermetic toolchain
+// invocation (Phase-1.1 item D): the guard's sub-process must be the
+// toolchain that compiled THIS binary, never a bare "go" resolved from
+// PATH. A PATH-resolved `go` is the ambient toolchain of the machine
+// (which may be an older Go than go.mod requires) — the guard would then
+// evaluate the dependency list with the wrong compiler, or skip outright,
+// silently weakening the pin.
+func TestPackage_ImportGuard_UsesPinnedToolchain(t *testing.T) {
+	got := goToolPath()
+	want := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if got != want {
+		t.Errorf("goToolPath() = %q, want %q (the running toolchain's own binary)", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("goToolPath() = %q, want an ABSOLUTE path — a bare %q would be resolved from PATH", got, "go")
+	}
+	if runtime.GOROOT() == "" {
+		t.Error("runtime.GOROOT() is empty — the toolchain cannot be pinned")
+	}
+
+	// Negative control: the shape this guard rejects (a PATH-resolved
+	// toolchain) must NOT satisfy the pin above.
+	if filepath.IsAbs("go") {
+		t.Error("negative control broken: a bare \"go\" unexpectedly reported as absolute")
+	}
+}
 
 // TestPackage_ImportGuard_AuthzStaysLeaf scans every non-test .go file in
 // pkg/authz for a banned repo import.
