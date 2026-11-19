@@ -18,7 +18,46 @@
 // page reload so the browser can perform the edge's 302 -> IdP
 // navigation natively. Bounded: only after the auth probe RESOLVED to
 // enabled:true, GET requests only, at most once per page load.
+//
+// S10 (review item): even the per-page-load latch above cannot stop a
+// loop that spans page loads (401 -> /oauth2/start -> callback -> SPA
+// -> 401 -> ...). redirectToLogin therefore consults the per-tab
+// sessionStorage hop counter (utils/redirectStorm): 3 initiated hops
+// abort the cycle with a visible, dismissible error banner. The AR-42
+// cooldown, the probe exemption, the one-shot reload and the SSE loop
+// break are untouched; dormant mode never touches the counter (it
+// never redirects).
 import { authState } from '../hooks/useAuth';
+import {
+  isRedirectStormTripped,
+  showRedirectStormError,
+  incrementRedirectHopCount,
+} from './redirectStorm';
+
+// S10 re-export: the breaker API stays reachable from the guard module
+// (the single choke point) without a second import path for consumers.
+export {
+  REDIRECT_STORM_THRESHOLD,
+  REDIRECT_STORM_MAX_HOPS,
+  MAX_REDIRECT_HOPS,
+  getRedirectHopCount,
+  redirectHopCount,
+  isRedirectStormTripped,
+  redirectStormTripped,
+  incrementRedirectHopCount,
+  resetRedirectStormBreaker,
+  resetRedirectHopCounter,
+  resetRedirectHopCount,
+  resetRedirectCounter,
+  resetStormBreaker,
+  resetBreaker,
+  clearRedirectStormBreaker,
+  clearRedirectHopCounter,
+  showRedirectStormError,
+  removeRedirectStormError,
+  redirectStormErrorVisible,
+  redirectStormStorageKey,
+} from './redirectStorm';
 
 const LOGIN_PATH = '/oauth2/start';
 const LATCH_COOLDOWN_MS = 8000; // AR-42: the latch re-arms after a cooldown
@@ -74,11 +113,21 @@ export function looksLikeCrossOriginRejection(err: unknown): boolean {
  * The shared one-shot login navigation. The fetch 401 path and the SSE
  * auth break (useEvents) share this latch — a separate latch would
  * allow a double navigation (AR-15).
+ *
+ * S10: this is the hop counter's single choke point. When the per-tab
+ * counter has already burned the threshold hops, the redirect cycle is
+ * ABORTED (no navigation, no counter increment) and the visible,
+ * dismissible error banner is surfaced instead.
  */
 export function redirectToLogin(): void {
+  if (isRedirectStormTripped()) {
+    showRedirectStormError();
+    return;
+  }
   if (latchArmed()) return;
   redirectInitiated = true;
   redirectAt = Date.now();
+  incrementRedirectHopCount();
   window.location.assign(authRedirectTarget());
 }
 

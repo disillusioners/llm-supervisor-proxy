@@ -13,6 +13,7 @@
 // `user.preferred_username` DOES NOT EXIST — the FE renders
 // `user.name || user.email || user.sub` (AR-33/AR-62).
 import { useEffect, useState } from 'preact/hooks';
+import { resetRedirectStormBreaker } from '../utils/redirectStorm';
 
 export interface AuthUser {
   sub: string;
@@ -101,6 +102,11 @@ function startProbe(): Promise<AuthMeResponse | null> {
   return probeAuthMe().then((res) => {
     if (res !== null) {
       resolvedEnabled = res.enabled;
+      // S10: a legitimately completed redirect cycle clears the storm
+      // breaker — an authenticated probe means the login flow SUCCEEDED,
+      // so the per-tab hop counter starts fresh for any future session
+      // expiry. Dormant / anonymous / UNKNOWN answers never touch it.
+      if (res.authenticated === true) resetRedirectStormBreaker();
     } else {
       // AR-16: a timeout/failure is never cached — the next probe
       // (e.g. the next 401-driven isEnabled()) re-fetches.
@@ -136,10 +142,22 @@ export const authState = {
   setEnabled(enabled: boolean): void {
     resolvedEnabled = enabled;
   },
+  /**
+   * S10: clear the redirect-storm breaker (counter + banner) — also
+   * reachable directly by consumers/tests that complete a login cycle.
+   */
+  clearRedirectHopCounter(): void {
+    resetRedirectStormBreaker();
+  },
   /** Test hook — resets the module store to the never-probed state. */
   resetForTests(): void {
     authMePromise = null;
     resolvedEnabled = null;
+    // S10: test isolation — a fresh module store must not inherit the
+    // previous case's hop count (sessionStorage outlives the module
+    // state inside one test run, which is exactly the cross-page-load
+    // property the breaker relies on).
+    resetRedirectStormBreaker();
   },
 };
 
