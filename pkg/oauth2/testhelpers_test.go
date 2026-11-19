@@ -27,6 +27,76 @@ type stubCodeEntry struct {
 	challenge string
 	email     string
 	verified  *bool
+	// aud is the "aud" claim of the minted id_token: a string OR a []string.
+	// A live IdP sends an ARRAY (R3) — the stub must be able to exercise
+	// that shape end to end, not only the single-string shape.
+	aud any
+	// azp is the "azp" claim (empty = absent).
+	azp string
+}
+
+// stubInvalidGrantBody is the canonical OAuth2 error document the stub IdP
+// returns for a rejected authorization code. ONE definition, reused by every
+// stub server in this package.
+const stubInvalidGrantBody = `{"error":"invalid_grant"}`
+
+// stubWriteInvalidGrant writes the canonical rejection document.
+func stubWriteInvalidGrant(w http.ResponseWriter) {
+	w.WriteHeader(400)
+	w.Write([]byte(stubInvalidGrantBody))
+}
+
+// stubTokenShape is the canonical shape of a stub id_token: the JOSE header,
+// the claim set and the error document are defined ONCE here and reused by
+// every stub IdP in this package, so the mock shape cannot drift between
+// them (R5).
+type stubTokenShape struct {
+	issuer   string
+	kid      string
+	nonce    string
+	email    string
+	name     string
+	verified *bool
+	// aud is the "aud" claim: a string OR a []string (the live IdP shape).
+	aud any
+	// azp is the "azp" claim (empty = absent).
+	azp string
+}
+
+// stubJOSEHeader is the canonical JOSE header of a stub id_token.
+func (s stubTokenShape) stubJOSEHeader() map[string]string {
+	return map[string]string{"alg": "RS256", "kid": s.kid, "typ": "JWT"}
+}
+
+// stubClaims is the canonical claim set of a stub id_token.
+func (s stubTokenShape) stubClaims() map[string]any {
+	claims := map[string]any{
+		"iss":   s.issuer,
+		"sub":   "user1",
+		"aud":   s.aud,
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"iat":   time.Now().Unix(),
+		"nonce": s.nonce,
+		"email": s.email,
+		"name":  s.name,
+	}
+	if s.verified != nil {
+		claims["email_verified"] = *s.verified
+	}
+	if s.azp != "" {
+		claims["azp"] = s.azp
+	}
+	return claims
+}
+
+// stubSignToken signs the canonical shape into a compact JWS.
+func (s stubTokenShape) stubSignToken(priv *rsa.PrivateKey) string {
+	hb, _ := json.Marshal(s.stubJOSEHeader())
+	pb, _ := json.Marshal(s.stubClaims())
+	signing := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(pb)
+	hh := sha256.Sum256([]byte(signing))
+	sig, _ := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hh[:])
+	return signing + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
 func initStubKey(t *testing.T) {
@@ -100,45 +170,46 @@ func newStubIdP(t *testing.T) (*httptest.Server, *rsa.PrivateKey) {
 				h := sha256.Sum256([]byte(verifier))
 				got := base64.RawURLEncoding.EncodeToString(h[:])
 				if got != entry.challenge {
-					w.WriteHeader(400)
-					json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+					stubWriteInvalidGrant(w)
 					return
 				}
 			}
 			nonce := "test-nonce"
 			email := "user@example.com"
 			verified := true
+			aud := any("cid")
+			azp := ""
 			if ok {
 				nonce = entry.nonce
 				email = entry.email
 				if entry.verified != nil {
 					verified = *entry.verified
 				}
+				if entry.aud != nil {
+					aud = entry.aud
+				}
+				azp = entry.azp
 			}
-			header := map[string]string{"alg": "RS256", "kid": testStubKid, "typ": "JWT"}
-			hb, _ := json.Marshal(header)
-			claims := map[string]any{
-				"iss":   srv.URL,
-				"sub":   "user1",
-				"aud":   "cid",
-				"exp":   time.Now().Add(time.Hour).Unix(),
-				"iat":   time.Now().Unix(),
-				"nonce": nonce,
-				"email": email,
-				"name":  "Test User",
+			// the claim set of an unknown code carries email_verified; a known
+			// code carries it only when its entry pins it.
+			var verifiedPtr *bool
+			if !ok {
+				verifiedPtr = &verified
+			} else if entry.verified != nil {
+				v := *entry.verified
+				verifiedPtr = &v
 			}
-			if ok && entry.verified != nil {
-				claims["email_verified"] = verified
-			} else if !ok {
-				claims["email_verified"] = verified
+			shape := stubTokenShape{
+				issuer:   srv.URL,
+				kid:      testStubKid,
+				nonce:    nonce,
+				email:    email,
+				name:     "Test User",
+				verified: verifiedPtr,
+				aud:      aud,
+				azp:      azp,
 			}
-			pb, _ := json.Marshal(claims)
-			he := base64.RawURLEncoding.EncodeToString(hb)
-			pe := base64.RawURLEncoding.EncodeToString(pb)
-			signing := he + "." + pe
-			hh := sha256.Sum256([]byte(signing))
-			sig, _ := rsa.SignPKCS1v15(rand.Reader, testStubPriv, crypto.SHA256, hh[:])
-			tok := signing + "." + base64.RawURLEncoding.EncodeToString(sig)
+			tok := shape.stubSignToken(testStubPriv)
 			json.NewEncoder(w).Encode(map[string]string{"id_token": tok, "access_token": "at"})
 		case r.URL.Path == "/userinfo":
 			json.NewEncoder(w).Encode(map[string]any{"sub": "user1", "email": "user@example.com", "email_verified": true})
@@ -154,13 +225,20 @@ func newStubIdP(t *testing.T) (*httptest.Server, *rsa.PrivateKey) {
 
 // mint a code entry manually for tests
 func stubRegisterCode(code, nonce, verifier string, email string, verified bool) {
+	stubRegisterCodeShape(code, nonce, verifier, email, verified, nil, "")
+}
+
+// stubRegisterCodeShape mints a code entry whose id_token carries a custom
+// audience (a string OR a []string — the live IdP sends an array) and an
+// optional authorized party (R3). A nil aud keeps the stub default ("cid").
+func stubRegisterCodeShape(code, nonce, verifier string, email string, verified bool, aud any, azp string) {
 	challenge := ""
 	if verifier != "" {
 		h := sha256.Sum256([]byte(verifier))
 		challenge = base64.RawURLEncoding.EncodeToString(h[:])
 	}
 	v := verified
-	registerStubCode(code, &stubCodeEntry{nonce: nonce, challenge: challenge, email: email, verified: &v})
+	registerStubCode(code, &stubCodeEntry{nonce: nonce, challenge: challenge, email: email, verified: &v, aud: aud, azp: azp})
 }
 
 func sha256Challenge(v string) string {
@@ -222,37 +300,32 @@ func newThrottleIdP(t *testing.T, kid string) *throttleIdP {
 			entry, ok := testStubCodes[code]
 			testStubCodesMu.Unlock()
 			if !ok {
-				w.WriteHeader(400)
-				json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+				stubWriteInvalidGrant(w)
 				return
 			}
 			if entry.challenge != "" && entry.challenge != sha256Challenge(verifier) {
-				w.WriteHeader(400)
-				json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+				stubWriteInvalidGrant(w)
 				return
 			}
 			verified := true
 			if entry.verified != nil {
 				verified = *entry.verified
 			}
-			header := map[string]string{"alg": "RS256", "kid": p.kid, "typ": "JWT"}
-			hb, _ := json.Marshal(header)
-			claims := map[string]any{
-				"iss":            p.server.URL,
-				"sub":            "user1",
-				"aud":            "cid",
-				"exp":            time.Now().Add(time.Hour).Unix(),
-				"iat":            time.Now().Unix(),
-				"nonce":          entry.nonce,
-				"email":          entry.email,
-				"name":           "Test User",
-				"email_verified": verified,
+			aud := any("cid")
+			if entry.aud != nil {
+				aud = entry.aud
 			}
-			pb, _ := json.Marshal(claims)
-			signing := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(pb)
-			hh := sha256.Sum256([]byte(signing))
-			sig, _ := rsa.SignPKCS1v15(rand.Reader, p.priv, crypto.SHA256, hh[:])
-			tok := signing + "." + base64.RawURLEncoding.EncodeToString(sig)
+			shape := stubTokenShape{
+				issuer:   p.server.URL,
+				kid:      p.kid,
+				nonce:    entry.nonce,
+				email:    entry.email,
+				name:     "Test User",
+				verified: &verified,
+				aud:      aud,
+				azp:      entry.azp,
+			}
+			tok := shape.stubSignToken(p.priv)
 			json.NewEncoder(w).Encode(map[string]string{"id_token": tok, "access_token": "at"})
 		default:
 			w.WriteHeader(404)

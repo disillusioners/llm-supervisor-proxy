@@ -251,3 +251,110 @@ func TestConfig_RedirectURLWinsOverExternalURL(t *testing.T) {
 		t.Fatalf("redirect not winning: %s", cfg.RedirectURL)
 	}
 }
+
+// #10: a malformed NUMERIC env value must fail loudly, naming the variable —
+// it must not silently take the default (fmt.Sscanf accepted "12abc" as 12).
+func TestConfigFromEnv_RejectsMalformedNumericLimits(t *testing.T) {
+	// every limit knob is set in every case: exactly ONE is malformed, the
+	// others carry a valid value, so the error must name the malformed one.
+	limits := []string{EnvStateStoreMax, EnvRateLimitRPM, EnvRateLimitBurst}
+	cases := []struct {
+		name string
+		env  string
+		val  string
+	}{
+		{"state store max", EnvStateStoreMax, "12abc"},
+		{"rate limit rpm", EnvRateLimitRPM, "12abc"},
+		{"rate limit burst", EnvRateLimitBurst, "12abc"},
+		{"state store max (not a number)", EnvStateStoreMax, "abc"},
+		{"rate limit rpm (fraction)", EnvRateLimitRPM, "1.5"},
+	}
+	for _, tc := range cases {
+		setBaseEnv(t)
+		for _, l := range limits {
+			t.Setenv(l, "128")
+		}
+		t.Setenv(tc.env, tc.val)
+		_, err := ConfigFromEnv()
+		if err == nil {
+			t.Fatalf("%s: expected an error for %q", tc.name, tc.val)
+		}
+		if !strings.Contains(err.Error(), tc.env) {
+			t.Fatalf("%s: the error must name the variable: %v", tc.name, err)
+		}
+	}
+}
+
+// #10 (control): a valid numeric value is still applied.
+func TestConfigFromEnv_AcceptsValidNumericLimits(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv(EnvStateStoreMax, "128")
+	t.Setenv(EnvRateLimitRPM, "7")
+	t.Setenv(EnvRateLimitBurst, "9")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StateStoreMax != 128 {
+		t.Fatalf("state store max: %d", cfg.StateStoreMax)
+	}
+	if cfg.RateLimitRPM != 7 {
+		t.Fatalf("rate limit rpm: %d", cfg.RateLimitRPM)
+	}
+	if cfg.RateLimitBurst != 9 {
+		t.Fatalf("rate limit burst: %d", cfg.RateLimitBurst)
+	}
+}
+
+// #10: a malformed BOOLEAN env value must fail loudly, naming the variable —
+// not silently take the default.
+func TestConfigFromEnv_RejectsMalformedBoolean(t *testing.T) {
+	for _, env := range []string{EnvRequireEmailVerified, EnvAllowAnyEmailDomain, EnvCookieSecureAutoOptIn} {
+		setBaseEnv(t)
+		t.Setenv(env, "maybe")
+		_, err := ConfigFromEnv()
+		if err == nil {
+			t.Fatalf("%s: expected an error for a malformed boolean", env)
+		}
+		if !strings.Contains(err.Error(), env) {
+			t.Fatalf("%s: the error must name the variable: %v", env, err)
+		}
+	}
+}
+
+// #10 (control): the documented boolean vocabulary keeps its meaning.
+func TestConfigFromEnv_AcceptsValidBoolean(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv(EnvRequireEmailVerified, "false")
+	t.Setenv(EnvAllowAnyEmailDomain, "true")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RequireEmailVerified {
+		t.Fatal("OAUTH2_REQUIRE_EMAIL_VERIFIED=false was not applied")
+	}
+	if !cfg.AllowAnyDomain {
+		t.Fatal("OAUTH2_ALLOW_ANY_EMAIL_DOMAIN=true was not applied")
+	}
+}
+
+// #10: a malformed DURATION env value fails loudly with the variable named
+// (the durations were already loud — this pins the message).
+func TestConfigFromEnv_RejectsMalformedDuration(t *testing.T) {
+	durations := []string{EnvSessionTTL, EnvJWKSCacheTTL, EnvJWKSMinRefresh, EnvJWKSStaleGrace, EnvDiscoveryTimeout, EnvTokenExchangeTimeout, EnvUserinfoTimeout}
+	for _, env := range durations {
+		setBaseEnv(t)
+		for _, d := range durations {
+			t.Setenv(d, "10s")
+		}
+		t.Setenv(env, "10 seconds")
+		_, err := ConfigFromEnv()
+		if err == nil {
+			t.Fatalf("%s: expected an error for a malformed duration", env)
+		}
+		if !strings.Contains(err.Error(), env) {
+			t.Fatalf("%s: the error must name the variable: %v", env, err)
+		}
+	}
+}

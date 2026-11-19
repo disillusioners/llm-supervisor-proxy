@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +175,16 @@ func TestCallback_JWKSRateLimitAnswers503AndPreservesState(t *testing.T) {
 	}
 	if body := strings.TrimSpace(w2.Body.String()); body != `{"error":"jwks_rate_limited"}` {
 		t.Fatalf("attempt 2 body: %s", body)
+	}
+	// F1 (plan-mandated): the throttled path answers 503 WITH a Retry-After
+	// header — the operator must know when the callback may be retried.
+	retryAfter := w2.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("the 503 throttle response carries no Retry-After header")
+	}
+	secs, err := strconv.Atoi(retryAfter)
+	if err != nil || secs < 1 {
+		t.Fatalf("Retry-After = %q, want a positive number of seconds", retryAfter)
 	}
 	// the one-time state must NOT have been consumed by the throttle
 	if _, ok := h.states.get("st2"); !ok {
@@ -797,5 +811,83 @@ func TestE2E_Flow(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no session cookie")
+	}
+}
+
+// R3: the stub IdP must exercise the LIVE claim shape end to end: an "aud"
+// ARRAY plus an "azp" — the shape a live IdP sends. A multi-audience token
+// whose azp IS the client id is accepted.
+func TestCallback_MultiAudienceArrayWithAzpClientIsAccepted(t *testing.T) {
+	h := newTestHandler(t)
+	verifier := "verifier-aud"
+	stubRegisterCodeShape("code-aud", "nonce-aud", verifier, "user@example.com", true, []string{"cid", "other"}, "cid")
+	_, tv := txnStateFor(t, h, "saud", "nonce-aud", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=saud&code=code-aud", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+	found := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.cfg.CookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no session cookie")
+	}
+}
+
+// R3: an aud ARRAY whose azp is NOT the client id is rejected — the token is
+// for another party.
+func TestCallback_AudienceArrayWithAzpMismatchIsRejected(t *testing.T) {
+	h := newTestHandler(t)
+	verifier := "verifier-azp"
+	stubRegisterCodeShape("code-azp", "nonce-azp", verifier, "user@example.com", true, []string{"cid", "other"}, "evil")
+	_, tv := txnStateFor(t, h, "sazp", "nonce-azp", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=sazp&code=code-azp", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+}
+
+// R3: a single audience that is not the client id is rejected.
+func TestCallback_SingleAudienceNotClientIsRejected(t *testing.T) {
+	h := newTestHandler(t)
+	verifier := "verifier-saud"
+	stubRegisterCodeShape("code-saud", "nonce-saud", verifier, "user@example.com", true, "not-cid", "")
+	_, tv := txnStateFor(t, h, "ssaud", "nonce-saud", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=ssaud&code=code-saud", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+}
+
+// #13: the ErrJWKSRateLimited chain must survive the %w sweep END TO END.
+// The chain is: JWKS cache (the sentinel is returned AS IS) -> verifier
+// (returns the cache error unwrapped) -> callback (errors.Is) -> 503. The
+// sentinel must arrive at the caller UNWRAPPED, otherwise the 503 path
+// silently degrades into a 400 and the login is lost.
+func TestJWKS_RateLimitedSentinelSurvivesTheVerifyChain(t *testing.T) {
+	idp := newThrottleIdP(t, "chain-kid")
+	h := newThrottleHandler(t, idp)
+	hdr, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "chain-kid"})
+	tok := base64.RawURLEncoding.EncodeToString(hdr) + ".e30." + base64.RawURLEncoding.EncodeToString([]byte("sig"))
+	// attempt 1: the unknown kid triggers a refresh (and opens the window)
+	if _, err := h.verifier.Verify(context.Background(), tok); err == nil {
+		t.Fatal("expected a verification failure for an unknown kid")
+	}
+	// attempt 2: the miss lands inside the min-refresh window => THROTTLED.
+	_, err := h.verifier.Verify(context.Background(), tok)
+	if !errors.Is(err, ErrJWKSRateLimited) {
+		t.Fatalf("the throttle sentinel did not survive the verify chain: %v", err)
 	}
 }

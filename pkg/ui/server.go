@@ -271,18 +271,25 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
-// dormantAuthMeBody is the PRE-MARSHALLED body served by /fe/api/auth/me
-// while internal OAuth2 is dormant (review item S11, internal-oauth2
-// round 1). The dormant branch used to re-marshal a map[string]any on
-// every request; map marshalling relies on Go's sorted-key encoding, so
-// the bytes are PINNED here and guarded by
-// TestHandleAuthMe_DormantBodyByteStable, which proves three ways this
-// literal is exactly what the old map re-marshal produced (constant ==
-// json.Encoder(map) == live handler write), trailing newline included.
+// DormantAuthMeBody is the EXACT dormant /fe/api/auth/me wire body — the ONE
+// source of truth for those bytes (review item S11, internal-oauth2 round 1;
+// tidier #3). The dormant branch used to re-marshal a map[string]any on every
+// request; map marshalling relies on Go's sorted-key encoding, so the bytes
+// are PINNED here and guarded by TestHandleAuthMe_DormantBodyByteStable,
+// which proves three ways this literal is exactly what the old map
+// re-marshal produced (constant == json.Encoder(map) == live handler write),
+// trailing newline included.
 //
 // Field order on the wire (sorted, as the legacy map marshal emitted it):
 // authenticated, enabled, state_store_count, user.
-var dormantAuthMeBody = []byte(`{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n")
+//
+// The byte view below is what the handler writes; the cmd-level boot test
+// pins against this same constant (ui.DormantAuthMeBody) instead of keeping a
+// second copy of the literal.
+const DormantAuthMeBody = `{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n"
+
+// dormantAuthMeBody is the byte view of DormantAuthMeBody.
+var dormantAuthMeBody = []byte(DormantAuthMeBody)
 
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,12 @@ type Handler struct {
 	states   *stateStore
 	limiter  *rateLimiter
 }
+
+// stateTTL is the lifetime of a one-time state record AND of the transaction
+// cookie that binds a callback to it. One named constant: the two windows are
+// the same window by construction (a state record that outlived its
+// transaction cookie would be unusable, and vice versa).
+const stateTTL = 10 * time.Minute
 
 type stateRecord struct {
 	State        string
@@ -59,7 +66,7 @@ func (s *stateStore) add(rec *stateRecord) (bool, bool) {
 	// prune expired
 	now := time.Now()
 	for k, v := range s.records {
-		if now.Sub(v.CreatedAt) > 10*time.Minute {
+		if now.Sub(v.CreatedAt) > stateTTL {
 			delete(s.records, k)
 			s.count--
 		}
@@ -100,7 +107,7 @@ func (s *stateStore) get(state string) (*stateRecord, bool) {
 	if !ok {
 		return nil, false
 	}
-	if time.Since(rec.CreatedAt) > 10*time.Minute {
+	if time.Since(rec.CreatedAt) > stateTTL {
 		delete(s.records, state)
 		s.count--
 		return nil, false
@@ -126,7 +133,7 @@ func (s *stateStore) consume(state string) (*stateRecord, bool) {
 	if !ok {
 		return nil, false
 	}
-	if time.Since(rec.CreatedAt) > 10*time.Minute {
+	if time.Since(rec.CreatedAt) > stateTTL {
 		delete(s.records, state)
 		s.count--
 		return nil, false
@@ -163,7 +170,7 @@ func (s *stateStore) countLive() int {
 	// prune
 	now := time.Now()
 	for k, v := range s.records {
-		if now.Sub(v.CreatedAt) > 10*time.Minute {
+		if now.Sub(v.CreatedAt) > stateTTL {
 			delete(s.records, k)
 			s.count--
 		}
@@ -344,7 +351,7 @@ func (h *Handler) HandleStart(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := s256(codeVerifier)
 
 	// txn cookie value
-	txnSession := &Session{IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix()}
+	txnSession := &Session{IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(stateTTL).Unix()}
 	txnCookieValue, err := h.txn.Seal(txnSession)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -402,6 +409,17 @@ func (h *Handler) HandleStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
+// HandleCallback completes the OIDC authorization-code callback.
+//
+// The handler is split into three phases, each owning one concern:
+// (1) bind the callback to the one-time state and the transaction cookie,
+// (2) exchange + verify the code,
+// (3) admit the principal and mint the session.
+// The order, the status codes and the error codes are unchanged.
+//
+// The transaction cookie is cleared ONLY on the paths that complete or
+// abandon the transaction. A transient failure (a throttled JWKS refresh)
+// must leave it intact so the same login can be retried.
 func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -419,44 +437,18 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state := r.URL.Query().Get("state")
-	if state == "" {
-		writeJSONError(w, http.StatusBadRequest, "invalid_state")
-		return
-	}
-	rec, ok := h.states.consume(state)
+	rec, ok := h.bindCallbackTransaction(w, r)
 	if !ok {
-		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
 
-	// txn cookie binding
-	txnCookie, err := r.Cookie(h.cfg.TxnCookieName)
-	if err != nil || txnCookie == nil || txnCookie.Value == "" {
-		writeJSONError(w, http.StatusBadRequest, "invalid_state")
-		return
-	}
-	// open under txn subkey
-	_, err = h.txn.Open(txnCookie.Value)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_state")
-		return
-	}
-	// sha256 compare
-	actual := sha256.Sum256([]byte(txnCookie.Value))
-	actualHex := hex.EncodeToString(actual[:])
-	if subtle.ConstantTimeCompare([]byte(actualHex), []byte(rec.TxnDigest)) != 1 {
-		writeJSONError(w, http.StatusBadRequest, "invalid_state")
-		return
-	}
-	// delete txn cookie — done ONLY on the paths that complete the transaction.
-	// A transient failure (throttled JWKS refresh) must leave the txn cookie
-	// intact so the same login can be retried.
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		// the transaction is abandoned: there is no code to exchange, so the
+		// one-time state is spent and the answer is the same 400
+		// invalid_state as every other unusable transaction.
 		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
-		// spec says 400 invalid_state? Actually code missing => 400 (no specific). Use invalid_state.
 		return
 	}
 
@@ -474,6 +466,7 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			// operator can retry the same callback once the throttle window
 			// passes. The txn cookie is deliberately NOT cleared.
 			h.states.restore(rec)
+			w.Header().Set("Retry-After", strconv.Itoa(h.jwksRetryAfterSeconds()))
 			writeJSONError(w, http.StatusServiceUnavailable, "jwks_rate_limited")
 			return
 		}
@@ -489,7 +482,66 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// principal admission
+	session, ok := h.admitPrincipal(w, r, claims, accessToken)
+	if !ok {
+		return
+	}
+	// A seal failure is NEVER swallowed: no session cookie is written and the
+	// caller is told. The stable code is logged; the value never is.
+	if err := h.cookie.SetCookie(w, session); err != nil {
+		log.Printf("[oauth2] %s: session cookie not written (%v)", ErrCodeSessionCookieSeal, err)
+		writeJSONError(w, http.StatusInternalServerError, ErrCodeSessionCookieSeal)
+		return
+	}
+
+	redirectTo := rec.RedirectTo
+	if redirectTo == "" {
+		redirectTo = "/ui/"
+	}
+	http.Redirect(w, r, redirectTo, http.StatusFound)
+}
+
+// bindCallbackTransaction consumes the one-time state and proves the callback
+// belongs to the browser that started the transaction: the txn cookie must
+// open under the txn subkey AND its SHA-256 must equal the stored digest.
+// It writes the 400 itself and returns false when the binding fails.
+func (h *Handler) bindCallbackTransaction(w http.ResponseWriter, r *http.Request) (*stateRecord, bool) {
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_state")
+		return nil, false
+	}
+	rec, ok := h.states.consume(state)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid_state")
+		return nil, false
+	}
+	// txn cookie binding
+	txnCookie, err := r.Cookie(h.cfg.TxnCookieName)
+	if err != nil || txnCookie == nil || txnCookie.Value == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_state")
+		return nil, false
+	}
+	// open under txn subkey
+	if _, err := h.txn.Open(txnCookie.Value); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_state")
+		return nil, false
+	}
+	// sha256 compare
+	actual := sha256.Sum256([]byte(txnCookie.Value))
+	actualHex := hex.EncodeToString(actual[:])
+	if subtle.ConstantTimeCompare([]byte(actualHex), []byte(rec.TxnDigest)) != 1 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_state")
+		return nil, false
+	}
+	return rec, true
+}
+
+// admitPrincipal resolves the principal behind the verified claims: the email
+// (from the id_token, or from the userinfo endpoint), the email_verified
+// strictness and the domain allowlist. It writes the 403 itself and returns
+// false when the principal is not admitted.
+func (h *Handler) admitPrincipal(w http.ResponseWriter, r *http.Request, claims *Claims, accessToken string) (*Session, bool) {
 	email := claims.Email
 	if email == "" && h.provider != nil && claims.Subject != "" && accessToken != "" {
 		// fetch userinfo
@@ -506,16 +558,17 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else if err != nil {
-			// ignore? spec: userinfo best-effort. But sub mismatch => 403
+			// the userinfo fetch is best-effort, but a subject mismatch is
+			// fatal: the document belongs to a different principal.
 			if err.Error() == "userinfo sub mismatch" {
 				writeJSONError(w, http.StatusForbidden, "email_missing")
-				return
+				return nil, false
 			}
 		}
 	}
 	if email == "" {
 		writeJSONError(w, http.StatusForbidden, "email_missing")
-		return
+		return nil, false
 	}
 	// email_verified strictness
 	verified := claims.EmailVerified
@@ -529,11 +582,11 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if verified == nil {
 		if !anyMode {
 			writeJSONError(w, http.StatusForbidden, "email_not_verified")
-			return
+			return nil, false
 		}
 	} else if !*verified {
 		writeJSONError(w, http.StatusForbidden, "email_not_verified")
-		return
+		return nil, false
 	}
 	// domain allowlist
 	domain := ""
@@ -542,30 +595,26 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !domainAllowed(h.cfg.EmailDomains, domain) {
 		writeJSONError(w, http.StatusForbidden, "email_domain_not_allowed")
-		return
+		return nil, false
 	}
-
-	name := claims.Name
-	session := &Session{
+	return &Session{
 		Sub:       claims.Subject,
 		Email:     email,
-		Name:      name,
+		Name:      claims.Name,
 		IssuedAt:  time.Now().Unix(),
 		ExpiresAt: time.Now().Add(h.cfg.SessionTTL).Unix(),
-	}
-	// A seal failure is NEVER swallowed: no session cookie is written and the
-	// caller is told. The stable code is logged; the value never is.
-	if err := h.cookie.SetCookie(w, session); err != nil {
-		log.Printf("[oauth2] %s: session cookie not written (%v)", ErrCodeSessionCookieSeal, err)
-		writeJSONError(w, http.StatusInternalServerError, ErrCodeSessionCookieSeal)
-		return
-	}
+	}, true
+}
 
-	redirectTo := rec.RedirectTo
-	if redirectTo == "" {
-		redirectTo = "/ui/"
+// jwksRetryAfterSeconds is the Retry-After value of the throttled-JWKS
+// response: the operator may retry the callback once the refresh window has
+// passed. It is never below one second.
+func (h *Handler) jwksRetryAfterSeconds() int {
+	secs := int(h.cfg.JWKSMinRefresh.Seconds())
+	if secs < 1 {
+		secs = 1
 	}
-	http.Redirect(w, r, redirectTo, http.StatusFound)
+	return secs
 }
 
 func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
@@ -696,7 +745,11 @@ func cleanRedirectPath(p string) string {
 
 func randomToken(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	// crypto/rand.Read never returns an error: since Go 1.24 it panics when
+	// the system entropy source fails. The discarded error is therefore NOT
+	// a silent failure mode — an entropy outage aborts the process instead
+	// of minting a predictable token.
+	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

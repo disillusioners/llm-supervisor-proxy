@@ -76,6 +76,14 @@ func (s *singleflight) Do(ctx context.Context, fn func(context.Context) error) e
 var (
 	ErrJWKSRateLimited = fmt.Errorf("jwks refresh rate limited")
 	ErrJWKSUnknownKid  = fmt.Errorf("unknown kid")
+	// ErrJWKSEmptyKeySet is the distinct error for a JWKS document that
+	// carried no usable key: the IdP answered 200 with a document this proxy
+	// can use no key from (an empty "keys" array, or only keys this proxy
+	// rejects). It is NOT the unknown-kid failure (the document may be fine,
+	// the requested kid is simply not in it) and NOT a fetch failure (the
+	// document WAS served). The caller can therefore tell "the IdP is
+	// misconfigured" apart from "rotate the key".
+	ErrJWKSEmptyKeySet = fmt.Errorf("jwks document contains no usable keys")
 )
 
 type JWKSCache struct {
@@ -245,6 +253,12 @@ func fetchJWKSSet(ctx context.Context, client *http.Client, jwksURI string, allo
 		if j.Alg != "" {
 			algs[kid] = j.Alg
 		}
+	}
+	// a document that yielded NO usable key is a distinct failure, not a
+	// successful fetch of an empty key set: the caller must be able to tell
+	// "the IdP published no usable key" from "the requested kid is unknown".
+	if len(keys) == 0 {
+		return nil, nil, ErrJWKSEmptyKeySet
 	}
 	return keys, algs, nil
 }

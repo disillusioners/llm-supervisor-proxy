@@ -123,9 +123,17 @@ func NewGuard(cfg *Config) (*Guard, error) {
 	}
 	cache := NewJWKSCache(cfg.JWKSCacheTTL, cfg.JWKSMinRefresh, cfg.JWKSStaleGrace, fetch)
 	verifier := NewVerifier(cfg, cache)
-	sessionKey, txnKey, err := deriveSubkeys(cfg.rootKeyBytes())
-	if err != nil {
-		return nil, err
+	sessionKey := cfg.sessionKeyBytes()
+	txnKey := cfg.txnKeyBytes()
+	if len(sessionKey) != 32 || len(txnKey) != 32 {
+		// a hand-built Config (tests) that never went through ConfigFromEnv
+		// carries no derived keys: derive them ONCE, through the same single
+		// derivation site the config loader uses.
+		if err := cfg.ensureSubkeys(); err != nil {
+			return nil, err
+		}
+		sessionKey = cfg.sessionKeyBytes()
+		txnKey = cfg.txnKeyBytes()
 	}
 	cookie := &CookieCodec{name: cfg.CookieName, key: sessionKey, secure: cfg.CookieSecure, sameSite: cfg.CookieSameSite, path: "/"}
 	txn := &CookieCodec{name: cfg.TxnCookieName, key: txnKey, secure: cfg.CookieSecure, sameSite: http.SameSiteLaxMode, path: "/oauth2", maxAge: 600}

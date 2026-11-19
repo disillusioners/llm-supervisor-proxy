@@ -381,3 +381,52 @@ func TestJWKS_GuardFetchFailsCleanlyOnIdPError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// #9: a JWKS document that yields NO usable key is a DISTINCT, non-nil,
+// stable error — not a successful fetch of an empty key set. The caller must
+// be able to tell "the IdP published no usable key" from "the requested kid
+// is unknown".
+func TestJWKS_FetchRejectsEmptyKeySet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+	keys, algs, err := fetchJWKSSet(context.Background(), srv.Client(), srv.URL+"/jwks", map[string]struct{}{"RS256": {}})
+	if err == nil {
+		t.Fatal("an empty key set must be an error, not a successful fetch")
+	}
+	if !errors.Is(err, ErrJWKSEmptyKeySet) {
+		t.Fatalf("expected ErrJWKSEmptyKeySet, got: %v", err)
+	}
+	if keys != nil || algs != nil {
+		t.Fatal("the empty key set must not return keys")
+	}
+}
+
+// #9: a document whose keys are ALL unusable (an unknown key type) is the
+// same distinct failure — the IdP served a document this proxy can use no
+// key from.
+func TestJWKS_FetchRejectsUnusableKeySet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"keys":[{"kty":"XYZ","kid":"k1","use":"sig","alg":"RS256"}]}`))
+	}))
+	defer srv.Close()
+	_, _, err := fetchJWKSSet(context.Background(), srv.Client(), srv.URL+"/jwks", map[string]struct{}{"RS256": {}})
+	if !errors.Is(err, ErrJWKSEmptyKeySet) {
+		t.Fatalf("expected ErrJWKSEmptyKeySet, got: %v", err)
+	}
+}
+
+// #9: the sentinel must be distinct from the other two JWKS failures — an
+// empty key set is neither an unknown kid nor a rate limit.
+func TestJWKS_EmptyKeySetSentinelIsDistinct(t *testing.T) {
+	if errors.Is(ErrJWKSEmptyKeySet, ErrJWKSUnknownKid) {
+		t.Fatal("the empty-keyset sentinel must not match the unknown-kid failure")
+	}
+	if errors.Is(ErrJWKSEmptyKeySet, ErrJWKSRateLimited) {
+		t.Fatal("the empty-keyset sentinel must not match the rate-limit failure")
+	}
+	if ErrJWKSEmptyKeySet == nil || ErrJWKSEmptyKeySet.Error() == "" {
+		t.Fatal("the empty-keyset sentinel must be a non-nil, stable error")
+	}
+}

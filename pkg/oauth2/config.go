@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,12 +87,27 @@ type Config struct {
 
 func envStr(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
-func parseBool(s string, def bool) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
+// parseBoolStrict parses a boolean env value. An EMPTY value takes the
+// default; an UNRECOGNISED value is an ERROR: a typo in a boolean knob must
+// fail loudly (naming the variable) instead of silently taking the default.
+//
+// The accepted vocabulary is exactly "true"/"false" (case-insensitive,
+// trimmed) — the one the plan documents. Every documented value keeps its
+// current meaning; anything else is a misconfiguration the operator must
+// see. OAUTH2_ENABLED is deliberately NOT parsed through here — the plan
+// pins it as "enabled iff exactly true; any other value => dormant" (D1).
+func parseBoolStrict(name, raw string, def bool) (bool, error) {
+	s := strings.TrimSpace(raw)
 	if s == "" {
-		return def
+		return def, nil
 	}
-	return s == "true" || s == "1" || s == "yes"
+	switch strings.ToLower(s) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return def, fmt.Errorf("invalid %s: %q (want true/false)", name, s)
 }
 
 func parseDuration(s string, def time.Duration) (time.Duration, error) {
@@ -127,13 +142,52 @@ func clampInt(v, min, max int) int {
 	return v
 }
 
+// ConfigFromEnv builds the OAuth2 configuration from the environment.
+//
+// The function is split into ordered phases (parse -> validate -> clamp) so
+// that each phase owns one concern. The ORDER of the phases IS the fail-fast
+// order: the first misconfiguration wins, so the operator sees exactly one
+// precise message. The fail-fast SET and the message prefixes are the ones
+// the plan pins (phase1-plan.md §"startup fail-fast").
 func ConfigFromEnv() (*Config, error) {
-	enabled := strings.EqualFold(strings.TrimSpace(os.Getenv(EnvEnabled)), "true")
-	if !enabled {
+	// OAUTH2_ENABLED is the master toggle and the ONE knob whose "not true"
+	// means "off": the plan pins "enabled iff the value is exactly true
+	// (case-insensitive after TrimSpace); any other value => dormant" (D1).
+	// Every OTHER boolean knob below is parsed STRICTLY: a typo there fails
+	// the boot instead of silently taking a default.
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv(EnvEnabled)), "true") {
 		return nil, nil
 	}
 
-	cfg := &Config{
+	cfg := defaultConfig()
+	for _, phase := range []func() error{
+		cfg.applyIssuer,
+		cfg.applyClient,
+		cfg.applyURLs,
+		cfg.applyCookieSecret,
+		cfg.applySessionTTL,
+		cfg.applyCookieName,
+		cfg.applyCookieSecure,
+		cfg.applyCookieSameSite,
+		cfg.applyEmailDomains,
+		cfg.applyRequireEmailVerified,
+		cfg.applyAllowedAlgs,
+		cfg.applyJWKSDurations,
+		cfg.applyTimeouts,
+		cfg.applyAllowedEndpoints,
+		cfg.applyLogoutRedirect,
+		cfg.applyLimits,
+	} {
+		if err := phase(); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
+}
+
+// defaultConfig is the baseline every env knob overrides.
+func defaultConfig() *Config {
+	return &Config{
 		Enabled:              true,
 		TxnCookieName:        "llmproxy_oauth2_txn",
 		CookieName:           "llmproxy_oauth2",
@@ -157,165 +211,204 @@ func ConfigFromEnv() (*Config, error) {
 		AllowedEndpoints:     nil,
 		LogoutRedirect:       "",
 	}
+}
 
-	// issuer
+// applyIssuer validates the issuer URL and pins its origin.
+func (c *Config) applyIssuer() error {
 	issuer := envStr(EnvIssuerURL)
-	cfg.AllowInsecure = strings.EqualFold(envStr(EnvAllowInsecureIssuer), "true")
+	c.AllowInsecure = strings.EqualFold(envStr(EnvAllowInsecureIssuer), "true")
 	if issuer == "" {
-		return nil, errors.New("OAUTH2_ISSUER_URL is required when OAUTH2_ENABLED=true")
+		return errors.New("OAUTH2_ISSUER_URL is required when OAUTH2_ENABLED=true")
 	}
 	// strip trailing slash
 	issuer = strings.TrimRight(issuer, "/")
 	u, err := url.Parse(issuer)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("OAUTH2_ISSUER_URL must be an absolute URL: %v", err)
+	if err != nil {
+		return fmt.Errorf("OAUTH2_ISSUER_URL must be an absolute URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return errors.New("OAUTH2_ISSUER_URL must be an absolute URL")
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("OAUTH2_ISSUER_URL must not contain query or fragment")
+		return errors.New("OAUTH2_ISSUER_URL must not contain query or fragment")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && cfg.AllowInsecure) {
-		return nil, errors.New("OAUTH2_ISSUER_URL must use https (or http with OAUTH2_ALLOW_INSECURE_ISSUER=true)")
+	if u.Scheme != "https" && !(u.Scheme == "http" && c.AllowInsecure) {
+		return errors.New("OAUTH2_ISSUER_URL must use https (or http with OAUTH2_ALLOW_INSECURE_ISSUER=true)")
 	}
-	cfg.IssuerURL = issuer
-	cfg.IssuerOrigin = u.Scheme + "://" + u.Host
+	c.IssuerURL = issuer
+	c.IssuerOrigin = u.Scheme + "://" + u.Host
+	return nil
+}
 
-	// client id
+// applyClient pins the client id and the client secret.
+func (c *Config) applyClient() error {
 	cid := envStr(EnvClientID)
 	if cid == "" {
-		return nil, errors.New("OAUTH2_CLIENT_ID is required when OAUTH2_ENABLED=true")
+		return errors.New("OAUTH2_CLIENT_ID is required when OAUTH2_ENABLED=true")
 	}
-	cfg.ClientID = cid
+	c.ClientID = cid
+	// the secret is trimmed: a trailing newline from a mounted secret file
+	// must never be sent to the IdP.
+	c.ClientSecret = strings.TrimSpace(os.Getenv(EnvClientSecret))
+	return nil
+}
 
-	cfg.ClientSecret = os.Getenv(EnvClientSecret) // not trimmed? keep raw-ish but trim
-	cfg.ClientSecret = strings.TrimSpace(cfg.ClientSecret)
-
-	// external/redirect url precedence
+// applyURLs resolves the redirect/external URL pair. The redirect wins when
+// both are set; the callback is derived from the external URL when only that
+// one is set.
+func (c *Config) applyURLs() error {
 	redirectURL := envStr(EnvRedirectURL)
 	externalURL := envStr(EnvExternalURL)
 	if redirectURL == "" && externalURL == "" {
-		return nil, errors.New("OAUTH2_EXTERNAL_URL or OAUTH2_REDIRECT_URL is required when OAUTH2_ENABLED=true")
+		return errors.New("OAUTH2_EXTERNAL_URL or OAUTH2_REDIRECT_URL is required when OAUTH2_ENABLED=true")
 	}
 	if redirectURL != "" {
-		// validate absolute
 		ru, err := url.Parse(redirectURL)
-		if err != nil || ru.Scheme == "" || ru.Host == "" {
-			return nil, fmt.Errorf("OAUTH2_REDIRECT_URL must be an absolute URL: %v", err)
+		if err != nil {
+			return fmt.Errorf("OAUTH2_REDIRECT_URL must be an absolute URL: %w", err)
 		}
-		cfg.RedirectURL = redirectURL
+		if ru.Scheme == "" || ru.Host == "" {
+			return errors.New("OAUTH2_REDIRECT_URL must be an absolute URL")
+		}
+		c.RedirectURL = redirectURL
 	}
 	if externalURL != "" {
 		eu, err := url.Parse(externalURL)
-		if err != nil || eu.Scheme == "" || eu.Host == "" {
-			return nil, fmt.Errorf("OAUTH2_EXTERNAL_URL must be an absolute URL: %v", err)
+		if err != nil {
+			return fmt.Errorf("OAUTH2_EXTERNAL_URL must be an absolute URL: %w", err)
+		}
+		if eu.Scheme == "" || eu.Host == "" {
+			return errors.New("OAUTH2_EXTERNAL_URL must be an absolute URL")
 		}
 		externalURL = strings.TrimRight(externalURL, "/")
-		cfg.ExternalURL = externalURL
+		c.ExternalURL = externalURL
 	}
-	if cfg.RedirectURL == "" && cfg.ExternalURL != "" {
-		cfg.RedirectURL = cfg.ExternalURL + "/oauth2/callback"
+	if c.RedirectURL == "" && c.ExternalURL != "" {
+		c.RedirectURL = c.ExternalURL + "/oauth2/callback"
 	}
-	// if both set, redirect wins (already set). if only external, derived.
+	return nil
+}
 
-	// cookie secret
+// applyCookieSecret derives the root key and its two subkeys.
+func (c *Config) applyCookieSecret() error {
 	rawSecret := envStr(EnvCookieSecret)
 	if rawSecret == "" {
 		rawSecret = envStr(EnvCookieSecretFallback)
 	}
 	if rawSecret == "" {
-		return nil, errors.New("OAUTH2_COOKIE_SECRET (or COOKIE_SECRET) is required when OAUTH2_ENABLED=true")
+		return errors.New("OAUTH2_COOKIE_SECRET (or COOKIE_SECRET) is required when OAUTH2_ENABLED=true")
 	}
 	key, mode, err := DeriveCookieKey(rawSecret)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	cfg.rootKey = key
-	cfg.SecretMode = mode
-	sk, tk, err := deriveSubkeys(key)
+	c.rootKey = key
+	c.SecretMode = mode
+	return c.deriveSubkeys()
+}
+
+// applySessionTTL reads the session TTL and clamps it.
+func (c *Config) applySessionTTL() error {
+	v := envStr(EnvSessionTTL)
+	if v == "" {
+		return nil
+	}
+	d, err := parseDuration(v, c.SessionTTL)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("invalid OAUTH2_SESSION_TTL: %w", err)
 	}
-	cfg.sessionKey = sk
-	cfg.txnKey = tk
+	c.SessionTTL = clampDuration(d, 5*time.Minute, 24*time.Hour)
+	return nil
+}
 
-	// session ttl
-	if v := envStr(EnvSessionTTL); v != "" {
-		d, err := parseDuration(v, cfg.SessionTTL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_SESSION_TTL: %v", err)
-		}
-		cfg.SessionTTL = clampDuration(d, 5*time.Minute, 24*time.Hour)
-	}
-
-	// cookie name
+// applyCookieName validates the session cookie name.
+func (c *Config) applyCookieName() error {
 	if v := envStr(EnvCookieName); v != "" {
-		cfg.CookieName = v
+		c.CookieName = v
 	}
-	if cfg.CookieName == "_oauth2_proxy" {
-		return nil, errors.New("OAUTH2_COOKIE_NAME must not be _oauth2_proxy")
+	if c.CookieName == "_oauth2_proxy" {
+		return errors.New("OAUTH2_COOKIE_NAME must not be _oauth2_proxy")
 	}
-	if !validCookieName(cfg.CookieName) {
-		return nil, errors.New("OAUTH2_COOKIE_NAME must match ^[A-Za-z0-9_-]{1,64}$")
+	if !validCookieName(c.CookieName) {
+		return errors.New("OAUTH2_COOKIE_NAME must match ^[A-Za-z0-9_-]{1,64}$")
 	}
-	if cfg.CookieName == cfg.TxnCookieName {
-		return nil, errors.New("OAUTH2_COOKIE_NAME must differ from the txn cookie name")
+	if c.CookieName == c.TxnCookieName {
+		return errors.New("OAUTH2_COOKIE_NAME must differ from the txn cookie name")
 	}
+	return nil
+}
 
-	// cookie secure
+// applyCookieSecure resolves the Secure attribute and the "auto" opt-in.
+func (c *Config) applyCookieSecure() error {
 	secureRaw := strings.ToLower(envStr(EnvCookieSecure))
-	cfg.CookieSecureAutoOK = strings.EqualFold(envStr(EnvCookieSecureAutoOptIn), "true")
+	autoOK, err := parseBoolStrict(EnvCookieSecureAutoOptIn, envStr(EnvCookieSecureAutoOptIn), false)
+	if err != nil {
+		return err
+	}
+	c.CookieSecureAutoOK = autoOK
 	switch secureRaw {
 	case "", "true":
-		cfg.CookieSecure = true
-		cfg.CookieSecureAuto = false
+		c.CookieSecure = true
+		c.CookieSecureAuto = false
 	case "false":
-		cfg.CookieSecure = false
-		cfg.CookieSecureAuto = false
+		c.CookieSecure = false
+		c.CookieSecureAuto = false
 	case "auto":
-		if !cfg.CookieSecureAutoOK {
-			return nil, errors.New("OAUTH2_COOKIE_SECURE=auto requires OAUTH2_COOKIE_SECURE_AUTO_OK=true")
+		if !c.CookieSecureAutoOK {
+			return errors.New("OAUTH2_COOKIE_SECURE=auto requires OAUTH2_COOKIE_SECURE_AUTO_OK=true")
 		}
-		cfg.CookieSecure = true // resolved default; auto handled by opt-in (simplified)
-		cfg.CookieSecureAuto = true
+		c.CookieSecure = true // resolved default; auto handled by opt-in (simplified)
+		c.CookieSecureAuto = true
 	default:
-		return nil, fmt.Errorf("invalid OAUTH2_COOKIE_SECURE: %s", secureRaw)
+		return fmt.Errorf("invalid OAUTH2_COOKIE_SECURE: %s", secureRaw)
 	}
 	// false with https external url => error
-	if !cfg.CookieSecure && cfg.ExternalURL != "" {
-		u, _ := url.Parse(cfg.ExternalURL)
+	if !c.CookieSecure && c.ExternalURL != "" {
+		u, _ := url.Parse(c.ExternalURL)
 		if u != nil && u.Scheme == "https" {
-			return nil, errors.New("OAUTH2_COOKIE_SECURE=false is not allowed with an https external URL")
+			return errors.New("OAUTH2_COOKIE_SECURE=false is not allowed with an https external URL")
 		}
 	}
+	return nil
+}
 
-	// cookie samesite
+// applyCookieSameSite resolves the SameSite attribute.
+func (c *Config) applyCookieSameSite() error {
 	ss := envStr(EnvCookieSameSite)
 	if ss == "" {
 		ss = "Lax"
 	}
 	switch strings.ToLower(ss) {
 	case "lax":
-		cfg.CookieSameSite = http.SameSiteLaxMode
+		c.CookieSameSite = http.SameSiteLaxMode
 	case "strict":
-		cfg.CookieSameSite = http.SameSiteStrictMode
+		c.CookieSameSite = http.SameSiteStrictMode
 	case "none":
-		cfg.CookieSameSite = http.SameSiteNoneMode
+		c.CookieSameSite = http.SameSiteNoneMode
 	default:
-		return nil, fmt.Errorf("invalid OAUTH2_COOKIE_SAMESITE: %s", ss)
+		return fmt.Errorf("invalid OAUTH2_COOKIE_SAMESITE: %s", ss)
 	}
-	if cfg.CookieSameSite == http.SameSiteNoneMode && !cfg.CookieSecure {
-		return nil, errors.New("OAUTH2_COOKIE_SAMESITE=None requires Secure=true")
+	if c.CookieSameSite == http.SameSiteNoneMode && !c.CookieSecure {
+		return errors.New("OAUTH2_COOKIE_SAMESITE=None requires Secure=true")
 	}
+	return nil
+}
 
-	// email domains
+// applyEmailDomains parses the domain allowlist and the "any domain" opt-in.
+func (c *Config) applyEmailDomains() error {
 	ed := os.Getenv(EnvEmailDomains)
 	if strings.TrimSpace(ed) == "" {
 		// distinguish explicitly empty: if env var set to empty string => error
 		if _, present := os.LookupEnv(EnvEmailDomains); present {
-			return nil, errors.New("OAUTH2_EMAIL_DOMAINS explicitly empty is not allowed")
+			return errors.New("OAUTH2_EMAIL_DOMAINS explicitly empty is not allowed")
 		}
 		ed = "*"
 	}
-	cfg.AllowAnyDomain = strings.EqualFold(envStr(EnvAllowAnyEmailDomain), "true")
+	allowAny, err := parseBoolStrict(EnvAllowAnyEmailDomain, envStr(EnvAllowAnyEmailDomain), false)
+	if err != nil {
+		return err
+	}
+	c.AllowAnyDomain = allowAny
 	domains := []string{}
 	for _, d := range strings.Split(ed, ",") {
 		d = strings.TrimSpace(d)
@@ -324,9 +417,9 @@ func ConfigFromEnv() (*Config, error) {
 		}
 	}
 	if len(domains) == 0 {
-		return nil, errors.New("OAUTH2_EMAIL_DOMAINS explicitly empty is not allowed")
+		return errors.New("OAUTH2_EMAIL_DOMAINS explicitly empty is not allowed")
 	}
-	cfg.EmailDomains = domains
+	c.EmailDomains = domains
 	// * requires allow any
 	hasStar := false
 	for _, d := range domains {
@@ -334,161 +427,175 @@ func ConfigFromEnv() (*Config, error) {
 			hasStar = true
 		}
 	}
-	if hasStar && !cfg.AllowAnyDomain {
-		return nil, errors.New("OAUTH2_EMAIL_DOMAINS=* requires OAUTH2_ALLOW_ANY_EMAIL_DOMAIN=true")
+	if hasStar && !c.AllowAnyDomain {
+		return errors.New("OAUTH2_EMAIL_DOMAINS=* requires OAUTH2_ALLOW_ANY_EMAIL_DOMAIN=true")
 	}
+	return nil
+}
 
-	// require email verified
-	if v := envStr(EnvRequireEmailVerified); v != "" {
-		cfg.RequireEmailVerified = parseBool(v, true)
+// applyRequireEmailVerified reads the email_verified strictness flag.
+func (c *Config) applyRequireEmailVerified() error {
+	v := envStr(EnvRequireEmailVerified)
+	if v == "" {
+		return nil
 	}
+	b, err := parseBoolStrict(EnvRequireEmailVerified, v, true)
+	if err != nil {
+		return err
+	}
+	c.RequireEmailVerified = b
+	return nil
+}
 
-	// allowed algs
+// applyAllowedAlgs parses the JWS algorithm allowlist.
+func (c *Config) applyAllowedAlgs() error {
 	if v := envStr(EnvAllowedAlgs); v != "" {
-		cfg.AllowedAlgs = map[string]struct{}{}
+		c.AllowedAlgs = map[string]struct{}{}
 		for _, a := range strings.Split(v, ",") {
 			a = strings.TrimSpace(a)
 			if a != "" {
-				cfg.AllowedAlgs[a] = struct{}{}
+				c.AllowedAlgs[a] = struct{}{}
 			}
 		}
 	}
-	if len(cfg.AllowedAlgs) == 0 {
-		cfg.AllowedAlgs = map[string]struct{}{"RS256": {}}
+	if len(c.AllowedAlgs) == 0 {
+		c.AllowedAlgs = map[string]struct{}{"RS256": {}}
 	}
 	// reject HS*/none case-insensitive
-	for a := range cfg.AllowedAlgs {
+	for a := range c.AllowedAlgs {
 		la := strings.ToLower(a)
 		if strings.HasPrefix(la, "hs") || la == "none" {
-			return nil, fmt.Errorf("OAUTH2_ALLOWED_ALGS must not include %s", a)
+			return fmt.Errorf("OAUTH2_ALLOWED_ALGS must not include %s", a)
 		}
 	}
+	return nil
+}
 
-	// jwks cache ttl
+// applyJWKSDurations reads the JWKS cache/refresh/grace durations.
+func (c *Config) applyJWKSDurations() error {
 	if v := envStr(EnvJWKSCacheTTL); v != "" {
-		d, err := parseDuration(v, cfg.JWKSCacheTTL)
+		d, err := parseDuration(v, c.JWKSCacheTTL)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_JWKS_CACHE_TTL: %v", err)
+			return fmt.Errorf("invalid OAUTH2_JWKS_CACHE_TTL: %w", err)
 		}
-		cfg.JWKSCacheTTL = clampDuration(d, time.Minute, 24*time.Hour)
+		c.JWKSCacheTTL = clampDuration(d, time.Minute, 24*time.Hour)
 	}
 	if v := envStr(EnvJWKSMinRefresh); v != "" {
-		d, err := parseDuration(v, cfg.JWKSMinRefresh)
+		d, err := parseDuration(v, c.JWKSMinRefresh)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_JWKS_MIN_REFRESH_INTERVAL: %v", err)
+			return fmt.Errorf("invalid OAUTH2_JWKS_MIN_REFRESH_INTERVAL: %w", err)
 		}
-		cfg.JWKSMinRefresh = clampDuration(d, 5*time.Second, 10*time.Minute)
+		c.JWKSMinRefresh = clampDuration(d, 5*time.Second, 10*time.Minute)
 	}
 	if v := envStr(EnvJWKSStaleGrace); v != "" {
-		d, err := parseDuration(v, cfg.JWKSStaleGrace)
+		d, err := parseDuration(v, c.JWKSStaleGrace)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_JWKS_STALE_GRACE: %v", err)
+			return fmt.Errorf("invalid OAUTH2_JWKS_STALE_GRACE: %w", err)
 		}
-		cfg.JWKSStaleGrace = clampDuration(d, time.Minute, 48*time.Hour)
+		c.JWKSStaleGrace = clampDuration(d, time.Minute, 48*time.Hour)
 	} else {
-		cfg.JWKSStaleGrace = 2 * cfg.JWKSCacheTTL
-		if cfg.JWKSStaleGrace < time.Minute {
-			cfg.JWKSStaleGrace = time.Minute
+		c.JWKSStaleGrace = 2 * c.JWKSCacheTTL
+		if c.JWKSStaleGrace < time.Minute {
+			c.JWKSStaleGrace = time.Minute
 		}
-		if cfg.JWKSStaleGrace > 48*time.Hour {
-			cfg.JWKSStaleGrace = 48 * time.Hour
+		if c.JWKSStaleGrace > 48*time.Hour {
+			c.JWKSStaleGrace = 48 * time.Hour
 		}
 	}
-	// discovery timeout
+	return nil
+}
+
+// applyTimeouts reads the discovery/token-exchange/userinfo timeouts.
+func (c *Config) applyTimeouts() error {
 	if v := envStr(EnvDiscoveryTimeout); v != "" {
-		d, err := parseDuration(v, cfg.DiscoveryTimeout)
+		d, err := parseDuration(v, c.DiscoveryTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_DISCOVERY_TIMEOUT: %v", err)
+			return fmt.Errorf("invalid OAUTH2_DISCOVERY_TIMEOUT: %w", err)
 		}
-		cfg.DiscoveryTimeout = clampDuration(d, time.Second, 30*time.Second)
+		c.DiscoveryTimeout = clampDuration(d, time.Second, 30*time.Second)
 	}
 	if v := envStr(EnvTokenExchangeTimeout); v != "" {
-		d, err := parseDuration(v, cfg.TokenExchangeTimeout)
+		d, err := parseDuration(v, c.TokenExchangeTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_TOKEN_EXCHANGE_TIMEOUT: %v", err)
+			return fmt.Errorf("invalid OAUTH2_TOKEN_EXCHANGE_TIMEOUT: %w", err)
 		}
-		cfg.TokenExchangeTimeout = clampDuration(d, time.Second, 60*time.Second)
+		c.TokenExchangeTimeout = clampDuration(d, time.Second, 60*time.Second)
 	}
 	if v := envStr(EnvUserinfoTimeout); v != "" {
-		d, err := parseDuration(v, cfg.UserinfoTimeout)
+		d, err := parseDuration(v, c.UserinfoTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_USERINFO_TIMEOUT: %v", err)
+			return fmt.Errorf("invalid OAUTH2_USERINFO_TIMEOUT: %w", err)
 		}
-		cfg.UserinfoTimeout = clampDuration(d, time.Second, 30*time.Second)
+		c.UserinfoTimeout = clampDuration(d, time.Second, 30*time.Second)
 	}
+	return nil
+}
 
-	// allowed endpoints
-	if v := envStr(EnvAllowedEndpoints); v != "" {
-		for _, e := range strings.Split(v, ",") {
-			e = strings.TrimSpace(e)
-			if e == "" {
-				continue
-			}
-			u, err := url.Parse(e)
-			if err != nil || u.Scheme == "" || u.Host == "" {
-				return nil, fmt.Errorf("invalid OAUTH2_ALLOWED_ENDPOINTS entry: %s", e)
-			}
-			// The allowlist is compared by ORIGIN (scheme://host). An entry
-			// carrying a path, a query or a fragment can never match that
-			// comparison and would silently never fire — reject it loudly
-			// instead of accepting a rule that does nothing.
-			if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-				return nil, fmt.Errorf("OAUTH2_ALLOWED_ENDPOINTS entry must be an origin without path/query/fragment: %s", e)
-			}
-			cfg.AllowedEndpoints = append(cfg.AllowedEndpoints, e)
+// applyAllowedEndpoints parses the cross-origin endpoint allowlist.
+func (c *Config) applyAllowedEndpoints() error {
+	v := envStr(EnvAllowedEndpoints)
+	if v == "" {
+		return nil
+	}
+	for _, e := range strings.Split(v, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
 		}
-	}
-
-	// logout redirect
-	if v := envStr(EnvLogoutRedirect); v != "" {
-		if !strings.HasPrefix(v, "/") {
-			return nil, errors.New("OAUTH2_LOGOUT_REDIRECT must be a path starting with /")
+		u, err := url.Parse(e)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("invalid OAUTH2_ALLOWED_ENDPOINTS entry: %s", e)
 		}
-		cfg.LogoutRedirect = v
-	} else {
-		cfg.LogoutRedirect = "/ui/"
+		// The allowlist is compared by ORIGIN (scheme://host). An entry
+		// carrying a path, a query or a fragment can never match that
+		// comparison and would silently never fire — reject it loudly
+		// instead of accepting a rule that does nothing.
+		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("OAUTH2_ALLOWED_ENDPOINTS entry must be an origin without path/query/fragment: %s", e)
+		}
+		c.AllowedEndpoints = append(c.AllowedEndpoints, e)
 	}
+	return nil
+}
 
-	// state store max
+// applyLogoutRedirect pins the post-logout redirect target.
+func (c *Config) applyLogoutRedirect() error {
+	v := envStr(EnvLogoutRedirect)
+	if v == "" {
+		c.LogoutRedirect = "/ui/"
+		return nil
+	}
+	if !strings.HasPrefix(v, "/") {
+		return errors.New("OAUTH2_LOGOUT_REDIRECT must be a path starting with /")
+	}
+	c.LogoutRedirect = v
+	return nil
+}
+
+// applyLimits reads the state-store and rate-limit limits.
+func (c *Config) applyLimits() error {
 	if v := envStr(EnvStateStoreMax); v != "" {
-		var n int
-		_, err := fmt.Sscanf(v, "%d", &n)
+		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_STATE_STORE_MAX: %v", err)
+			return fmt.Errorf("invalid OAUTH2_STATE_STORE_MAX: %w", err)
 		}
-		cfg.StateStoreMax = clampInt(n, 64, 65536)
+		c.StateStoreMax = clampInt(n, 64, 65536)
 	}
-
-	// rate limit
 	if v := envStr(EnvRateLimitRPM); v != "" {
-		var n int
-		_, err := fmt.Sscanf(v, "%d", &n)
+		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_RATE_LIMIT_RPM: %v", err)
+			return fmt.Errorf("invalid OAUTH2_RATE_LIMIT_RPM: %w", err)
 		}
-		cfg.RateLimitRPM = clampInt(n, 1, 600)
+		c.RateLimitRPM = clampInt(n, 1, 600)
 	}
 	if v := envStr(EnvRateLimitBurst); v != "" {
-		var n int
-		_, err := fmt.Sscanf(v, "%d", &n)
+		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OAUTH2_RATE_LIMIT_BURST: %v", err)
+			return fmt.Errorf("invalid OAUTH2_RATE_LIMIT_BURST: %w", err)
 		}
-		cfg.RateLimitBurst = clampInt(n, 1, 100)
+		c.RateLimitBurst = clampInt(n, 1, 100)
 	}
-
-	// default logout redirect if empty
-	if cfg.LogoutRedirect == "" {
-		cfg.LogoutRedirect = "/ui/"
-	}
-
-	// warn algs differs? not needed here; logging in caller.
-
-	// sort email domains? no.
-
-	_ = sort.Strings
-
-	return cfg, nil
+	return nil
 }
 
 func validCookieName(s string) bool {
@@ -550,6 +657,29 @@ func deriveSubkeys(root []byte) ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 	return session, txn, nil
+}
+
+// deriveSubkeys derives the session and transaction subkeys from the root key
+// and stores them on the Config. The Config is the ONLY holder of the derived
+// keys: every consumer (the guard, the cookie codecs) READS them from here —
+// nothing re-derives them on the side.
+func (c *Config) deriveSubkeys() error {
+	session, txn, err := deriveSubkeys(c.rootKey)
+	if err != nil {
+		return err
+	}
+	c.sessionKey = session
+	c.txnKey = txn
+	return nil
+}
+
+// ensureSubkeys derives the subkeys once. A Config built by ConfigFromEnv
+// already carries them; a hand-built one (tests) does not.
+func (c *Config) ensureSubkeys() error {
+	if len(c.sessionKey) == 32 && len(c.txnKey) == 32 {
+		return nil
+	}
+	return c.deriveSubkeys()
 }
 
 // Accessors for internal keys (used by cookie/guard)

@@ -21,6 +21,12 @@ type ProviderMetadata struct {
 	EndSessionEndpoint    string `json:"end_session_endpoint"`
 }
 
+// maxDiscoveryBodyBytes bounds the discovery document read from the IdP. A
+// hostile or compromised IdP must not be able to exhaust the proxy's memory,
+// and an oversized document must be REJECTED (not truncated into a confusing
+// parse error).
+const maxDiscoveryBodyBytes = 256 * 1024
+
 type OIDCProvider struct {
 	cfg         *Config
 	client      *http.Client
@@ -59,7 +65,10 @@ func (p *OIDCProvider) Discover(ctx context.Context) (*ProviderMetadata, error) 
 	// negative cache check
 	p.mu.RLock()
 	if p.meta != nil {
-		if time.Since(p.fetchedAt) < p.cfg.JWKSCacheTTL { // reuse ttl? use discovery timeout? We'll use JWKSCacheTTL as cache lifetime
+		// The discovery document is cached for the same lifetime as the JWKS
+		// key set (JWKSCacheTTL). The discovery timeout bounds a SINGLE
+		// fetch, not the lifetime of the cached document.
+		if time.Since(p.fetchedAt) < p.cfg.JWKSCacheTTL {
 			m := p.meta
 			p.mu.RUnlock()
 			return m, nil
@@ -97,8 +106,15 @@ func (p *OIDCProvider) Discover(ctx context.Context) (*ProviderMetadata, error) 
 			p.setFetchErr(err)
 			return err
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		// one byte over the cap is read so an oversized document is DETECTED
+		// instead of being silently truncated into a confusing parse error.
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryBodyBytes+1))
 		if err != nil {
+			p.setFetchErr(err)
+			return err
+		}
+		if len(body) > maxDiscoveryBodyBytes {
+			err := fmt.Errorf("discovery document exceeds %d bytes", maxDiscoveryBodyBytes)
 			p.setFetchErr(err)
 			return err
 		}
@@ -233,22 +249,25 @@ func (p *OIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, code
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("token_exchange_failed: %v", err)
+		return "", "", fmt.Errorf("token_exchange_failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return "", "", fmt.Errorf("token_exchange_failed: %v", err)
-	}
+	// the status is checked BEFORE the body is read: a non-200 response must
+	// never reach the JSON parse below, and the error document of a failed
+	// exchange is never read at all.
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("token_exchange_failed: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return "", "", fmt.Errorf("token_exchange_failed: %w", err)
 	}
 	var tr struct {
 		IDToken     string `json:"id_token"`
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", "", fmt.Errorf("token_exchange_failed: %v", err)
+		return "", "", fmt.Errorf("token_exchange_failed: %w", err)
 	}
 	if tr.IDToken == "" {
 		return "", "", fmt.Errorf("token_exchange_failed: missing id_token")

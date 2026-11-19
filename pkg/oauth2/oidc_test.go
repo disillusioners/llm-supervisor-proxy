@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -276,6 +277,11 @@ func TestOIDC_ExchangeCodePostsForm(t *testing.T) {
 	}
 }
 
+// F4: the discovery body cap must REJECT an oversized document with the size
+// error (not silently truncate it into a confusing parse error), and a normal
+// document must still parse. The assertion is discriminating: with the cap
+// check removed, the oversized case fails with a JSON parse error instead of
+// the size error.
 func TestOIDC_DiscoveryBodySizeCapped(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +291,28 @@ func TestOIDC_DiscoveryBodySizeCapped(t *testing.T) {
 	defer srv.Close()
 	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second}
 	p := NewOIDCProvider(cfg)
-	// should not panic; may error
-	_, _ = p.Discover(context.Background())
+	_, err := p.Discover(context.Background())
+	if err == nil {
+		t.Fatal("an oversized discovery document must be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected the size error, got: %v", err)
+	}
+
+	// control: a normal discovery document still parses.
+	var ok *httptest.Server
+	ok = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"issuer":"` + ok.URL + `","authorization_endpoint":"` + ok.URL + `/auth","token_endpoint":"` + ok.URL + `/token","jwks_uri":"` + ok.URL + `/jwks"}`))
+	}))
+	defer ok.Close()
+	cfg2 := &Config{IssuerURL: ok.URL, DiscoveryTimeout: 5 * time.Second}
+	p2 := NewOIDCProvider(cfg2)
+	meta, err := p2.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("a normal discovery document must parse: %v", err)
+	}
+	if meta.Issuer != ok.URL {
+		t.Fatalf("issuer mismatch: %s", meta.Issuer)
+	}
 }

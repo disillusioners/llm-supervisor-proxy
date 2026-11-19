@@ -66,9 +66,9 @@ func (c *CookieCodec) Seal(s *Session) (string, error) {
 	if len(s.Name) > MaxNameBytes {
 		s.Name = truncateToBytes(s.Name, MaxNameBytes)
 	}
-	if s.ExpiresAt == 0 {
-		// default? leave as is
-	}
+	// An unset ExpiresAt (0) is passed through unchanged: Open treats 0 as
+	// "no expiry" (the expiry check is skipped), so there is no default to
+	// invent here.
 	b, err := json.Marshal(s)
 	if err != nil {
 		return "", err

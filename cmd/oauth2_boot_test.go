@@ -20,12 +20,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
 )
 
-// dormantAuthMeBody is the exact dormant /fe/api/auth/me wire body. The
-// field order is the legacy sorted-key order the old map re-marshal
-// produced (S11 pins these bytes in pkg/ui too); keeping the literal here
-// makes the D1 dormancy assertion byte-exact, not shape-approximate.
-const dormantAuthMeBody = `{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n"
-
 // newDormantHarness builds the REAL cmd wiring path with OAUTH2_ENABLED
 // unset — the same construction sequence main() runs, with the DB-backed
 // managers swapped for their in-memory twins (MockConfigManager /
@@ -131,8 +125,8 @@ func TestMain_DormantAuthMeIs200(t *testing.T) {
 	}
 	// Byte-exact (S11): no per-request re-marshal drift, sorted-key order,
 	// trailing newline — the bytes the pre-hoist encoder produced.
-	if got := rr.Body.String(); got != dormantAuthMeBody {
-		t.Fatalf("body = %q, want byte-identical %q", got, dormantAuthMeBody)
+	if got := rr.Body.String(); got != ui.DormantAuthMeBody {
+		t.Fatalf("body = %q, want byte-identical %q", got, ui.DormantAuthMeBody)
 	}
 	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
@@ -169,8 +163,8 @@ func TestMain_DormantD1Surface(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET /fe/api/auth/me: status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
 	}
-	if got := rr.Body.String(); got != dormantAuthMeBody {
-		t.Fatalf("GET /fe/api/auth/me: body = %q, want byte-identical %q", got, dormantAuthMeBody)
+	if got := rr.Body.String(); got != ui.DormantAuthMeBody {
+		t.Fatalf("GET /fe/api/auth/me: body = %q, want byte-identical %q", got, ui.DormantAuthMeBody)
 	}
 
 	// 3. /fe/api/models reachable with NO credentials — the /fe/api/*

@@ -33,10 +33,13 @@ func (f *fakeIdentityProvider) StateStoreCount() int { return f.count }
 // stay byte-identical to what the legacy per-request map re-marshal
 // produced — same fields, same sorted-key order, same trailing newline —
 // and the handler must emit exactly those bytes in one write.
+//
+// The expected bytes are the ONE source of truth (DormantAuthMeBody), not a
+// second copy of the literal (tidier #3).
 func TestHandleAuthMe_DormantBodyByteStable(t *testing.T) {
-	const want = `{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n"
+	want := DormantAuthMeBody
 
-	// 1. The hoisted constant itself.
+	// 1. The hoisted byte view is exactly the exported constant.
 	if got := string(dormantAuthMeBody); got != want {
 		t.Fatalf("dormantAuthMeBody = %q, want %q", got, want)
 	}
