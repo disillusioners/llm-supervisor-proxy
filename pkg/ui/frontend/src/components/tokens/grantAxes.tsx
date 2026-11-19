@@ -115,14 +115,19 @@ export function axisOfId(
   models: TokenModelRow[],
   token?: { allowed_models?: string[] | null; allowed_groups?: string[] | null },
 ): GrantAxis {
+  // STORED MEMBERSHIP FIRST: an id that is already stored on an axis stays
+  // on that axis. Re-axising a grant is a silent privilege change (a group
+  // id stored in allowed_models is a NARROW grant — the group ENTRY only —
+  // while the same id in allowed_groups grants the group AND its members).
+  if (token?.allowed_models?.includes(id)) return 'models';
+  if (token?.allowed_groups?.includes(id)) return 'groups';
+  // Otherwise the ROW KIND decides: kind === 'group' => the group axis,
+  // anything else (including a legacy row with no kind) => the model axis.
   const row = models.find((m) => m.id === id);
   if (row) {
-    // The row exists: its kind is the authority (no kind = legacy chat row
-    // = the model axis).
     return row.kind === 'group' ? 'groups' : 'models';
   }
-  // The row is GONE (stale grant): keep the id on the axis it is stored on.
-  if (token?.allowed_groups?.includes(id)) return 'groups';
+  // Stale id with no stored axis: default to the model axis.
   return 'models';
 }
 

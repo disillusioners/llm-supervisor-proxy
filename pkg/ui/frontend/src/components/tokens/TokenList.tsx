@@ -235,6 +235,9 @@ export function TokenList({
         });
         onRefetchTokens();
         onStatus({ type: 'error', message: 'Token not found. The list has been refreshed.' });
+      } else {
+        // Sync with the backend once the PATCH has landed.
+        onRefetchTokens();
       }
     } catch (e) {
       // Revert the optimistic update (BOTH axes)

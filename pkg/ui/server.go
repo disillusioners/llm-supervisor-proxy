@@ -2495,13 +2495,15 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 // round-trips `null` ≡ ABSENT and must be able to distinguish it from
 // `[]` ≡ PRESENT-and-empty.
 type TokenResponse struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	ExpiresAt     *string   `json:"expires_at,omitempty"`
-	CreatedAt     string    `json:"created_at"`
-	CreatedBy     string    `json:"created_by"`
-	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil = ABSENT; [] = PRESENT-empty (grants nothing)
-	AllowedGroups *[]string `json:"allowed_groups,omitempty"` // same tri-state, GROUP axis
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	ExpiresAt            *string   `json:"expires_at,omitempty"`
+	CreatedAt            string    `json:"created_at"`
+	CreatedBy            string    `json:"created_by"`
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil = ABSENT; [] = PRESENT-empty (grants nothing)
+	AllowedGroups        *[]string `json:"allowed_groups,omitempty"` // same tri-state, GROUP axis
+	AllowedModelsInvalid bool      `json:"allowed_models_invalid"`   // fail-closed: unreadable model axis => DENY-ALL
+	AllowedGroupsInvalid bool      `json:"allowed_groups_invalid"`   // fail-closed: unreadable group axis => DENY-ALL
 }
 
 // CreateTokenRequest represents the request body for creating a token.
@@ -2669,12 +2671,14 @@ func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.
 	for i := range tokens {
 		t := &tokens[i]
 		response[i] = TokenResponse{
-			ID:            t.ID,
-			Name:          t.Name,
-			CreatedAt:     t.CreatedAt.Format(time.RFC3339),
-			CreatedBy:     t.CreatedBy,
-			AllowedModels: &t.AllowedModels,
-			AllowedGroups: &t.AllowedGroups,
+			ID:                   t.ID,
+			Name:                 t.Name,
+			CreatedAt:            t.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            t.CreatedBy,
+			AllowedModels:        &t.AllowedModels,
+			AllowedGroups:        &t.AllowedGroups,
+			AllowedModelsInvalid: t.ModelsInvalid,
+			AllowedGroupsInvalid: t.GroupsInvalid,
 		}
 		if t.ExpiresAt != nil {
 			iso := t.ExpiresAt.Format(time.RFC3339)
@@ -2751,12 +2755,14 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 
 	response := CreateTokenResponse{
 		TokenResponse: TokenResponse{
-			ID:            token.ID,
-			Name:          token.Name,
-			CreatedAt:     token.CreatedAt.Format(time.RFC3339),
-			CreatedBy:     token.CreatedBy,
-			AllowedModels: &token.AllowedModels,
-			AllowedGroups: &token.AllowedGroups,
+			ID:                   token.ID,
+			Name:                 token.Name,
+			CreatedAt:            token.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            token.CreatedBy,
+			AllowedModels:        &token.AllowedModels,
+			AllowedGroups:        &token.AllowedGroups,
+			AllowedModelsInvalid: token.ModelsInvalid,
+			AllowedGroupsInvalid: token.GroupsInvalid,
 		},
 		Token: plaintext, // Show once!
 	}
