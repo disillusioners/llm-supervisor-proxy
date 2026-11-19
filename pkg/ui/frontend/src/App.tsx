@@ -4,12 +4,18 @@ import { lazy, Suspense } from 'preact/compat';
 import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
 import { LoadingFallback } from './components/LoadingFallback';
 import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useDecisionModels, useGroupModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
+import { useAuth } from './hooks/useAuth';
 import type { RequestListItem } from './types';
 
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
- 
+
 export function App() {
+  // internal-oauth2 phase 1 (plan §7.6): the identity probe mounts once
+  // at the top level so the resolved mode (authState) is known before
+  // the first data fetch resolves; the fetch guard reads that mode on
+  // any later 401. Header's useAuth() call shares the same probe.
+  useAuth();
   // API hooks - fetch data once at the top level
   const {
     requests,

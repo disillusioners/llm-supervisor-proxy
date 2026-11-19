@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import { getCredentials, getCredentialGroups, useProviders } from '../../hooks/useApi';
+import { guardedFetch } from '../../utils/apiFetch';
 import type { Model, Credential, CredentialRef, CredentialGroup } from '../../types';
 import { MultiCredentialEditor } from './MultiCredentialEditor';
 
@@ -458,7 +459,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       // current form data, not the saved model data. This allows testing
       // internal config before saving the model.
 
-      const response = await fetch('/fe/api/models/test', {
+      const response = await guardedFetch('/fe/api/models/test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

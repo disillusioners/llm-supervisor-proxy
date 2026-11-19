@@ -1,11 +1,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'preact/hooks';
 import type { Event, EventType } from '../types';
+import { redirectToLogin } from '../utils/apiFetch';
 
 // Configuration constants
 const MAX_EVENTS_PER_REQUEST = 500;
 const MAX_REQUESTS_IN_MAP = 100;
 const RECONNECT_BASE_DELAY = 1000; // 1 second
 const RECONNECT_MAX_DELAY = 30000; // 30 seconds
+// AR-15: the bounded auth probe inside the onerror arm — mirrors the
+// authState probe budget (useAuth AUTH_PROBE_TIMEOUT_MS).
+const SSE_AUTH_PROBE_TIMEOUT_MS = 3000;
 
 // Connection state type
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
@@ -17,9 +21,66 @@ const stateListeners = new Set<(state: ConnectionState) => void>();
 let reconnectAttempts = 0;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let isConnecting = false;
+// D13/AR-15: set when the auth probe proves the session expired — stops
+// the reconnect loop so a dead session never retries every 30 s forever,
+// and a late subscriber cannot re-enter createEventSource. A full page
+// reload (the redirect) recreates the module state.
+let authExpired = false;
 
 function notifyStateListeners(state: ConnectionState) {
   stateListeners.forEach((listener) => listener(state));
+}
+
+/**
+ * D13/AR-15: EventSource exposes no HTTP status — a 401 from the gate
+ * looks exactly like a network drop. On CLOSED, probe the auth state
+ * ONCE, BOUNDED (AbortController + 3 s): enabled+anonymous means the
+ * session expired -> stop the reconnect loop and send the browser to
+ * the login flow through the SHARED one-shot latch. Anything else
+ * (network error, timeout, non-200 probe) keeps the existing backoff.
+ */
+function probeAuth(signal: AbortSignal): Promise<{ enabled: boolean; authenticated: boolean }> {
+  // Deliberately NOT guardedFetch — the probe must not recurse into the
+  // guard, and a probe failure must reach scheduleReconnect, never a
+  // redirect.
+  return fetch('/fe/api/auth/me', { signal }).then(async (res) => {
+    if (!res.ok) throw new Error(`auth probe HTTP ${res.status}`);
+    const body = (await res.json()) as { enabled?: boolean; authenticated?: boolean };
+    return { enabled: !!body.enabled, authenticated: !!body.authenticated };
+  });
+}
+
+/** D13/AR-15: clear the pending reconnect and stop the loop for this page load. */
+function stopReconnectLoop(): void {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  authExpired = true;
+}
+
+/** The EXISTING exponential backoff reconnect path (unchanged constants). */
+function scheduleReconnect(): void {
+  const delay = Math.min(
+    RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts),
+    RECONNECT_MAX_DELAY
+  );
+  reconnectAttempts++;
+
+  console.warn(`SSE connection closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+
+  // Clear any existing reconnect timeout
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+
+  reconnectTimeout = setTimeout(() => {
+    // Only reconnect if there are still subscribers (and the session
+    // was not proven expired by the auth probe).
+    if (subscribers.size > 0 && !authExpired) {
+      createEventSource();
+    }
+  }, delay);
 }
 
 function createEventSource() {
@@ -30,15 +91,15 @@ function createEventSource() {
 
   isConnecting = true;
   notifyStateListeners('connecting');
-  
+
   const es = new EventSource('/fe/api/events');
-  
+
   es.onopen = () => {
     reconnectAttempts = 0;
     isConnecting = false;
     notifyStateListeners('connected');
   };
-  
+
   es.onmessage = (event) => {
     try {
       const data: Event = JSON.parse(event.data);
@@ -50,41 +111,64 @@ function createEventSource() {
 
   es.onerror = () => {
     isConnecting = false;
-    
+
     if (es.readyState === EventSource.CLOSED) {
       notifyStateListeners('disconnected');
-      
-      // Exponential backoff reconnection
-      const delay = Math.min(
-        RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts),
-        RECONNECT_MAX_DELAY
-      );
-      reconnectAttempts++;
-      
-      console.warn(`SSE connection closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
-      
-      // Clear any existing reconnect timeout
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-      }
-      
-      reconnectTimeout = setTimeout(() => {
-        // Only reconnect if there are still subscribers
-        if (subscribers.size > 0) {
-          createEventSource();
-        }
-      }, delay);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SSE_AUTH_PROBE_TIMEOUT_MS); // AR-15 bound
+      probeAuth(controller.signal)
+        .then((auth) => {
+          clearTimeout(timer);
+          if (auth.enabled && !auth.authenticated) {
+            // Session expired behind the internal gate: stop the
+            // reconnect loop and redirect through the SHARED one-shot
+            // latch with guardedFetch (a separate latch would allow a
+            // double navigation — AR-15).
+            stopReconnectLoop();
+            redirectToLogin();
+            return;
+          }
+          scheduleReconnect(); // the EXISTING backoff path, unchanged
+        })
+        .catch(() => {
+          // AR-15: a FAILED/TIMED-OUT probe must still reconnect.
+          clearTimeout(timer);
+          scheduleReconnect();
+        });
     }
   };
-  
+
   sharedEventSource = es;
 }
 
 function getSharedEventSource() {
+  // D13/AR-15: an auth-expired page never re-enters the connect path —
+  // the browser is on its way to the login redirect.
+  if (authExpired) {
+    return sharedEventSource;
+  }
   if (!sharedEventSource && !isConnecting) {
     createEventSource();
   }
   return sharedEventSource;
+}
+
+/** Test hook — resets the shared connection state between suites. */
+export function resetEventsForTests(): void {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  if (sharedEventSource) {
+    sharedEventSource.close();
+    sharedEventSource = null;
+  }
+  subscribers.clear();
+  stateListeners.clear();
+  reconnectAttempts = 0;
+  isConnecting = false;
+  authExpired = false;
 }
 
 function subscribe(callback: (data: Event) => void, onStateChange?: (state: ConnectionState) => void) {

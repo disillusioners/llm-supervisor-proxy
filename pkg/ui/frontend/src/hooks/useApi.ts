@@ -15,15 +15,19 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, CredentialGroup, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
+import { guardedFetch } from '../utils/apiFetch';
 
 const API_BASE = '/fe/api';
 // Default page size for the metadata-only list endpoint. The list is now
 // bounded by count (not bytes), and the backend caps it at 200.
 const REQUEST_LIST_LIMIT = 50;
 
-// Generic fetch helper
+// Generic API helper — routed through guardedFetch, the single 401
+// choke point (internal-oauth2 phase 1, plan §7.4): every call site in
+// this module (and ModelForm's connection test) drives the bounded
+// login redirect on an expired internal-oauth2 session.
 async function apiFetch<T>(path: string, options?: RequestInit & { signal?: AbortSignal }): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await guardedFetch(`${API_BASE}${path}`, {
     ...options,
     signal: options?.signal,
     headers: {
@@ -93,7 +97,7 @@ export function useRequests(initialAppTag?: string) {
         const queryString = qs.toString();
         const data = await defaultAPICache.getOrFetch<RequestListItem[]>(cacheKey, async () => {
           const path = `/requests?${queryString}${tag ? `&app=${encodeURIComponent(tag)}` : ''}`;
-          const response = await fetch(`${API_BASE}${path}`, {
+          const response = await guardedFetch(`${API_BASE}${path}`, {
             signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
           });
@@ -239,7 +243,7 @@ export function useConfig() {
     try {
       setLoading(true);
       const data = await defaultAPICache.getOrFetch<AppConfig>('config', async () => {
-        const response = await fetch(`${API_BASE}/config`, {
+        const response = await guardedFetch(`${API_BASE}/config`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -283,7 +287,7 @@ export function useModels() {
     try {
       setLoading(true);
       const data = await defaultAPICache.getOrFetch<Model[]>('models', async () => {
-        const response = await fetch(`${API_BASE}/models`, {
+        const response = await guardedFetch(`${API_BASE}/models`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -431,7 +435,7 @@ export function useImgGenModels() {
       setLoading(true);
       setError(null);
       const data = await defaultAPICache.getOrFetch<Model[]>('imggen-models', async () => {
-        const response = await fetch(`${API_BASE}/models?kind=image-gen`, {
+        const response = await guardedFetch(`${API_BASE}/models?kind=image-gen`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -542,7 +546,7 @@ export function useDecisionModels() {
       setLoading(true);
       setError(null);
       const data = await defaultAPICache.getOrFetch<Model[]>('decision-models', async () => {
-        const response = await fetch(`${API_BASE}/models?kind=decision`, {
+        const response = await guardedFetch(`${API_BASE}/models?kind=decision`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -646,7 +650,7 @@ export function useGroupModels() {
       setLoading(true);
       setError(null);
       const data = await defaultAPICache.getOrFetch<Model[]>('group-models', async () => {
-        const response = await fetch(`${API_BASE}/models?kind=group`, {
+        const response = await guardedFetch(`${API_BASE}/models?kind=group`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -738,7 +742,7 @@ export function useAppTags() {
       try {
         setLoading(true);
         const data = await defaultAPICache.getOrFetch<string[]>('app-tags', async () => {
-          const response = await fetch(`${API_BASE}/app-tags`, {
+          const response = await guardedFetch(`${API_BASE}/app-tags`, {
             signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
           });
@@ -779,7 +783,7 @@ export function useVersion() {
       try {
         setLoading(true);
         const data = await defaultAPICache.getOrFetch<{ version: string }>('version', async () => {
-          const response = await fetch(`${API_BASE}/version`, {
+          const response = await guardedFetch(`${API_BASE}/version`, {
             signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
           });
@@ -879,7 +883,7 @@ export function useTokens() {
     try {
       setLoading(true);
       const data = await defaultAPICache.getOrFetch<ApiToken[]>('tokens', async () => {
-        const response = await fetch(`${API_BASE}/tokens`, {
+        const response = await guardedFetch(`${API_BASE}/tokens`, {
           signal,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -949,7 +953,7 @@ export function useTokens() {
       const body: Record<string, unknown> = {};
       if (allowedModels !== undefined) body.allowed_models = allowedModels;
       if (allowedGroups !== undefined) body.allowed_groups = allowedGroups;
-      const response = await fetch(`${API_BASE}/tokens/${id}`, {
+      const response = await guardedFetch(`${API_BASE}/tokens/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1016,7 +1020,7 @@ export class ApiError extends Error {
 }
 
 export async function getCredentials(): Promise<Credential[]> {
-  const res = await fetch('/fe/api/credentials');
+  const res = await guardedFetch('/fe/api/credentials');
   if (!res.ok) throw new Error('Failed to fetch credentials');
   return res.json();
 }
@@ -1032,7 +1036,7 @@ function invalidateModelCaches(): void {
 }
 
 export async function createCredential(cred: Credential): Promise<Credential> {
-  const res = await fetch('/fe/api/credentials', {
+  const res = await guardedFetch('/fe/api/credentials', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cred),
@@ -1046,7 +1050,7 @@ export async function createCredential(cred: Credential): Promise<Credential> {
 }
 
 export async function updateCredential(id: string, cred: Credential): Promise<Credential> {
-  const res = await fetch(`/fe/api/credentials/${id}`, {
+  const res = await guardedFetch(`/fe/api/credentials/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cred),
@@ -1060,7 +1064,7 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
 }
 
 export async function deleteCredential(id: string): Promise<void> {
-  const res = await fetch(`/fe/api/credentials/${id}`, { method: 'DELETE' });
+  const res = await guardedFetch(`/fe/api/credentials/${id}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await parseErrorBody(res);
     throw new ApiError(err?.error || 'Failed to delete credential', res.status);
@@ -1111,7 +1115,7 @@ async function parseErrorBody(res: Response): Promise<{ error?: string } | null>
 }
 
 export async function getCredentialGroups(): Promise<CredentialGroup[]> {
-  const res = await fetch(CREDENTIAL_GROUPS_PATH);
+  const res = await guardedFetch(CREDENTIAL_GROUPS_PATH);
   if (!res.ok) {
     const body = await parseErrorBody(res);
     throw new ApiError(
@@ -1124,7 +1128,7 @@ export async function getCredentialGroups(): Promise<CredentialGroup[]> {
 }
 
 export async function createCredentialGroup(group: CredentialGroup): Promise<CredentialGroup> {
-  const res = await fetch(CREDENTIAL_GROUPS_PATH, {
+  const res = await guardedFetch(CREDENTIAL_GROUPS_PATH, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(group),
@@ -1144,7 +1148,7 @@ export async function updateCredentialGroup(
   id: string,
   group: Partial<CredentialGroup>,
 ): Promise<CredentialGroup> {
-  const res = await fetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, {
+  const res = await guardedFetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(group),
@@ -1161,7 +1165,7 @@ export async function updateCredentialGroup(
 }
 
 export async function deleteCredentialGroup(id: string): Promise<void> {
-  const res = await fetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, { method: 'DELETE' });
+  const res = await guardedFetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, { method: 'DELETE' });
   if (!res.ok) {
     const body = await parseErrorBody(res);
     throw new ApiError(
@@ -1184,7 +1188,7 @@ export function useProviders() {
       try {
         setLoading(true);
         const data = await defaultAPICache.getOrFetch<Provider[]>('providers', async () => {
-          const response = await fetch(`${API_BASE}/providers`, {
+          const response = await guardedFetch(`${API_BASE}/providers`, {
             signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
           });
@@ -1208,7 +1212,7 @@ export function useProviders() {
 }
 
 export async function getProviders(): Promise<Provider[]> {
-  const res = await fetch('/fe/api/providers');
+  const res = await guardedFetch('/fe/api/providers');
   if (!res.ok) throw new Error('Failed to fetch providers');
   return res.json();
 }
