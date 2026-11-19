@@ -1,15 +1,16 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'preact/hooks';
 import type { Event, EventType } from '../types';
 import { redirectToLogin } from '../utils/apiFetch';
+// AR-15: the bounded auth probe inside the onerror arm uses the SAME
+// budget as the one-shot probe — ONE shared constant (utils/authProbe),
+// so the two probes cannot drift apart (tidier item #6).
+import { AUTH_ME_PATH, AUTH_PROBE_TIMEOUT_MS, parseAuthProbeResponse } from '../utils/authProbe';
 
 // Configuration constants
 const MAX_EVENTS_PER_REQUEST = 500;
 const MAX_REQUESTS_IN_MAP = 100;
 const RECONNECT_BASE_DELAY = 1000; // 1 second
 const RECONNECT_MAX_DELAY = 30000; // 30 seconds
-// AR-15: the bounded auth probe inside the onerror arm — mirrors the
-// authState probe budget (useAuth AUTH_PROBE_TIMEOUT_MS).
-const SSE_AUTH_PROBE_TIMEOUT_MS = 3000;
 
 // Connection state type
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
@@ -38,32 +39,25 @@ function notifyStateListeners(state: ConnectionState) {
  * session expired -> stop the reconnect loop and send the browser to
  * the login flow through the SHARED one-shot latch. Anything else
  * (network error, timeout, non-200 probe) keeps the existing backoff.
+ *
+ * The body interpretation is the ONE shared helper (utils/authProbe) —
+ * the same one the one-shot probe uses, so the two probes cannot drift
+ * apart (tidier item #6).
  */
 function probeAuth(signal: AbortSignal): Promise<{ enabled: boolean; authenticated: boolean }> {
   // Deliberately NOT guardedFetch — the probe must not recurse into the
   // guard, and a probe failure must reach scheduleReconnect, never a
   // redirect.
-  return fetch('/fe/api/auth/me', { signal }).then(async (res) => {
-    // 401 -> the enabled+anonymous shape (plan §5.8): the body carries
-    // enabled:true. Parse it; if it carries a boolean `enabled`, return
-    // it as an explicit answer. Otherwise (missing/unparseable/no
-    // enabled, e.g. an external ingress 401) THROW so the catch arm
-    // runs the existing backoff reconnect (AR-15).
-    if (res.status === 401) {
-      let body: { enabled?: unknown; authenticated?: unknown } | null = null;
-      try {
-        body = (await res.json()) as { enabled?: unknown; authenticated?: unknown };
-      } catch {
-        throw new Error(`auth probe HTTP ${res.status}`);
-      }
-      if (!body || typeof body !== 'object' || typeof body.enabled !== 'boolean') {
-        throw new Error(`auth probe HTTP ${res.status}`);
-      }
-      return { enabled: !!body.enabled, authenticated: !!body.authenticated };
+  return fetch(AUTH_ME_PATH, { signal }).then(async (res) => {
+    const outcome = await parseAuthProbeResponse(res);
+    if (outcome.kind !== 'answer') {
+      // A 401 without a boolean `enabled` (e.g. an EXTERNAL ingress
+      // 401), an unparseable body, or any status that is neither 200
+      // nor 401 — none of them confirm an expired session: THROW so the
+      // catch arm runs the existing backoff reconnect (AR-15).
+      throw new Error(`auth probe HTTP ${res.status}`);
     }
-    if (!res.ok) throw new Error(`auth probe HTTP ${res.status}`);
-    const body = (await res.json()) as { enabled?: boolean; authenticated?: boolean };
-    return { enabled: !!body.enabled, authenticated: !!body.authenticated };
+    return { enabled: outcome.body.enabled, authenticated: outcome.body.authenticated };
   });
 }
 
@@ -76,15 +70,28 @@ function stopReconnectLoop(): void {
   authExpired = true;
 }
 
-/** The EXISTING exponential backoff reconnect path (unchanged constants). */
-function scheduleReconnect(): void {
+/**
+ * The EXISTING exponential backoff reconnect path (unchanged constants).
+ *
+ * `quiet` downgrades the reconnect notice to console.debug. It is used
+ * by the AUTH-PROBE path only (tidier item #39): a probe that failed or
+ * timed out is diagnostic chatter, not an error — warning about it on
+ * every reconnect buries the real errors. The ordinary reconnect (the
+ * stream dropped while the session is alive) keeps its warning.
+ */
+function scheduleReconnect(options?: { quiet?: boolean }): void {
   const delay = Math.min(
     RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts),
     RECONNECT_MAX_DELAY
   );
   reconnectAttempts++;
 
-  console.warn(`SSE connection closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+  const notice = `SSE connection closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`;
+  if (options?.quiet === true) {
+    console.debug(notice);
+  } else {
+    console.warn(notice);
+  }
 
   // Clear any existing reconnect timeout
   if (reconnectTimeout) {
@@ -133,7 +140,7 @@ function createEventSource() {
       notifyStateListeners('disconnected');
 
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), SSE_AUTH_PROBE_TIMEOUT_MS); // AR-15 bound
+      const timer = setTimeout(() => controller.abort(), AUTH_PROBE_TIMEOUT_MS); // AR-15 bound
       probeAuth(controller.signal)
         .then((auth) => {
           clearTimeout(timer);
@@ -151,7 +158,9 @@ function createEventSource() {
         .catch(() => {
           // AR-15: a FAILED/TIMED-OUT probe must still reconnect.
           clearTimeout(timer);
-          scheduleReconnect();
+          // #39: the probe path is chatter, not an error — the reconnect
+          // stays on the existing backoff, but WITHOUT the warning.
+          scheduleReconnect({ quiet: true });
         });
     }
   };

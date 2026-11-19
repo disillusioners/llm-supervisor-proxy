@@ -8,6 +8,21 @@
 // navigation). A failed / non-confirming / timed-out probe keeps the
 // existing exponential backoff untouched.
 //
+// Also pins (this fold):
+//   R4  — the DORMANT 200 probe (the shipped default) has a case of its
+//         own: the SSE path must PROCEED with the ordinary backoff
+//         reconnect — no loop break, no redirect, no banner. A parse
+//         regression that navigated dormant pages to /oauth2/start (404)
+//         is caught HERE.
+//   #39 — the auth-probe path is quiet: a failed probe reconnects
+//         WITHOUT a console.warn; the ordinary reconnect keeps its
+//         warning.
+//   #6  — the SSE probe and the one-shot probe AGREE on every probe
+//         shape (the shared parse helper).
+//
+// The identity-probe responses come from the ONE canonical mock helper
+// (utils/__tests__/authProbeMocks — tester item R5).
+//
 // NOTE: channel-name spellings are deliberately avoided in this file —
 // the AR-60 census must stay clean outside the guarded production
 // modules. The SSE constructor global is therefore reached through a
@@ -16,7 +31,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/preact';
 import { useEvents, resetEventsForTests } from '../useEvents';
 import { guardedFetch, resetAuthRedirectLatch, resetReloadOnce } from '../../utils/apiFetch';
+import { redirectStormErrorVisible } from '../../utils/redirectStorm';
 import { authState } from '../../hooks/useAuth';
+import {
+  anonymousProbeResponse,
+  dormantProbeResponse,
+  hangingProbeResponse,
+  installAuthWire,
+  jsonResponse,
+  unparseableProbeResponse,
+} from '../../utils/__tests__/authProbeMocks';
 
 const realFetch = globalThis.fetch;
 
@@ -51,24 +75,6 @@ class FakeSSE implements FakeSSEInstance {
   close(): void {
     this.readyState = FakeSSE.CLOSED;
   }
-}
-
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-function hangUntilAborted(init?: RequestInit): Promise<Response> {
-  return new Promise<Response>((_resolve, reject) => {
-    const signal = init?.signal;
-    if (signal) {
-      signal.addEventListener('abort', () =>
-        reject(new DOMException('The operation was aborted.', 'AbortError')),
-      );
-    }
-  });
 }
 
 /** Kill the shared stream so production's onerror arm runs (readyState CLOSED). */
@@ -112,20 +118,8 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
     authState.resetForTests();
   });
 
-  function installWire(handlers: { probe: (init?: RequestInit) => Response | Promise<Response> }) {
-    const wire = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return handlers.probe(init);
-      throw new Error(`unexpected request: ${url}`);
-    });
-    (globalThis as { fetch: typeof fetch }).fetch = wire as unknown as typeof fetch;
-    return wire;
-  }
-
   it('session expired (probe enabled+anonymous): loop STOPS + redirect through the SHARED latch', async () => {
-    const wire = installWire({
-      probe: () => jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 1 }, 401),
-    });
+    const wire = installAuthWire({ probe: () => anonymousProbeResponse() });
 
     const { result } = renderHook(() => useEvents(null, false));
     await act(drain);
@@ -146,7 +140,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
     // same latch guardedFetch uses).
     wire.mockImplementation(async (input: RequestInfo | URL): Promise<Response> => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, state_store_count: 1 }, 401);
+      if (url.includes('/fe/api/auth/me')) return anonymousProbeResponse();
       return jsonResponse({ error: 'unauthenticated' }, 401);
     });
     await guardedFetch('/fe/api/models');
@@ -161,7 +155,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
   });
 
   it('a 401 on the auth probe (non-confirming answer) keeps the backoff reconnect', async () => {
-    installWire({ probe: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+    installAuthWire({ probe: () => unparseableProbeResponse() });
 
     renderHook(() => useEvents(null, false));
     await act(drain);
@@ -182,7 +176,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
   });
 
   it('a network failure on the probe keeps the existing backoff reconnect', async () => {
-    installWire({ probe: () => Promise.reject(new TypeError('Failed to fetch')) });
+    installAuthWire({ probe: () => Promise.reject(new TypeError('Failed to fetch')) });
 
     renderHook(() => useEvents(null, false));
     await act(async () => {});
@@ -201,7 +195,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
   });
 
   it('a probe that TIMES OUT (abort at 3 s) still reaches the reconnect path (AR-15)', async () => {
-    installWire({ probe: (init) => hangUntilAborted(init) });
+    installAuthWire({ probe: (init) => hangingProbeResponse(init) });
 
     renderHook(() => useEvents(null, false));
     await act(async () => {});
@@ -218,5 +212,123 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
       await drain();
     });
     expect(instances.length).toBe(2);
+  });
+
+  it('R4: the DORMANT 200 probe (the shipped default) proceeds with the ordinary backoff reconnect', async () => {
+    installAuthWire({ probe: () => dormantProbeResponse() });
+
+    const { result } = renderHook(() => useEvents(null, false));
+    await act(drain);
+    expect(instances.length).toBe(1);
+
+    await act(async () => {
+      killStream();
+      await drain();
+    });
+
+    // The dormant answer is NOT an expired session: no redirect, no
+    // breaker banner, and the reconnect loop was NOT broken.
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(redirectStormErrorVisible()).toBe(false);
+    expect(result.current.connectionState).toBe('disconnected');
+
+    // ...and the ordinary backoff reconnect still happens.
+    await act(async () => {
+      vi.advanceTimersByTime(1000); // RECONNECT_BASE_DELAY
+      await drain();
+    });
+    expect(instances.length).toBe(2);
+  });
+
+  it('#39: the auth-probe failure path is QUIET; the ordinary reconnect keeps its warning', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+    // (a) The probe FAILED: the reconnect happens on the existing backoff,
+    // but WITHOUT the warning — the probe path is chatter, not an error.
+    installAuthWire({ probe: () => Promise.reject(new TypeError('Failed to fetch')) });
+    renderHook(() => useEvents(null, false));
+    await act(drain);
+    await act(async () => {
+      killStream();
+      await drain();
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(debugSpy).toHaveBeenCalled();
+
+    // (b) The ordinary reconnect (the probe answered) keeps its warning.
+    warnSpy.mockClear();
+    debugSpy.mockClear();
+    resetEventsForTests();
+    installAuthWire({ probe: () => dormantProbeResponse() });
+    renderHook(() => useEvents(null, false));
+    await act(drain);
+    await act(async () => {
+      killStream();
+      await drain();
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('reconnecting in');
+    expect(debugSpy).not.toHaveBeenCalled();
+  });
+
+  it('#6: the SSE probe and the one-shot probe AGREE on every probe shape', async () => {
+    const shapes: Array<{
+      name: string;
+      probe: () => Response | Promise<Response>;
+      /** the classification the ONE-SHOT probe must report */
+      oneShot: 'dormant' | 'enabled-anonymous' | 'unknown';
+      /** whether the SSE probe may redirect for this shape */
+      redirect: boolean;
+    }> = [
+      { name: '200 dormant body', probe: () => dormantProbeResponse(), oneShot: 'dormant', redirect: false },
+      {
+        name: '401 with the enabled body',
+        probe: () => anonymousProbeResponse(),
+        oneShot: 'enabled-anonymous',
+        redirect: true,
+      },
+      {
+        name: '401 with an unparseable body',
+        probe: () => unparseableProbeResponse(),
+        oneShot: 'unknown',
+        redirect: false,
+      },
+      {
+        name: 'network error',
+        probe: () => Promise.reject(new TypeError('Failed to fetch')),
+        oneShot: 'unknown',
+        redirect: false,
+      },
+    ];
+
+    for (const shape of shapes) {
+      // --- the ONE-SHOT probe (hooks/useAuth) ---
+      authState.resetForTests();
+      installAuthWire({ probe: shape.probe });
+      const oneShot = await authState.probe();
+      const oneShotClass =
+        oneShot === null ? 'unknown' : oneShot.enabled ? 'enabled-anonymous' : 'dormant';
+
+      // --- the SSE probe (hooks/useEvents) ---
+      resetEventsForTests();
+      resetAuthRedirectLatch();
+      authState.resetForTests();
+      assignSpy.mockClear();
+      installAuthWire({ probe: shape.probe });
+      renderHook(() => useEvents(null, false));
+      await act(drain);
+      await act(async () => {
+        killStream();
+        await drain();
+      });
+      const sseRedirected = assignSpy.mock.calls.length > 0;
+
+      expect(oneShotClass, `one-shot probe — ${shape.name}`).toBe(shape.oneShot);
+      expect(sseRedirected, `SSE probe — ${shape.name}`).toBe(shape.redirect);
+      // The two probes must not diverge: the SSE probe redirects IFF the
+      // one-shot probe answers "enabled + anonymous".
+      expect(sseRedirected).toBe(oneShot !== null && oneShot.enabled && !oneShot.authenticated);
+    }
   });
 });

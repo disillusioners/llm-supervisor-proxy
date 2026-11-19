@@ -5,6 +5,11 @@
 // dormant mode, and the edge-world one-shot reload (AR-43) firing only
 // after the identity probe resolved enabled:true (B2).
 //
+// The identity-probe responses come from the ONE canonical mock helper
+// (./authProbeMocks — tester item R5): the enabled+anonymous shape is
+// answered with HTTP 401 + a body carrying `enabled:true` (the backend
+// contract, plan §5.8), never with a 200.
+//
 // NOTE: this file deliberately avoids literal channel-name spellings
 // (the wrapped global, SSE class names, etc.) — the AR-60 census scan
 // must stay clean outside the guarded production modules.
@@ -18,30 +23,16 @@ import {
   looksLikeCrossOriginRejection,
 } from '../apiFetch';
 import { authState } from '../../hooks/useAuth';
+import {
+  anonymousProbeResponse,
+  dormantProbeResponse,
+  hangingProbeResponse,
+  installAuthWire,
+  jsonResponse,
+  probeCallCount,
+} from './authProbeMocks';
 
 const realFetch = globalThis.fetch;
-
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-/** A request that never resolves on its own but rejects when aborted. */
-function hangUntilAborted(init?: RequestInit): Promise<Response> {
-  return new Promise<Response>((_resolve, reject) => {
-    const signal = init?.signal;
-    if (signal) {
-      signal.addEventListener('abort', () =>
-        reject(new DOMException('The operation was aborted.', 'AbortError')),
-      );
-    }
-  });
-}
-
-const probeEnabledTrue = () => jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 });
-const probeDormant = () => jsonResponse({ enabled: false, authenticated: false, state_store_count: 0 });
 
 describe('apiFetch — the guarded 401 choke point', () => {
   let assignSpy: ReturnType<typeof vi.spyOn>;
@@ -63,26 +54,6 @@ describe('apiFetch — the guarded 401 choke point', () => {
     authState.resetForTests();
   });
 
-  /** Install a wire stub answering by URL; returns the mock for call assertions. */
-  function installWire(handlers: {
-    probe?: (init?: RequestInit) => Response | Promise<Response>;
-    target?: (init?: RequestInit) => Response | Promise<Response>;
-    throwing?: (input: RequestInfo | URL, init?: RequestInit) => never;
-  }) {
-    const wire = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) {
-        if (!handlers.probe) throw new Error('unexpected probe request');
-        return handlers.probe(init);
-      }
-      if (handlers.throwing) return handlers.throwing(input, init);
-      if (!handlers.target) throw new Error('unexpected target request');
-      return handlers.target(init);
-    });
-    (globalThis as { fetch: typeof fetch }).fetch = wire as unknown as typeof fetch;
-    return wire;
-  }
-
   it('exports isAuthProbe and the rejection classifier', () => {
     expect(isAuthProbe('/fe/api/auth/me')).toBe(true);
     expect(isAuthProbe('/fe/api/models')).toBe(false);
@@ -91,9 +62,10 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('T1: probe 401 WITH real body then /fe/api/models 401 => exactly ONE redirect (E2E)', async () => {
-    const probe401Real = () =>
-      jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 3 }, 401);
-    const wire = installWire({ probe: () => probe401Real(), target: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+    const wire = installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
 
     const res = await guardedFetch('/fe/api/models');
     expect(res.status).toBe(401);
@@ -103,7 +75,7 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('T3: probe 401 with UNPARSEABLE body => no redirect, not cached false, next 401 re-probes (AR-16)', async () => {
-    const wire = installWire({
+    const wire = installAuthWire({
       probe: () => new Response('not json', { status: 401, headers: { 'Content-Type': 'text/html' } }),
       target: () => jsonResponse({ error: 'unauthenticated' }, 401),
     });
@@ -112,24 +84,22 @@ describe('apiFetch — the guarded 401 choke point', () => {
     await pending;
     expect(assignSpy).not.toHaveBeenCalled();
     expect(authState.isEnabledResolved()).toBe(false);
-    const probeCallsAfterFirst = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCallsAfterFirst).toBe(1);
+    expect(probeCallCount(wire)).toBe(1);
 
     // next 401 re-probes
     wire.mockImplementation(async (input: RequestInfo | URL): Promise<Response> => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 });
+      if (url.includes('/fe/api/auth/me')) return anonymousProbeResponse();
       return jsonResponse({ error: 'unauthenticated' }, 401);
     });
 
     await guardedFetch('/fe/api/models');
     expect(assignSpy).toHaveBeenCalledTimes(1);
-    const probeCallsAfterSecond = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCallsAfterSecond).toBe(2);
+    expect(probeCallCount(wire)).toBe(2);
   });
 
   it('the auth probe itself never redirects (guarded 401 on /fe/api/auth/me)', async () => {
-    installWire({ probe: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+    installAuthWire({ probe: () => jsonResponse({ error: 'unauthenticated' }, 401) });
 
     const res = await guardedFetch('/fe/api/auth/me');
     expect(res.status).toBe(401);
@@ -139,14 +109,20 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('NO redirect when the probe resolved enabled === false (dormant mode)', async () => {
-    installWire({ probe: () => probeDormant(), target: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+    installAuthWire({
+      probe: () => dormantProbeResponse(),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
 
     await guardedFetch('/fe/api/models');
     expect(assignSpy).not.toHaveBeenCalled();
   });
 
   it('the latch blocks a second redirect within the cooldown and RE-ARMS after it (AR-42)', async () => {
-    installWire({ probe: () => probeEnabledTrue(), target: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+    installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
 
     await guardedFetch('/fe/api/models');
     expect(assignSpy).toHaveBeenCalledTimes(1);
@@ -171,7 +147,10 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('a cross-origin rejection (TypeError) triggers exactly ONE reload — only after the probe resolved enabled:true (AR-43/B2)', async () => {
-    const wire = installWire({ probe: () => probeEnabledTrue(), throwing: () => { throw new TypeError('Failed to fetch'); } });
+    const wire = installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      throwing: () => { throw new TypeError('Failed to fetch'); },
+    });
 
     // Before the probe resolves: a TypeError is a plain error, never a reload.
     await expect(guardedFetch('/fe/api/models')).rejects.toBeInstanceOf(TypeError);
@@ -185,7 +164,10 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('the reload is GET-only: a POST rejection never reloads', async () => {
-    installWire({ probe: () => probeEnabledTrue(), throwing: () => { throw new TypeError('Failed to fetch'); } });
+    installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      throwing: () => { throw new TypeError('Failed to fetch'); },
+    });
 
     await authState.isEnabled();
     await expect(guardedFetch('/fe/api/tokens', { method: 'POST' })).rejects.toBeInstanceOf(TypeError);
@@ -193,7 +175,10 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('reloadOnce fires at most once per page load', async () => {
-    installWire({ probe: () => probeEnabledTrue(), throwing: () => { throw new TypeError('Failed to fetch'); } });
+    installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      throwing: () => { throw new TypeError('Failed to fetch'); },
+    });
 
     await authState.isEnabled();
     await expect(guardedFetch('/fe/api/models')).rejects.toBeInstanceOf(TypeError);
@@ -202,7 +187,10 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('in dormant mode a TypeError never reloads (B2 — probe resolved enabled:false)', async () => {
-    installWire({ probe: () => probeDormant(), throwing: () => { throw new TypeError('Failed to fetch'); } });
+    installAuthWire({
+      probe: () => dormantProbeResponse(),
+      throwing: () => { throw new TypeError('Failed to fetch'); },
+    });
 
     await authState.isEnabled();
     await expect(guardedFetch('/fe/api/models')).rejects.toBeInstanceOf(TypeError);
@@ -210,8 +198,8 @@ describe('apiFetch — the guarded 401 choke point', () => {
   });
 
   it('a probe timeout does NOT cache false — the next 401 re-probes (AR-16)', async () => {
-    const wire = installWire({
-      probe: (init) => hangUntilAborted(init),
+    const wire = installAuthWire({
+      probe: (init) => hangingProbeResponse(init),
       target: () => jsonResponse({ error: 'unauthenticated' }, 401),
     });
 
@@ -221,19 +209,33 @@ describe('apiFetch — the guarded 401 choke point', () => {
     await pending;
     expect(assignSpy).not.toHaveBeenCalled();
     expect(authState.isEnabledResolved()).toBe(false);
-    const probeCallsAfterTimeout = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCallsAfterTimeout).toBe(1);
+    expect(probeCallCount(wire)).toBe(1);
 
     // A working probe replaces the hanging one: the SECOND 401 must re-probe (not reuse the timeout).
     wire.mockImplementation(async (input: RequestInfo | URL): Promise<Response> => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return probeEnabledTrue();
+      if (url.includes('/fe/api/auth/me')) return anonymousProbeResponse();
       return jsonResponse({ error: 'unauthenticated' }, 401);
     });
 
     await guardedFetch('/fe/api/models');
     expect(assignSpy).toHaveBeenCalledTimes(1);
-    const probeCallsAfterReprobe = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCallsAfterReprobe).toBe(2); // re-probed — the timeout was not cached
+    expect(probeCallCount(wire)).toBe(2); // re-probed — the timeout was not cached
+  });
+
+  it('#11b: a REJECTED probe is UNKNOWN — no redirect, no unhandled rejection', async () => {
+    installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
+    // The shared probe promise rejects (a hard failure inside the probe
+    // machinery). The guard must swallow it into the UNKNOWN path — the
+    // awaited resolution must not reject and must never redirect.
+    vi.spyOn(authState, 'isEnabled').mockRejectedValue(new Error('probe exploded'));
+
+    const res = await guardedFetch('/fe/api/models');
+    expect(res.status).toBe(401);
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(reloadSpy).not.toHaveBeenCalled();
   });
 });

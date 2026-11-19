@@ -44,6 +44,16 @@ const SSE_NAME = 'Event' + 'Source';
 const GUARD_FILE = 'src/utils/apiFetch.ts';
 const PROBE_HOOK_FILE = 'src/hooks/useAuth.ts';
 const STREAM_FILE = 'src/hooks/useEvents.ts';
+// The SHARED probe-parse module (utils/authProbe): it interprets the
+// probe body for BOTH probe call sites, but it never performs a request
+// itself — the census pins that.
+const PARSE_FILE = 'src/utils/authProbe.ts';
+
+// The probe request is spelled either as the literal path or as the
+// shared AUTH_ME_PATH constant (utils/authProbe) — both are the probe.
+function isProbeHit(text: string): boolean {
+  return text.includes('/fe/api/auth/me') || text.includes('AUTH_ME_PATH');
+}
 
 interface Hit {
   file: string;
@@ -101,10 +111,15 @@ describe('AR-60 client-channel census', () => {
     expect(hits[0].text).toContain('await');
   });
 
+  it('the shared probe-parse module performs NO client request (it parses, it never calls)', () => {
+    const hits = census().filter((h) => h.file === PARSE_FILE);
+    expect(hits).toEqual([]);
+  });
+
   it('the stream module: exactly ONE constructor + exactly ONE probe request; every hit is one of those two classes', () => {
     const hits = census().filter((h) => h.file === STREAM_FILE);
     const ctorHits = hits.filter((h) => h.text.includes('new ' + SSE_NAME));
-    const probeHits = hits.filter((h) => h.text.includes('/fe/api/auth/me'));
+    const probeHits = hits.filter((h) => isProbeHit(h.text));
     expect(ctorHits.length).toBe(1);
     expect(probeHits.length).toBe(1);
     // Every remaining hit must be a bare class-name reference (state

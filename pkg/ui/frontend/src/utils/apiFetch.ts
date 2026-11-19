@@ -34,31 +34,6 @@ import {
   incrementRedirectHopCount,
 } from './redirectStorm';
 
-// S10 re-export: the breaker API stays reachable from the guard module
-// (the single choke point) without a second import path for consumers.
-export {
-  REDIRECT_STORM_THRESHOLD,
-  REDIRECT_STORM_MAX_HOPS,
-  MAX_REDIRECT_HOPS,
-  getRedirectHopCount,
-  redirectHopCount,
-  isRedirectStormTripped,
-  redirectStormTripped,
-  incrementRedirectHopCount,
-  resetRedirectStormBreaker,
-  resetRedirectHopCounter,
-  resetRedirectHopCount,
-  resetRedirectCounter,
-  resetStormBreaker,
-  resetBreaker,
-  clearRedirectStormBreaker,
-  clearRedirectHopCounter,
-  showRedirectStormError,
-  removeRedirectStormError,
-  redirectStormErrorVisible,
-  redirectStormStorageKey,
-} from './redirectStorm';
-
 const LOGIN_PATH = '/oauth2/start';
 const LATCH_COOLDOWN_MS = 8000; // AR-42: the latch re-arms after a cooldown
 let redirectInitiated = false;
@@ -110,6 +85,22 @@ export function looksLikeCrossOriginRejection(err: unknown): boolean {
 }
 
 /**
+ * Resolve the internal-mode flag for the 401 path.
+ *
+ * #11b: a REJECTED probe is UNKNOWN (AR-16) — it must never become an
+ * unhandled rejection and never a redirect. The resolution is awaited
+ * inside a try/catch, so a probe that rejects degrades to "not
+ * enabled" exactly like a timeout does.
+ */
+async function resolveEnabled(): Promise<boolean> {
+  try {
+    return await authState.isEnabled();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The shared one-shot login navigation. The fetch 401 path and the SSE
  * auth break (useEvents) share this latch — a separate latch would
  * allow a double navigation (AR-15).
@@ -152,8 +143,9 @@ export async function guardedFetch(input: RequestInfo | URL, init?: RequestInit)
     // Only redirect when the INTERNAL oauth2 mode is active; in dormant
     // mode a 401 can only come from an upstream ingress and a redirect
     // to /oauth2/start would 404. isEnabled() resolves the pending probe
-    // (bounded 3 s; a timeout resolves false and is never cached).
-    const enabled = await authState.isEnabled(); // resolves the pending probe
+    // (bounded 3 s; a timeout resolves false and is never cached); a
+    // REJECTED probe resolves false as well (#11b — the UNKNOWN path).
+    const enabled = await resolveEnabled();
     if (enabled) redirectToLogin();
   }
   return res;

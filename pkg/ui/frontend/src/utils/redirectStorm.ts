@@ -28,17 +28,21 @@
 //     8000 ms cooldown + re-arm, the probe exemption, the AR-43
 //     one-shot reload, and the D13/AR-15 SSE loop break all stay.
 //
+// Storage failures (privacy mode, a disabled storage partition, a
+// quota-exceeded write) DEGRADE TO A NO-OP: the counter simply stops
+// advancing, the login path never throws, and the tab is unprotected
+// rather than broken (tidier item #11a).
+//
 // NOTE: this module deliberately avoids raw channel spellings — the
 // AR-60 census must stay clean outside the guarded modules.
 
 /** The hop threshold: after 3 initiated hops the 4th attempt is suppressed. */
 export const REDIRECT_STORM_THRESHOLD = 3;
-export const REDIRECT_STORM_MAX_HOPS = REDIRECT_STORM_THRESHOLD;
-export const MAX_REDIRECT_HOPS = REDIRECT_STORM_THRESHOLD;
 
 // The storage key. Every plausible spelling is kept in lock-step so the
 // counter reads back identically regardless of which key a caller (or a
-// test) probes; the primary key is the first entry.
+// test) probes; the primary key is the first entry and the only one the
+// module publishes (the rest are internal compatibility spellings).
 const HOP_COUNT_KEYS: readonly string[] = [
   'oauth2-redirect-hops',
   'oauth2_redirect_hops',
@@ -49,7 +53,9 @@ const HOP_COUNT_KEYS: readonly string[] = [
   'auth-redirect-hops',
   'login-redirect-hops',
 ];
-const PRIMARY_HOP_KEY = HOP_COUNT_KEYS[0];
+
+/** The canonical storage key of the per-tab hop counter (tests read it). */
+export const REDIRECT_STORM_STORAGE_KEY = HOP_COUNT_KEYS[0];
 
 /** sessionStorage can throw (privacy mode / disabled storage) — degrade to a no-op breaker. */
 function store(): Storage | null {
@@ -61,12 +67,43 @@ function store(): Storage | null {
   }
 }
 
+/** A single storage READ can throw (privacy mode / disabled storage) — degrade. */
+function safeGetItem(s: Storage, key: string): string | null {
+  let raw: string | null = null;
+  try {
+    raw = s.getItem(key);
+  } catch {
+    // Treated as "absent" — the counter degrades to a no-op.
+    return null;
+  }
+  return raw;
+}
+
+/** A single storage WRITE can throw (privacy mode / quota) — degrade. */
+function safeSetItem(s: Storage, key: string, value: string): void {
+  try {
+    s.setItem(key, value);
+  } catch {
+    // The breaker degrades to a no-op: the counter stops advancing and
+    // the login path never throws.
+  }
+}
+
+/** A single storage REMOVE can throw (privacy mode / disabled storage) — degrade. */
+function safeRemoveItem(s: Storage, key: string): void {
+  try {
+    s.removeItem(key);
+  } catch {
+    // Degrades to a no-op: the counter may stay stale, the path never throws.
+  }
+}
+
 function readHopCount(): number {
   const s = store();
   if (s === null) return 0;
   let max = 0;
   for (const key of HOP_COUNT_KEYS) {
-    const raw = s.getItem(key);
+    const raw = safeGetItem(s, key);
     if (raw === null) continue;
     const n = Number.parseInt(raw, 10);
     if (!Number.isNaN(n) && n > max) max = n;
@@ -78,23 +115,21 @@ function writeHopCount(n: number): void {
   const s = store();
   if (s === null) return;
   const value = String(n);
-  for (const key of HOP_COUNT_KEYS) s.setItem(key, value);
+  for (const key of HOP_COUNT_KEYS) {
+    // Guarded: a storage-disabled / privacy-mode tab THROWS on setItem,
+    // and an unguarded throw here would break the login path itself.
+    safeSetItem(s, key, value);
+  }
 }
 
 /** Current hop count for this tab (0 when storage is unavailable). */
 export function getRedirectHopCount(): number {
   return readHopCount();
 }
-export function redirectHopCount(): number {
-  return readHopCount();
-}
 
 /** True once the tab has burned the threshold hops — redirects are aborted. */
 export function isRedirectStormTripped(): boolean {
   return readHopCount() >= REDIRECT_STORM_THRESHOLD;
-}
-export function redirectStormTripped(): boolean {
-  return isRedirectStormTripped();
 }
 
 /** Record one initiated login hop; returns the new count. */
@@ -112,17 +147,14 @@ export function incrementRedirectHopCount(): number {
 export function resetRedirectStormBreaker(): void {
   const s = store();
   if (s !== null) {
-    for (const key of HOP_COUNT_KEYS) s.removeItem(key);
+    for (const key of HOP_COUNT_KEYS) {
+      // Guarded for the same reason as the write: a throwing removeItem
+      // must never break the "the login succeeded" path.
+      safeRemoveItem(s, key);
+    }
   }
   removeRedirectStormError();
 }
-export const resetRedirectHopCounter = resetRedirectStormBreaker;
-export const resetRedirectHopCount = resetRedirectStormBreaker;
-export const resetRedirectCounter = resetRedirectStormBreaker;
-export const resetStormBreaker = resetRedirectStormBreaker;
-export const resetBreaker = resetRedirectStormBreaker;
-export const clearRedirectStormBreaker = resetRedirectStormBreaker;
-export const clearRedirectHopCounter = resetRedirectStormBreaker;
 
 const ERROR_ELEMENT_ID = 'redirect-storm-breaker-error';
 
@@ -165,7 +197,7 @@ export function showRedirectStormError(): void {
   (document.body ?? document.documentElement).appendChild(host);
 }
 
-export function removeRedirectStormError(): void {
+function removeRedirectStormError(): void {
   if (typeof document === 'undefined') return;
   document.getElementById(ERROR_ELEMENT_ID)?.remove();
 }
@@ -174,9 +206,4 @@ export function removeRedirectStormError(): void {
 export function redirectStormErrorVisible(): boolean {
   if (typeof document === 'undefined') return false;
   return document.getElementById(ERROR_ELEMENT_ID) !== null;
-}
-
-/** The storage key the counter lives under (inspection/tests). */
-export function redirectStormStorageKey(): string {
-  return PRIMARY_HOP_KEY;
 }

@@ -6,6 +6,11 @@
 // the in-flight / resolved probe so non-hook code (the fetch guard in
 // utils/apiFetch) can read the resolved mode without prop-drilling.
 //
+// The probe BODY contract, the endpoint path, the timeout budget and the
+// 401-body interpretation live in utils/authProbe — the ONE shared probe
+// module (tidier item #6). The SSE probe (hooks/useEvents) parses
+// through the same helper, so the two probes cannot drift apart.
+//
 // Backend contract (plan §5.8, pinned — do NOT change here):
 //   dormant              {"enabled":false,"authenticated":false,"state_store_count":0}
 //   enabled + anonymous  {"enabled":true,"authenticated":false,"state_store_count":N}
@@ -14,19 +19,12 @@
 // `user.name || user.email || user.sub` (AR-33/AR-62).
 import { useEffect, useState } from 'preact/hooks';
 import { resetRedirectStormBreaker } from '../utils/redirectStorm';
+import { AUTH_ME_PATH, AUTH_PROBE_TIMEOUT_MS, parseAuthProbeResponse } from '../utils/authProbe';
+import type { AuthProbeBody as AuthMeResponse, AuthProbeUser as AuthUser } from '../utils/authProbe';
 
-export interface AuthUser {
-  sub: string;
-  email?: string;
-  name?: string;
-}
-
-export interface AuthMeResponse {
-  enabled: boolean;
-  authenticated: boolean;
-  user?: AuthUser;
-  state_store_count: number;
-}
+// The canonical shapes live in utils/authProbe; they are re-published
+// here under their historical names so no consumer has to change.
+export type { AuthMeResponse, AuthUser };
 
 export interface UseAuthState {
   enabled: boolean;
@@ -37,12 +35,9 @@ export interface UseAuthState {
   error: string | null;
 }
 
-const AUTH_ME_PATH = '/fe/api/auth/me';
-export const AUTH_PROBE_TIMEOUT_MS = 3000;
-
 // The shared probe promise. Explicit answers are cached; UNKNOWN
-// outcomes (timeout / network failure) null it so the next probe
-// re-fetches (AR-16).
+// outcomes (timeout / network failure / rejection) null it so the next
+// probe re-fetches (AR-16).
 let authMePromise: Promise<AuthMeResponse | null> | null = null;
 // The explicitly-resolved enabled flag. null means UNKNOWN — never a
 // timeout. This is the gate behind isEnabledResolved() (B2).
@@ -59,35 +54,20 @@ async function probeAuthMe(): Promise<AuthMeResponse | null> {
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
     });
-    // 200 -> an explicit answer in BOTH dormant and enabled+session
-    // shapes. Parse and return it verbatim.
-    if (res.status === 200) {
-      const body = (await res.json()) as AuthMeResponse;
-      return body;
+    // The ONE shared body interpretation (utils/authProbe):
+    //   - 200 -> the dormant / signed-in shape;
+    //   - 401 -> the enabled+anonymous shape (the body carries enabled:true);
+    //   - any other status -> the internal mode is NOT in charge
+    //     (a 404 from an older binary, a 5xx): an EXPLICIT answer that
+    //     is never a redirect target;
+    //   - an unparseable body, or one without a boolean `enabled` ->
+    //     UNKNOWN (null), never {enabled:false} (AR-16).
+    const outcome = await parseAuthProbeResponse(res);
+    if (outcome.kind === 'answer') return outcome.body;
+    if (outcome.kind === 'not-in-charge') {
+      return { enabled: false, authenticated: false, state_store_count: 0 };
     }
-    // 401 -> the enabled+anonymous shape (plan §5.8): the body carries
-    // enabled:true. Attempt to parse; if it carries a boolean `enabled`,
-    // return it as an EXPLICIT answer (this is how the FE learns that
-    // internal mode is active). If the body is missing, not JSON, or
-    // has no boolean `enabled` (e.g. an EXTERNAL ingress 401 with an
-    // HTML body), return null = UNKNOWN — never {enabled:false}, and
-    // never cache a false (AR-16): the next probe re-fetches.
-    if (res.status === 401) {
-      try {
-        const body = (await res.json()) as { enabled?: unknown };
-        if (body && typeof body === 'object' && typeof body.enabled === 'boolean') {
-          return body as AuthMeResponse;
-        }
-      } catch {
-        // unparseable body — fall through to UNKNOWN
-      }
-      return null;
-    }
-    // Any other non-ok status (404 from an older binary, 5xx) is an
-    // EXPLICIT answer that the internal mode is not in charge:
-    // enabled=false, never a redirect target. The probe itself never
-    // redirects (the guard exempts it).
-    return { enabled: false, authenticated: false, state_store_count: 0 };
+    return null;
   } catch {
     // Abort (timeout) or network failure: the state stays UNKNOWN
     // (AR-16) — null is never cached as an answer and never renders
@@ -99,21 +79,28 @@ async function probeAuthMe(): Promise<AuthMeResponse | null> {
 }
 
 function startProbe(): Promise<AuthMeResponse | null> {
-  return probeAuthMe().then((res) => {
-    if (res !== null) {
-      resolvedEnabled = res.enabled;
-      // S10: a legitimately completed redirect cycle clears the storm
-      // breaker — an authenticated probe means the login flow SUCCEEDED,
-      // so the per-tab hop counter starts fresh for any future session
-      // expiry. Dormant / anonymous / UNKNOWN answers never touch it.
-      if (res.authenticated === true) resetRedirectStormBreaker();
-    } else {
-      // AR-16: a timeout/failure is never cached — the next probe
-      // (e.g. the next 401-driven isEnabled()) re-fetches.
+  return probeAuthMe()
+    .then((res) => {
+      if (res !== null) {
+        resolvedEnabled = res.enabled;
+        // S10: a legitimately completed redirect cycle clears the storm
+        // breaker — an authenticated probe means the login flow SUCCEEDED,
+        // so the per-tab hop counter starts fresh for any future session
+        // expiry. Dormant / anonymous / UNKNOWN answers never touch it.
+        if (res.authenticated === true) resetRedirectStormBreaker();
+      } else {
+        // AR-16: a timeout/failure is never cached — the next probe
+        // (e.g. the next 401-driven isEnabled()) re-fetches.
+        authMePromise = null;
+      }
+      return res;
+    })
+    .catch(() => {
+      // #11b: the shared probe promise NEVER rejects — a rejection is
+      // UNKNOWN (AR-16): not cached, and never an unhandled rejection.
       authMePromise = null;
-    }
-    return res;
-  });
+      return null;
+    });
 }
 
 export const authState = {
@@ -141,13 +128,6 @@ export const authState = {
   /** Publish an explicit mode answer (called by the hook once the probe resolves). */
   setEnabled(enabled: boolean): void {
     resolvedEnabled = enabled;
-  },
-  /**
-   * S10: clear the redirect-storm breaker (counter + banner) — also
-   * reachable directly by consumers/tests that complete a login cycle.
-   */
-  clearRedirectHopCounter(): void {
-    resetRedirectStormBreaker();
   },
   /** Test hook — resets the module store to the never-probed state. */
   resetForTests(): void {
@@ -180,25 +160,38 @@ export function useAuth(): UseAuthState {
 
   useEffect(() => {
     let cancelled = false;
-    authState.probe().then((res) => {
+    // #11b: the probe rejection is handled EXPLICITLY — a rejected
+    // probe follows the UNKNOWN path (the same state a timeout
+    // produces), and never escapes as an unhandled rejection.
+    const applyUnknown = () => {
       if (cancelled) return;
-      if (res === null) {
-        // AR-16: a timed-out / failed probe leaves the state UNKNOWN —
-        // rendered as not-signed-in (badge hidden, never "signed out"
-        // as a truth), with the error field carrying the reason.
-        setState({ ...INITIAL, loading: false, error: 'auth probe timed out or failed' });
-        return;
-      }
-      authState.setEnabled(res.enabled);
-      setState({
-        enabled: res.enabled,
-        authenticated: res.authenticated,
-        user: res.user ?? null,
-        stateStoreCount: res.state_store_count,
-        loading: false,
-        error: null,
-      });
-    });
+      // AR-16: a timed-out / failed probe leaves the state UNKNOWN —
+      // rendered as not-signed-in (badge hidden, never "signed out"
+      // as a truth), with the error field carrying the reason.
+      setState({ ...INITIAL, loading: false, error: 'auth probe timed out or failed' });
+    };
+    authState.probe().then(
+      (res) => {
+        if (cancelled) return;
+        if (res === null) {
+          applyUnknown();
+          return;
+        }
+        authState.setEnabled(res.enabled);
+        setState({
+          enabled: res.enabled,
+          authenticated: res.authenticated,
+          user: res.user ?? null,
+          stateStoreCount: res.state_store_count,
+          loading: false,
+          error: null,
+        });
+      },
+      () => {
+        // A rejected probe — the UNKNOWN path (see above).
+        applyUnknown();
+      },
+    );
     return () => {
       cancelled = true;
     };

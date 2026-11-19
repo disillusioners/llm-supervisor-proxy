@@ -6,31 +6,26 @@
 // the state UNKNOWN (never a cached "signed out"), so the next probe
 // re-fetches.
 //
+// The identity-probe responses come from the ONE canonical mock helper
+// (utils/__tests__/authProbeMocks — tester item R5): the
+// enabled+anonymous shape is answered with HTTP 401 + a body carrying
+// `enabled:true` (the backend contract, plan §5.8), never with a 200.
+//
 // NOTE: channel-name spellings are deliberately avoided in this file —
 // the AR-60 census must stay clean outside the guarded modules.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/preact';
 import { useAuth, authState } from '../useAuth';
+import {
+  anonymousProbeResponse,
+  authenticatedProbeResponse,
+  hangingProbeResponse,
+  installAuthWire,
+  probeCallCount,
+  unparseableProbeResponse,
+} from '../../utils/__tests__/authProbeMocks';
 
 const realFetch = globalThis.fetch;
-
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-function hangUntilAborted(init?: RequestInit): Promise<Response> {
-  return new Promise<Response>((_resolve, reject) => {
-    const signal = init?.signal;
-    if (signal) {
-      signal.addEventListener('abort', () =>
-        reject(new DOMException('The operation was aborted.', 'AbortError')),
-      );
-    }
-  });
-}
 
 /**
  * Drain the probe's promise chain: fetch wire -> body parse -> then ->
@@ -59,28 +54,15 @@ describe('useAuth — the one-shot identity probe', () => {
     authState.resetForTests();
   });
 
-  function installWire(handlers: { probe: (init?: RequestInit) => Response | Promise<Response> }) {
-    const wire = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return handlers.probe(init);
-      throw new Error(`unexpected request: ${url}`);
-    });
-    (globalThis as { fetch: typeof fetch }).fetch = wire as unknown as typeof fetch;
-    return wire;
-  }
-
   it('probes exactly once across multiple mounts (module-level shared probe)', async () => {
-    const wire = installWire({
-      probe: () => jsonResponse({ enabled: true, authenticated: true, user: { sub: 's1' }, state_store_count: 3 }),
-    });
+    const wire = installAuthWire({ probe: () => authenticatedProbeResponse() });
 
     const first = renderHook(() => useAuth());
     const second = renderHook(() => useAuth());
     await act(drain);
 
     expect(wire).toHaveBeenCalledTimes(1);
-    const calls = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me'));
-    expect(calls.length).toBe(1);
+    expect(probeCallCount(wire)).toBe(1);
     expect(first.result.current.loading).toBe(false);
     expect(second.result.current.loading).toBe(false);
     first.unmount();
@@ -88,15 +70,7 @@ describe('useAuth — the one-shot identity probe', () => {
   });
 
   it('maps the §5.8 contract shape (enabled/authenticated/user/state_store_count)', async () => {
-    installWire({
-      probe: () =>
-        jsonResponse({
-          enabled: true,
-          authenticated: true,
-          user: { sub: 'sub-1', email: 'op@example.com', name: 'Operator' },
-          state_store_count: 7,
-        }),
-    });
+    installAuthWire({ probe: () => authenticatedProbeResponse() });
 
     const { result } = renderHook(() => useAuth());
     expect(result.current.loading).toBe(true);
@@ -106,17 +80,14 @@ describe('useAuth — the one-shot identity probe', () => {
       enabled: true,
       authenticated: true,
       user: { sub: 'sub-1', email: 'op@example.com', name: 'Operator' },
-      stateStoreCount: 7,
+      stateStoreCount: 2,
       loading: false,
       error: null,
     });
   });
 
   it('a 401 probe with the real body reports enabled:true (T4)', async () => {
-    installWire({
-      probe: () =>
-        jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 3 }, 401),
-    });
+    installAuthWire({ probe: () => anonymousProbeResponse() });
 
     const { result } = renderHook(() => useAuth());
     await act(drain);
@@ -124,16 +95,14 @@ describe('useAuth — the one-shot identity probe', () => {
     expect(result.current.enabled).toBe(true);
     expect(result.current.authenticated).toBe(false);
     expect(result.current.user).toBeNull();
-    expect(result.current.stateStoreCount).toBe(3);
+    expect(result.current.stateStoreCount).toBe(1);
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
     expect(assignSpy).not.toHaveBeenCalled();
   });
 
   it('a 401 probe with an unparseable body leaves state UNKNOWN (T5, AR-16)', async () => {
-    const wire = installWire({
-      probe: () => new Response('not json', { status: 401, headers: { 'Content-Type': 'text/html' } }),
-    });
+    const wire = installAuthWire({ probe: () => unparseableProbeResponse() });
 
     const { result } = renderHook(() => useAuth());
     await act(drain);
@@ -143,18 +112,15 @@ describe('useAuth — the one-shot identity probe', () => {
     expect(result.current.error).not.toBeNull();
     expect(authState.isEnabledResolved()).toBe(false);
 
-    wire.mockImplementation(async () =>
-      jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 }),
-    );
+    wire.mockImplementation(async () => anonymousProbeResponse());
     await act(async () => {
       await authState.probe();
     });
-    const probeCalls = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCalls).toBe(2);
+    expect(probeCallCount(wire)).toBe(2);
   });
 
   it('an anonymous probe reports authenticated:false with enabled preserved', async () => {
-    installWire({ probe: () => jsonResponse({ enabled: true, authenticated: false, state_store_count: 2 }) });
+    installAuthWire({ probe: () => anonymousProbeResponse() });
 
     const { result } = renderHook(() => useAuth());
     await act(drain);
@@ -162,11 +128,11 @@ describe('useAuth — the one-shot identity probe', () => {
     expect(result.current.enabled).toBe(true);
     expect(result.current.authenticated).toBe(false);
     expect(result.current.user).toBeNull();
-    expect(result.current.stateStoreCount).toBe(2);
+    expect(result.current.stateStoreCount).toBe(1);
   });
 
   it('a probe TIMEOUT leaves the state UNKNOWN — never a cached false (AR-16)', async () => {
-    const wire = installWire({ probe: (init) => hangUntilAborted(init) });
+    const wire = installAuthWire({ probe: (init) => hangingProbeResponse(init) });
 
     const { result } = renderHook(() => useAuth());
     await act(async () => {
@@ -184,13 +150,34 @@ describe('useAuth — the one-shot identity probe', () => {
     expect(authState.isEnabledResolved()).toBe(false);
 
     // AR-16: the timeout was NOT cached — a fresh probe re-fetches.
-    wire.mockImplementation(async (): Promise<Response> =>
-      jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 }),
-    );
+    wire.mockImplementation(async (): Promise<Response> => anonymousProbeResponse());
     await act(async () => {
       await authState.probe();
     });
-    const probeCalls = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
-    expect(probeCalls).toBe(2);
+    expect(probeCallCount(wire)).toBe(2);
+  });
+
+  it('#11b: a REJECTED probe never escapes as an unhandled rejection — the state stays UNKNOWN', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: Event) => unhandled.push(event);
+    window.addEventListener('unhandledrejection', onUnhandled);
+    // The shared probe promise rejects (a hard failure inside the probe
+    // machinery). The hook handles the rejection EXPLICITLY: the state
+    // follows the UNKNOWN path and nothing is thrown.
+    vi.spyOn(authState, 'probe').mockRejectedValue(new Error('probe exploded'));
+
+    try {
+      const { result } = renderHook(() => useAuth());
+      await act(drain);
+
+      expect(result.current.loading).toBe(false);
+      expect(result.current.enabled).toBe(false);
+      expect(result.current.authenticated).toBe(false);
+      expect(result.current.error).not.toBeNull();
+      expect(authState.isEnabledResolved()).toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener('unhandledrejection', onUnhandled);
+    }
   });
 });
