@@ -44,6 +44,23 @@ function probeAuth(signal: AbortSignal): Promise<{ enabled: boolean; authenticat
   // guard, and a probe failure must reach scheduleReconnect, never a
   // redirect.
   return fetch('/fe/api/auth/me', { signal }).then(async (res) => {
+    // 401 -> the enabled+anonymous shape (plan §5.8): the body carries
+    // enabled:true. Parse it; if it carries a boolean `enabled`, return
+    // it as an explicit answer. Otherwise (missing/unparseable/no
+    // enabled, e.g. an external ingress 401) THROW so the catch arm
+    // runs the existing backoff reconnect (AR-15).
+    if (res.status === 401) {
+      let body: { enabled?: unknown; authenticated?: unknown } | null = null;
+      try {
+        body = (await res.json()) as { enabled?: unknown; authenticated?: unknown };
+      } catch {
+        throw new Error(`auth probe HTTP ${res.status}`);
+      }
+      if (!body || typeof body !== 'object' || typeof body.enabled !== 'boolean') {
+        throw new Error(`auth probe HTTP ${res.status}`);
+      }
+      return { enabled: !!body.enabled, authenticated: !!body.authenticated };
+    }
     if (!res.ok) throw new Error(`auth probe HTTP ${res.status}`);
     const body = (await res.json()) as { enabled?: boolean; authenticated?: boolean };
     return { enabled: !!body.enabled, authenticated: !!body.authenticated };

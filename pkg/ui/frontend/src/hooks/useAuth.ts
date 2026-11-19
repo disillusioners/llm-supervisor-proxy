@@ -58,16 +58,35 @@ async function probeAuthMe(): Promise<AuthMeResponse | null> {
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
     });
-    if (!res.ok) {
-      // The probe answers 200 in all three contract shapes. Any other
-      // status (a 401 from an external ingress, a 404 from an older
-      // binary, a 5xx) is an EXPLICIT answer that the internal mode is
-      // not in charge: enabled=false, never a redirect target. The probe
-      // itself never redirects (the guard exempts it).
-      return { enabled: false, authenticated: false, state_store_count: 0 };
+    // 200 -> an explicit answer in BOTH dormant and enabled+session
+    // shapes. Parse and return it verbatim.
+    if (res.status === 200) {
+      const body = (await res.json()) as AuthMeResponse;
+      return body;
     }
-    const body = (await res.json()) as AuthMeResponse;
-    return body;
+    // 401 -> the enabled+anonymous shape (plan §5.8): the body carries
+    // enabled:true. Attempt to parse; if it carries a boolean `enabled`,
+    // return it as an EXPLICIT answer (this is how the FE learns that
+    // internal mode is active). If the body is missing, not JSON, or
+    // has no boolean `enabled` (e.g. an EXTERNAL ingress 401 with an
+    // HTML body), return null = UNKNOWN — never {enabled:false}, and
+    // never cache a false (AR-16): the next probe re-fetches.
+    if (res.status === 401) {
+      try {
+        const body = (await res.json()) as { enabled?: unknown };
+        if (body && typeof body === 'object' && typeof body.enabled === 'boolean') {
+          return body as AuthMeResponse;
+        }
+      } catch {
+        // unparseable body — fall through to UNKNOWN
+      }
+      return null;
+    }
+    // Any other non-ok status (404 from an older binary, 5xx) is an
+    // EXPLICIT answer that the internal mode is not in charge:
+    // enabled=false, never a redirect target. The probe itself never
+    // redirects (the guard exempts it).
+    return { enabled: false, authenticated: false, state_store_count: 0 };
   } catch {
     // Abort (timeout) or network failure: the state stays UNKNOWN
     // (AR-16) — null is never cached as an answer and never renders

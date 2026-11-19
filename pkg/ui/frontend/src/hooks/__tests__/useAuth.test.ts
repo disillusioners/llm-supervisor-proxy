@@ -112,17 +112,45 @@ describe('useAuth — the one-shot identity probe', () => {
     });
   });
 
-  it('a 401 probe reports authenticated:false WITHOUT redirecting', async () => {
-    installWire({ probe: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+  it('a 401 probe with the real body reports enabled:true (T4)', async () => {
+    installWire({
+      probe: () =>
+        jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 3 }, 401),
+    });
 
     const { result } = renderHook(() => useAuth());
     await act(drain);
 
-    expect(result.current.enabled).toBe(false);
+    expect(result.current.enabled).toBe(true);
     expect(result.current.authenticated).toBe(false);
+    expect(result.current.user).toBeNull();
+    expect(result.current.stateStoreCount).toBe(3);
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
     expect(assignSpy).not.toHaveBeenCalled();
+  });
+
+  it('a 401 probe with an unparseable body leaves state UNKNOWN (T5, AR-16)', async () => {
+    const wire = installWire({
+      probe: () => new Response('not json', { status: 401, headers: { 'Content-Type': 'text/html' } }),
+    });
+
+    const { result } = renderHook(() => useAuth());
+    await act(drain);
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.enabled).toBe(false);
+    expect(result.current.error).not.toBeNull();
+    expect(authState.isEnabledResolved()).toBe(false);
+
+    wire.mockImplementation(async () =>
+      jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 }),
+    );
+    await act(async () => {
+      await authState.probe();
+    });
+    const probeCalls = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
+    expect(probeCalls).toBe(2);
   });
 
   it('an anonymous probe reports authenticated:false with enabled preserved', async () => {

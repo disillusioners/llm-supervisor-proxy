@@ -90,14 +90,42 @@ describe('apiFetch — the guarded 401 choke point', () => {
     expect(looksLikeCrossOriginRejection(new Error('nope'))).toBe(false);
   });
 
-  it('a 401 from /fe/api/* triggers exactly ONE login redirect (probe resolves enabled:true)', async () => {
-    const wire = installWire({ probe: () => probeEnabledTrue(), target: () => jsonResponse({ error: 'unauthenticated' }, 401) });
+  it('T1: probe 401 WITH real body then /fe/api/models 401 => exactly ONE redirect (E2E)', async () => {
+    const probe401Real = () =>
+      jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 3 }, 401);
+    const wire = installWire({ probe: () => probe401Real(), target: () => jsonResponse({ error: 'unauthenticated' }, 401) });
 
     const res = await guardedFetch('/fe/api/models');
-    expect(res.status).toBe(401); // the response is still returned — callers unchanged
+    expect(res.status).toBe(401);
     expect(assignSpy).toHaveBeenCalledTimes(1);
     expect(assignSpy).toHaveBeenCalledWith('/oauth2/start?rd=%2F');
-    expect(wire).toHaveBeenCalledTimes(2); // target + one probe
+    expect(wire).toHaveBeenCalledTimes(2);
+  });
+
+  it('T3: probe 401 with UNPARSEABLE body => no redirect, not cached false, next 401 re-probes (AR-16)', async () => {
+    const wire = installWire({
+      probe: () => new Response('not json', { status: 401, headers: { 'Content-Type': 'text/html' } }),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
+
+    const pending = guardedFetch('/fe/api/models');
+    await pending;
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(authState.isEnabledResolved()).toBe(false);
+    const probeCallsAfterFirst = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
+    expect(probeCallsAfterFirst).toBe(1);
+
+    // next 401 re-probes
+    wire.mockImplementation(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/fe/api/auth/me')) return jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 });
+      return jsonResponse({ error: 'unauthenticated' }, 401);
+    });
+
+    await guardedFetch('/fe/api/models');
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    const probeCallsAfterSecond = wire.mock.calls.filter(([u]) => String(u).includes('/fe/api/auth/me')).length;
+    expect(probeCallsAfterSecond).toBe(2);
   });
 
   it('the auth probe itself never redirects (guarded 401 on /fe/api/auth/me)', async () => {

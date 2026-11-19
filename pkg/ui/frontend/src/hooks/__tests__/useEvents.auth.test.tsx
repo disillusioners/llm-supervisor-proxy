@@ -124,7 +124,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
 
   it('session expired (probe enabled+anonymous): loop STOPS + redirect through the SHARED latch', async () => {
     const wire = installWire({
-      probe: () => jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 }),
+      probe: () => jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, user: null, state_store_count: 1 }, 401),
     });
 
     const { result } = renderHook(() => useEvents(null, false));
@@ -146,7 +146,7 @@ describe('useEvents — the SSE auth break (D13/AR-15)', () => {
     // same latch guardedFetch uses).
     wire.mockImplementation(async (input: RequestInfo | URL): Promise<Response> => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('/fe/api/auth/me')) return jsonResponse({ enabled: true, authenticated: false, state_store_count: 1 });
+      if (url.includes('/fe/api/auth/me')) return jsonResponse({ error: 'unauthenticated', enabled: true, authenticated: false, state_store_count: 1 }, 401);
       return jsonResponse({ error: 'unauthenticated' }, 401);
     });
     await guardedFetch('/fe/api/models');
