@@ -1,3 +1,4 @@
+{{- include "llm-supervisor-proxy.oauth2ModeGuard" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +7,22 @@ metadata:
     {{- include "llm-supervisor-proxy.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- /*
+  AR-11/AR-53: in internal mode the rollout must never straddle two pods —
+  the OIDC state store is IN-MEMORY and PER-POD, so a login started on the
+  old pod would die on the new one (`400 invalid_state`). `Recreate` replaces
+  the pod instead of surging; `rollingUpdate.maxSurge` is a RollingUpdate-only
+  knob (the Kubernetes API rejects `strategy.rollingUpdate` together with
+  `strategy.type: Recreate`), so it is rendered only for RollingUpdate.
+  */}}
+  {{- if .Values.internalOAuth2.enabled }}
+  strategy:
+    type: {{ .Values.internalOAuth2.strategy }}
+    {{- if eq (.Values.internalOAuth2.strategy | toString) "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.internalOAuth2.maxSurge }}
+    {{- end }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-supervisor-proxy.selectorLabels" . | nindent 6 }}
@@ -55,6 +72,47 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- end }}
+            {{- /*
+            In-binary OAuth2 (Phase 1, dormant by default). Rendered ONLY when
+            internalOAuth2.enabled=true. The three secrets are mounted via
+            secretKeyRef ALWAYS (never literals): source
+            internalOAuth2.existingSecret (default oauth2-proxy-secret — the
+            SAME secret the edge uses, reused AS-IS, no regeneration),
+            keys CLIENT_ID / CLIENT_SECRET / COOKIE_SECRET.
+            */}}
+            {{- if .Values.internalOAuth2.enabled }}
+            - name: OAUTH2_ENABLED
+              value: "true"
+            - name: OAUTH2_ISSUER_URL
+              value: {{ .Values.internalOAuth2.issuerURL | quote }}
+            - name: OAUTH2_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.internalOAuth2.existingSecret }}
+                  key: CLIENT_ID
+            - name: OAUTH2_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.internalOAuth2.existingSecret }}
+                  key: CLIENT_SECRET
+            - name: OAUTH2_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.internalOAuth2.existingSecret }}
+                  key: COOKIE_SECRET
+            - name: OAUTH2_EXTERNAL_URL
+              value: {{ .Values.internalOAuth2.externalURL | quote }}
+            - name: OAUTH2_EMAIL_DOMAINS
+              value: {{ .Values.internalOAuth2.emailDomains | quote }}
+            - name: OAUTH2_ALLOW_ANY_EMAIL_DOMAIN
+              value: {{ .Values.internalOAuth2.allowAnyEmailDomain | quote }}
+            - name: OAUTH2_REQUIRE_EMAIL_VERIFIED
+              value: {{ .Values.internalOAuth2.requireEmailVerified | quote }}
+            - name: OAUTH2_ALLOWED_ALGS
+              value: {{ .Values.internalOAuth2.allowedAlgs | quote }}
+            - name: OAUTH2_SESSION_TTL
+              value: {{ .Values.internalOAuth2.sessionTTL | quote }}
             {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}

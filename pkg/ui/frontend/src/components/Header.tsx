@@ -1,6 +1,7 @@
 import { FunctionComponent } from 'preact';
 import { route } from 'preact-router';
 import { useVersion, useRam } from '../hooks/useApi';
+import { useAuth } from '../hooks/useAuth';
 
 // Format bytes to human-readable string (e.g., "45.2 MB" or "1.2 GB")
 function formatRam(mb: number): string {
@@ -13,9 +14,26 @@ function formatRam(mb: number): string {
 const Header: FunctionComponent = () => {
   const { version } = useVersion();
   const { allocMB } = useRam();
+  // internal-oauth2 phase 1 (plan §7.6): the badge and the Sign out
+  // button render ONLY when the internal mode is active AND the session
+  // is authenticated — absent when dormant (an external ingress owns
+  // the login) and absent when anonymous. Shares the module probe, so
+  // this adds no second request beyond App's mount.
+  const { enabled, authenticated, user } = useAuth();
 
   const handleOpenSettings = () => {
     route('/ui/settings');
+  };
+
+  const handleLogout = () => {
+    // AR-36: logout is POST-only (a GET would be 405 / CSRF-able). A
+    // form POST (not a request-channel call) so the browser follows the
+    // server's 302 to the pinned post_logout_redirect_uri.
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/oauth2/logout';
+    document.body.appendChild(form);
+    form.submit();
   };
 
   return (
@@ -49,6 +67,20 @@ const Header: FunctionComponent = () => {
           <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
           <span>System Active</span>
         </div>
+        {enabled && authenticated && user && (
+          <div class="flex items-center space-x-2">
+            <span class="px-2 py-1 bg-gray-700 rounded text-xs text-gray-300" title={user.email || user.sub}>
+              {user.name || user.email || user.sub}
+            </span>
+            <button
+              onClick={handleLogout}
+              class="text-gray-400 hover:text-white transition-colors"
+              title="Sign out"
+            >
+              Sign out
+            </button>
+          </div>
+        )}
         <button
           onClick={handleOpenSettings}
           class="text-gray-400 hover:text-white transition-colors"

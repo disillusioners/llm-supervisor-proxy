@@ -104,3 +104,77 @@ tolerations: []
 
 # Affinity
 affinity: {}
+
+# ── Ingress-layer OAuth2 (oauth2-proxy sidecar) ───────────────────────────
+# DEFAULT: enabled — this is the CURRENT production topology and must
+# keep rendering byte-equivalent manifests when internalOAuth2 is off.
+#
+# AR-21: `enabled` (in-path) is SEPARATE from `replicas` (object
+# existence). The edge is IDLED by scaling it to 0 replicas — the
+# Deployment and Service objects stay RENDERED, because Helm 3 PRUNES
+# release-managed objects that disappear from the render. Pruning the
+# edge would destroy the rollback anchor (OQ-7: "idle, don't delete").
+oauth2Proxy:
+  enabled: true          # in-path: is the edge in the request path? (gates ONLY the ingress wiring — auth annotations + /oauth2 backend)
+  replicas: 1            # object existence / serving count (0 = idled, objects still rendered).
+                         # FALSY-AT-0 WARNING (Helm): a bare `{{if .Values.oauth2Proxy.replicas}}` treats 0 as falsy
+                         # and would silently drop the `replicas:` line — the template MUST test `ne (toString …) "<nil>"`
+                         # (or default-to-1-when-unset) so `replicas: 0` renders. See §8.3 oauth2-proxy-deployment row.
+  image:
+    registry: quay.io
+    repository: oauth2-proxy/oauth2-proxy
+    tag: "v7.6.0"
+  issuerURL: "https://door.daoduc.org"
+  emailDomain: "*"
+  cookieExpire: "24h"
+  existingSecret: "oauth2-proxy-secret"
+
+# ── In-binary OAuth2 (internal, dormant by default) ──────────────────────
+# DEFAULT: disabled. AR-22/ADR-001: the chart renders THREE states —
+#   edge-only    = internalOAuth2.enabled=false          (default; today's render)
+#   overlap      = internalOAuth2.enabled=true  AND oauth2Proxy.enabled=true
+#                  AND internalOAuth2.overlap=true        (edge annotations STAY,
+#                                                           app env renders, /oauth2 -> app)
+#   internal-only= internalOAuth2.enabled=true  AND oauth2Proxy.enabled=false
+#                  AND oauth2Proxy.replicas=0             (annotations drop,
+#                                                           edge objects stay at 0 replicas)
+# The only render-time FAIL is the genuinely contradictory input:
+# internalOAuth2.enabled=true AND oauth2Proxy.enabled=true WITHOUT overlap=true.
+#
+# OQ-1 (planner, 2026-11-19): clientID / clientSecret / cookieSecret are
+# read from internalOAuth2.existingSecret — the SAME oauth2-proxy-secret,
+# reused AS-IS. No dedicated Casdoor client, no console work. A dedicated
+# client later is a config-only change (new values in the same secret).
+internalOAuth2:
+  enabled: false
+  overlap: false         # AR-22: the designed transition state (see above)
+  issuerURL: ""          # e.g. https://door.daoduc.org
+  clientID: ""           # rendered via secretKeyRef when set (AR-17/AR-48)
+  clientSecret: ""       # optional (public client + PKCE); secretKeyRef source
+  cookieSecret: ""       # falls back to the oauth2-proxy secret's COOKIE_SECRET
+  externalURL: ""        # e.g. https://llm.daoduc.org — MANDATORY when enabled (AR-03)
+  emailDomains: ""       # AR-04: an explicit domain list is the intended posture
+  allowAnyEmailDomain: false   # AR-04: `*` requires an explicit true
+  requireEmailVerified: true   # AR-04: strict from Phase 1
+  allowedAlgs: "RS256"   # AR-06: default RS256 (live Casdoor)
+  sessionTTL: "24h"
+  existingSecret: "oauth2-proxy-secret"   # reuse the SAME k8s secret — no regeneration
+
+  # AR-11/AR-53: internal mode MUST run a single replica with Recreate /
+  # maxSurge 0 — the in-memory state store is per-pod. NESTED HERE (not at
+  # the top level) so the default render keeps H6 byte-parity with today's
+  # chart: a top-level `strategy:` would alter the default Deployment spec.
+  #
+  # T15 chart note (maxSurge): `maxSurge` is a RollingUpdate-only knob — the
+  # Kubernetes API REJECTS `strategy.rollingUpdate` when `strategy.type` is
+  # `Recreate` ("may not be specified when strategy type is 'Recreate'"). The
+  # chart therefore renders `rollingUpdate.maxSurge` ONLY when `strategy` is
+  # `RollingUpdate`; with the default `Recreate` the surge is zero BY
+  # CONSTRUCTION (a Recreate rollout never surges — the old pod is gone
+  # before the new one starts).
+  strategy: Recreate
+  maxSurge: 0
+  # T15 chart note (single replica): the app's session/state store is
+  # IN-MEMORY and PER-POD (AR-11/AR-65) — internal mode therefore requires
+  # `replicaCount: 1` (the default). The chart does NOT override
+  # `replicaCount`; enable internal mode only with a single app replica.
