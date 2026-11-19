@@ -55,7 +55,8 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, string, func()) {
 			created_by TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 						ultimate_model TEXT,
-			allowed_models TEXT
+			allowed_models TEXT,
+			allowed_groups TEXT DEFAULT NULL
 		)
 	`
 	if _, err := authDB.Exec(createTable); err != nil {
@@ -67,7 +68,7 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, string, func()) {
 	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
 
 	// Create a test token
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "api-test-token", nil, "api-test", nil)
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "api-test-token", nil, "api-test", auth.FullPermission(nil, nil))
 	if err != nil {
 		authDB.Close()
 		cleanup()
@@ -436,7 +437,7 @@ func TestHandleCreateMCPServer_EmptyName(t *testing.T) {
 		ID:          "test-server",
 		Name:        "",
 		UpstreamURL: "https://api.example.com/mcp",
-		AuthType:   AuthNone,
+		AuthType:    AuthNone,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -456,7 +457,7 @@ func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
 	defer cleanup()
 
 	tests := []struct {
-		name       string
+		name        string
 		upstreamURL string
 	}{
 		{"localhost URL", "http://localhost:8080/mcp"},
@@ -471,7 +472,7 @@ func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
 				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: tt.upstreamURL,
-				AuthType:   AuthNone,
+				AuthType:    AuthNone,
 			}
 			body, _ := json.Marshal(reqBody)
 
@@ -520,7 +521,7 @@ func TestHandleCreateMCPServer_MissingTokenForAuth(t *testing.T) {
 		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
-		AuthType:   AuthBearer,
+		AuthType:    AuthBearer,
 		// AuthToken is missing
 	}
 	body, _ := json.Marshal(reqBody)
@@ -1364,7 +1365,6 @@ func containsTimeoutError(errMsg string) bool {
 		strings.Contains(errMsg, "context deadline exceeded") ||
 		strings.Contains(errMsg, "i/o timeout")
 }
-
 
 func TestHandleDeleteMCPServer_ClosesConnections(t *testing.T) {
 	server, store, _, cleanup := setupAPITestEnv(t)
@@ -2220,5 +2220,3 @@ func TestHandleTestMCPServerDirect_SSEWithBearerAuth(t *testing.T) {
 		t.Errorf("Error should mention content type mismatch, got: %s", resp.Error)
 	}
 }
-
-

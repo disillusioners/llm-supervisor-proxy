@@ -65,6 +65,14 @@ type GroupRewriteResult struct {
 	// set — all stale/disabled/deleted). The caller surfaces the
 	// normal resolve-failure envelope; never a panic.
 	FailedGroupID string
+
+	// ScopeExcluded is true when the group had base-servable members but
+	// EVERY one of them was outside the caller's reach set. It is the
+	// "empty because scope" signal that must surface as 403 access_denied,
+	// never as the 502 group_unservable exhaustion (token-authz plan §9;
+	// ADR D14/I9) — the two empty outcomes have different owners and
+	// different operator actions.
+	ScopeExcluded bool
 }
 
 // Pool constants (group-backup-members / D5): the only two strings
@@ -75,6 +83,35 @@ const (
 	PoolDefault = "default"
 	PoolBackup  = "backup"
 )
+
+// GroupMembershipReader is the OPTIONAL seam a models backend implements
+// to answer "what are the CURRENT member ids of this group" straight
+// from its IN-MEMORY state.
+//
+// WHY THE SEAM EXISTS: the per-request reach resolution needs the
+// group's membership, and the membership must come from the IN-MEMORY
+// snapshot (Ruling 5 — never a live DB read: the raw manager's
+// GetModelNative is a `SELECT … FROM models` issued UNDER m.mu.RLock,
+// which stalls every reader behind the writer-preferring RWMutex).
+//
+// GetModels() would answer the question, but it DEEP-COPIES the whole
+// model set (every row, plus its chain / credential-ref / member
+// slices) on every call — per-request garbage on the hot path for an
+// answer that needs a handful of ids. GroupMembers answers the same
+// question with ONE small allocation (the member-id slice) and no copy
+// of the model set.
+//
+// It is an OPTIONAL seam (the house pattern — precedent:
+// ClearGroupMemberCooldown, groupLaneReader): the ~11 structural test
+// fakes and the JSON backend stay valid without it. A backend without
+// the seam falls back to the deep-copying snapshot (correct, slower).
+type GroupMembershipReader interface {
+	// GroupMembers returns the CURRENT member ids of the group. An
+	// unknown id, a non-group row or a group with no members returns
+	// nil. The returned slice is the caller's to keep; implementations
+	// MUST return a copy (never the cache's own slice).
+	GroupMembers(groupID string) []string
+}
 
 // GroupRewriter is the rewrite + group-level-reselect seam (Am21 +
 // Am24). Implemented by *database.ModelsManager; forwarded by the
@@ -119,4 +156,76 @@ type GroupRewriter interface {
 	// head other than the just-failed member exists; ("", "", false)
 	// otherwise — the caller treats the failure as real.
 	ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (replacement string, pool string, ok bool)
+}
+
+// GroupExcludeOutcome reports WHY the offer walk produced no replacement.
+//
+// It exists because the legacy 3-value ExcludeGroupMember return
+// collapses TWO DIFFERENT FACTS into ok=false:
+//
+//	(a) there is no alternative member AT ALL (single-member group / all
+//	    base-stale) — a genuine AVAILABILITY failure; and
+//	(b) alternatives exist but every one of them is outside the caller's
+//	    reach set — a SCOPE exhaustion.
+//
+// The two have different owners and different operator actions: (a) is a
+// 502 group_unservable, (b) is a 403 access_denied (ADR D14 / I9). The
+// callers must be able to tell them apart AT THE SEAM — never infer it
+// from a downstream guess.
+type GroupExcludeOutcome struct {
+	// Replacement is the offered member id ("" when OK is false).
+	Replacement string
+
+	// Pool is the pool the replacement was drawn from
+	// (models.PoolDefault / models.PoolBackup).
+	Pool string
+
+	// OK is true when a usable, IN-REACH replacement exists.
+	OK bool
+
+	// ScopeOnly is true when the sweep found at least one base-servable
+	// candidate and EVERY one of them was filtered by Reach. It is
+	// false when the group has no servable candidate for AVAILABILITY
+	// reasons (all members disabled / deleted / wrong kind) — the two
+	// arms are mutually exclusive by construction.
+	//
+	// A nil reach (the legacy path) can never produce ScopeOnly=true:
+	// with no reach filter no candidate is ever scope-excluded.
+	ScopeOnly bool
+}
+
+// GroupRewriterScoped is the OPTIONAL SCOPED twin of GroupRewriter.
+//
+// It carries the token's reach set INTO the group pick, so the pick
+// itself is scope-aware: an out-of-reach member is never offered, never
+// picked, and never written to a cooldown (a permission denial is not a
+// health fact — ADR D6 / P6).
+//
+// It is an OPTIONAL seam (the house pattern — precedent:
+// ClearGroupMemberCooldown): the ~11 structural test fakes, the JSON
+// backend and every other GroupRewriter implementation stay valid
+// without it. Backends that do not implement it simply do not scope
+// their pick; the request layer's reach filter (applyReachFilter) is
+// then the fail-closed backstop.
+//
+// The production binding is the modelscache DECORATOR (production always
+// runs through it — CACHE_LAYER_ENABLED defaults ON), so a missing
+// forward there would be a SILENT no-op in production while the
+// raw-manager tests stayed green (the modelscache-decorator-forward
+// trap). The compile-time assertion
+// `var _ models.GroupRewriterScoped = (*CachedModelsConfig)(nil)` is the
+// guard against exactly that.
+type GroupRewriterScoped interface {
+	// RewriteGroupEntriesScoped is RewriteGroupEntries with the
+	// caller's reach set applied to the member candidates and to the
+	// member's own fallback chain. A nil reach means "no filtering"
+	// (the wildcard / no-permission-backend case) and is byte-identical
+	// to the unscoped rewrite.
+	RewriteGroupEntriesScoped(modelList []string, conversationKey string, reach ReachFilter) GroupRewriteResult
+
+	// ExcludeGroupMemberScoped is ExcludeGroupMember with the reach set
+	// applied: the offer walk skips out-of-reach candidates (without
+	// cooling them — a scope exclusion is NOT a failure) and reports
+	// WHY it produced nothing through GroupExcludeOutcome.ScopeOnly.
+	ExcludeGroupMemberScoped(groupID, conversationKey, memberID string, cooldown time.Duration, reach ReachFilter) GroupExcludeOutcome
 }

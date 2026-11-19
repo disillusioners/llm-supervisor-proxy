@@ -2487,21 +2487,35 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 // Token Management Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TokenResponse represents a token in API responses (without sensitive data)
+// TokenResponse represents a token in API responses (without sensitive data).
+//
+// The two grant axes are *[]string pointers that the handlers ALWAYS
+// populate (never leave nil), so an ABSENT axis serialises as JSON `null`
+// rather than disappearing from the payload (plan §2.8 PD-15): the FE
+// round-trips `null` ≡ ABSENT and must be able to distinguish it from
+// `[]` ≡ PRESENT-and-empty.
 type TokenResponse struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	ExpiresAt     *string   `json:"expires_at,omitempty"`
-	CreatedAt     string    `json:"created_at"`
-	CreatedBy     string    `json:"created_by"`
-	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	ExpiresAt            *string   `json:"expires_at,omitempty"`
+	CreatedAt            string    `json:"created_at"`
+	CreatedBy            string    `json:"created_by"`
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil = ABSENT; [] = PRESENT-empty (grants nothing)
+	AllowedGroups        *[]string `json:"allowed_groups,omitempty"` // same tri-state, GROUP axis
+	AllowedModelsInvalid bool      `json:"allowed_models_invalid"`   // fail-closed: unreadable model axis => DENY-ALL
+	AllowedGroupsInvalid bool      `json:"allowed_groups_invalid"`   // fail-closed: unreadable group axis => DENY-ALL
 }
 
-// CreateTokenRequest represents the request body for creating a token
+// CreateTokenRequest represents the request body for creating a token.
+//
+// nil / omitted => that axis is ABSENT (storage NULL).
+// [] => that axis is PRESENT-and-empty (grants NOTHING on that axis).
+// ids => PRESENT (plan §2.8 — the frozen wire contract).
 type CreateTokenRequest struct {
 	Name          string    `json:"name"`
 	ExpiresAt     *string   `json:"expires_at,omitempty"`     // ISO 8601 format, optional
-	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
+	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil = ABSENT; [] = PRESENT-empty
+	AllowedGroups *[]string `json:"allowed_groups,omitempty"` // nil = ABSENT; [] = PRESENT-empty
 }
 
 // CreateTokenResponse includes the plaintext token (shown only once)
@@ -2559,9 +2573,17 @@ func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// UpdateTokenPermissionRequest represents the request body for updating token permission
+// UpdateTokenPermissionRequest represents the request body for updating token permission.
+//
+// Per axis (plan §2.8):
+//
+//	nil / omitted => KEEP EXISTING (the column is not written at all — see
+//	                 the column-skip merge note on updateTokenPermission)
+//	[]            => REPLACE WITH EMPTY (grants nothing; never NULL)
+//	ids           => replace
 type UpdateTokenPermissionRequest struct {
-	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
+	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil = keep; [] = explicit-empty
+	AllowedGroups *[]string `json:"allowed_groups,omitempty"` // nil = keep; [] = explicit-empty
 }
 
 // updateTokenPermission handles PATCH /fe/api/tokens/{id}
@@ -2575,9 +2597,11 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	// Get current token first to handle partial updates
-	currentToken, err := s.tokenStore.GetTokenByID(ctx, id)
-	if err != nil {
+	// 404 FIRST (unchanged error precedence). The stored token is NOT read
+	// into the merge: an omitted axis is not merged into a value here at all —
+	// it is left nil so the store skips that column (the fail-closed
+	// preservation rule; see the merge note below).
+	if _, err := s.tokenStore.GetTokenByID(ctx, id); err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
 			return
@@ -2586,17 +2610,36 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	// Determine allowed_models to set:
-	// - If AllowedModels is nil in request, keep existing value
-	// - If AllowedModels is non-nil (including empty array), use the provided value
-	var allowedModelsToSet []string
+	// Merge per axis (TWO-state wire, Ruling 2 / Q13(a)):
+	//   key omitted OR present-with-explicit-null (both decode to a nil
+	//   *[]string in Go) => Set:false => the store OMITS that SQL column, so
+	//   whatever bytes are stored survive — including the bytes of an
+	//   unreadable (DENY-ALL) axis, which must NEVER be healed to NULL by a
+	//   merge that says nothing about it (plan §6.1 PD-3, ADR §4.2/§7, D10).
+	//   []  (non-nil, empty) => Set:true with an empty value => writes '[]'
+	//   ids => Set:true with the ids => replaces the array.
+	//
+	// Wildcard promotion on edit is INTENTIONALLY INEXPRESSIBLE: there is no
+	// wire state that resets an axis to ABSENT — only creation can do that.
+	perm := auth.OptionalTokenPermission{}
 	if req.AllowedModels != nil {
-		allowedModelsToSet = *req.AllowedModels
-	} else {
-		allowedModelsToSet = currentToken.AllowedModels
+		v := *req.AllowedModels
+		perm.AllowedModels = auth.OptionalAllowlist{Set: true, Values: &v}
+	}
+	if req.AllowedGroups != nil {
+		v := *req.AllowedGroups
+		perm.AllowedGroups = auth.OptionalAllowlist{Set: true, Values: &v}
 	}
 
-	err = s.tokenStore.UpdateTokenPermission(ctx, id, allowedModelsToSet)
+	// VALIDATE THE INBOUND SET ONLY (plan §6.3 anti-wedge rule): an id that is
+	// merely being KEPT (its axis is omitted / explicit-null) is never
+	// re-checked, so a token pointing at a since-deleted model stays editable.
+	if msg := s.validateTokenGrants(ctx, perm); msg != "" {
+		writeJSONError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	err := s.tokenStore.UpdateTokenPermission(ctx, id, perm)
 	if err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -2625,13 +2668,17 @@ func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	response := make([]TokenResponse, len(tokens))
-	for i, t := range tokens {
+	for i := range tokens {
+		t := &tokens[i]
 		response[i] = TokenResponse{
-			ID:            t.ID,
-			Name:          t.Name,
-			CreatedAt:     t.CreatedAt.Format(time.RFC3339),
-			CreatedBy:     t.CreatedBy,
-			AllowedModels: &t.AllowedModels,
+			ID:                   t.ID,
+			Name:                 t.Name,
+			CreatedAt:            t.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            t.CreatedBy,
+			AllowedModels:        &t.AllowedModels,
+			AllowedGroups:        &t.AllowedGroups,
+			AllowedModelsInvalid: t.ModelsInvalid,
+			AllowedGroupsInvalid: t.GroupsInvalid,
 		}
 		if t.ExpiresAt != nil {
 			iso := t.ExpiresAt.Format(time.RFC3339)
@@ -2677,13 +2724,30 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 		createdBy = user
 	}
 
-	// Get allowed models (nil/empty = all models allowed)
-	var allowedModels []string
+	// Both axes keep the tri-state: nil = ABSENT (NULL), [] = PRESENT-empty
+	// ('[]'), ids = PRESENT. Copying through the pointer's value preserves
+	// nil-vs-empty exactly.
+	var allowedModels, allowedGroups []string
 	if req.AllowedModels != nil {
 		allowedModels = *req.AllowedModels
 	}
+	if req.AllowedGroups != nil {
+		allowedGroups = *req.AllowedGroups
+	}
+	// CREATE is a full write: both axes are Set, so both columns are written.
+	// FullPermission keeps the value tri-state intact (nil => NULL/ABSENT,
+	// [] => '[]'/PRESENT-empty, ids => array).
+	perm := auth.FullPermission(allowedModels, allowedGroups)
 
-	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, allowedModels)
+	// VALIDATE the inbound grant axes (plan §6.3 / PD-8). On POST every axis
+	// supplied is inbound, so both are checked; an omitted axis is nil and is
+	// skipped by the helper.
+	if msg := s.validateTokenGrants(ctx, perm); msg != "" {
+		writeJSONError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, perm)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
 		return
@@ -2691,11 +2755,14 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 
 	response := CreateTokenResponse{
 		TokenResponse: TokenResponse{
-			ID:            token.ID,
-			Name:          token.Name,
-			CreatedAt:     token.CreatedAt.Format(time.RFC3339),
-			CreatedBy:     token.CreatedBy,
-			AllowedModels: &token.AllowedModels,
+			ID:                   token.ID,
+			Name:                 token.Name,
+			CreatedAt:            token.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            token.CreatedBy,
+			AllowedModels:        &token.AllowedModels,
+			AllowedGroups:        &token.AllowedGroups,
+			AllowedModelsInvalid: token.ModelsInvalid,
+			AllowedGroupsInvalid: token.GroupsInvalid,
 		},
 		Token: plaintext, // Show once!
 	}
@@ -2707,6 +2774,95 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(response)
+}
+
+// tokenGrantModelGetter is the claim-BLIND row lookup used for token-grant
+// validation (structural assertion precedent: pkg/proxy's directModelGetter,
+// pkg/proxy/handler_groups.go:552-589).
+//
+// Validation MUST be claim-blind: a group id that is also claimed by another
+// row would be redirected by the claims-aware GetModel, and the operator
+// would be told "not a group" about the very row they named.
+type tokenGrantModelGetter interface {
+	GetModelNative(modelID string) *models.ModelConfig
+}
+
+// tokenGrantRow resolves a model row for grant validation, preferring the
+// claim-blind GetModelNative when the backend implements it and falling back
+// to the claims-aware GetModel (the JSON twin has no native lookup).
+func (s *Server) tokenGrantRow(id string) *models.ModelConfig {
+	if s.modelsConfig == nil {
+		return nil
+	}
+	if ng, ok := s.modelsConfig.(tokenGrantModelGetter); ok {
+		if row := ng.GetModelNative(id); row != nil {
+			return row
+		}
+	}
+	// FALLBACK (claim-aware GetModel): accept the row ONLY when it IS the
+	// requested id. A stale claim (a row's ShadowModelID naming a deleted
+	// row) makes GetModel redirect to a different id; treating that redirect
+	// as "exists" would let validation accept a nonexistent group id. The
+	// runtime resolver is claims-first and would 403 anyway — this is an
+	// admin-side validation-integrity gap.
+	row := s.modelsConfig.GetModel(id)
+	if row == nil || row.ID != id {
+		return nil
+	}
+	return row
+}
+
+// validateTokenGrants checks the INBOUND grant axes of a token write
+// (plan §6.3 / PD-8). It returns "" when the request is acceptable, or the
+// message for the bare {"error": "..."} envelope.
+//
+// Rules:
+//   - allowed_groups: every id must EXIST and be kind='group'. A model id
+//     (chat / decision / image-gen) is a 400 here — it belongs in
+//     allowed_models, where reach semantics differ (I7: a group id there
+//     grants the target only, never its members).
+//   - allowed_models: every id must EXIST (any kind — a group id is legal and
+//     means a target-only grant, plan §2.4).
+//
+// ONLY the SET (inbound) axes are validated. A Set:false axis means "keep"
+// (PATCH) or "not supplied" (POST) — re-checking a KEPT id would wedge the
+// operator out of editing a token whose model was deleted (anti-wedge, R1.9).
+//
+// ctx is accepted for signature stability with the plan's stated shape, so a
+// future DB-backed existence check must not need a signature change at every
+// call site. It is NOT threaded into the lookup today, and the lookup is NOT
+// guaranteed non-blocking: only the cache-layer HIT path is in-memory. A
+// miss falls through to a strict DB fill, and with CACHE_LAYER_ENABLED=OFF
+// the lookup IS the raw manager's GetModel (pkg/store/database/store.go) —
+// a live SELECT under the models manager's writer-preferring RLock, with NO
+// deadline. Threading ctx into that read is a behavior change and is out of
+// scope here.
+func (s *Server) validateTokenGrants(ctx context.Context, perm auth.OptionalTokenPermission) string {
+	// No model backend bound (unit-test servers): nothing to validate
+	// against. Reads stay lenient and the resolver is authoritative at
+	// request time, so an unresolvable id grants nothing either way.
+	if s.modelsConfig == nil {
+		return ""
+	}
+	if perm.AllowedGroups.IsSet() {
+		for _, id := range perm.AllowedGroups.Value() {
+			row := s.tokenGrantRow(id)
+			if row == nil {
+				return fmt.Sprintf("allowed_groups: unknown model id %q (a group grant must name an existing model row)", id)
+			}
+			if !row.IsGroup() {
+				return fmt.Sprintf("allowed_groups: id %q is not a group (kind=%q) — model ids belong in allowed_models", id, row.Kind)
+			}
+		}
+	}
+	if perm.AllowedModels.IsSet() {
+		for _, id := range perm.AllowedModels.Value() {
+			if s.tokenGrantRow(id) == nil {
+				return fmt.Sprintf("allowed_models: unknown model id %q", id)
+			}
+		}
+	}
+	return ""
 }
 
 // maskAPIKey masks the API key for display, showing first 8 chars + "***"

@@ -245,7 +245,37 @@ export interface ApiToken {
   expires_at?: string;    // ISO date or null
   created_at: string;
   last_used_at?: string;
-  allowed_models: string[] | null;  // null means all models allowed
+  // MODEL grant axis — TRI-STATE on the wire (token-scope contract, plan
+  // §2.8 / BE pkg/ui/server.go:2490-2506):
+  //   key MISSING or explicit `null` => ABSENT => no allow-list on this axis
+  //                                     => UNRESTRICTED (wildcard)
+  //   []                             => PRESENT-EMPTY => grants NOTHING on
+  //                                     this axis (NEVER wildcard)
+  //   [ids...]                       => PRESENT with exactly those ids
+  //
+  // `null` is NOT "denied" and `[]` is NOT "unrestricted" — they are
+  // opposites. The BE always populates the axis with a NON-NIL *[]string,
+  // so Go's `omitempty` never drops the key: an ABSENT axis arrives as an
+  // explicit `null`, never as a missing key. Read it defensively anyway
+  // (`?? null`) so an older BE that omits the key reads as ABSENT.
+  allowed_models: string[] | null;
+  // GROUP grant axis — same tri-state and same reading rules as
+  // allowed_models above: missing/null = ABSENT (unrestricted),
+  // [] = PRESENT-empty (grants nothing), ids = PRESENT.
+  // Optional because a pre-token-scope BE payload simply has no such key.
+  allowed_groups?: string[] | null;
+  // Defensive, read-only fail-closed flags.
+  //
+  // The BE's auth layer carries ModelsInvalid / GroupsInvalid on the
+  // AuthToken struct (pkg/auth/token.go:48-49): a grant column that exists
+  // but cannot be read (malformed JSON, unknown driver type, empty string)
+  // is INVALID => DENY-ALL on that axis, never wildcard. The admin DTO
+  // `TokenResponse` (pkg/ui/server.go) emits BOTH flags on every token
+  // echo (list + create), so `false` is explicit. They are still read
+  // defensively (`=== true`) so an older BE that omits the keys behaves
+  // as "no information", never as "valid".
+  allowed_models_invalid?: boolean;
+  allowed_groups_invalid?: boolean;
 }
 
 export interface Message {

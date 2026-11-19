@@ -1958,3 +1958,379 @@ func TestDecision_Group_ThroughCachedConfig(t *testing.T) {
 		t.Fatalf("the member must be attempted exactly once through the cached config, got %d hits", fake.hitCount.Load())
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PD-11 — disabled vs out-of-scope: NO LEAK (AUTH commission, T2.13)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestDecision_DisabledVsOutOfScope_NoLeak pins the property the
+// precedence order exists to satisfy (phase2-plan.md T2.13, pin table
+// row `TestDecision_DisabledVsOutOfScope_NoLeak`): a request that is
+// BOTH disabled and out of scope must produce ONE answer that does not
+// reveal which condition applied.
+//
+// THE CORPUS PREMISES, as frozen (plan.md §9 + phase2-plan.md
+// T2.13 ~532-536), and what LANDED code does with each:
+//
+//  1. "this codebase has no disabled-model rejection on any lane —
+//     GetModel/GetModelNative return disabled rows for non-group ids
+//     (pkg/store/database/store.go; pkg/proxy/handler_functions.go:174
+//     'GetModel never filters enabled for non-group rows')". ⇒ VERIFIED
+//     on this lane: a DISABLED standalone decision model is SERVED
+//     (200) when in reach, so the disabled case produces no error to
+//     leak. Sub-test B.
+//  2. "a disabled MEMBER is invisible to buildGroupPolicy
+//     (policy.go:76 `if !row.Enabled { continue }`)". ⇒ VERIFIED: the
+//     member is never a candidate, so its counter is 0 and its state
+//     never reaches the response. Sub-test A.
+//  3. "all-disabled ⇒ 502; all-out-of-scope ⇒ 403 — distinguishable
+//     BY DESIGN (different failures, different operator remedies)".
+//     ⇒ VERIFIED, and the discriminator is `baseServable` counted on the
+//     UNFILTERED row (group.go:179/:199): when the group has ZERO
+//     base-servable members the empty order is AVAILABILITY (502) even
+//     when the scope also excluded members. Sub-test C.
+//  4. CORPUS DISCREPANCY — plan/phase2-plan assert "a disabled GROUP
+//     is invisible to the claims index — so a disabled group resolves
+//     as *unknown* (404)". ⇒ FALSE for a group named by its OWN id:
+//     the claims index only governs SHADOWED ids, so a direct name
+//     always resolves the row it names, and the handler never filters
+//     `enabled` on the group arm ⇒ a disabled group named directly is
+//     SERVED (verified against the production binding: sqlite store +
+//     modelscache decorator + the resolver chain cmd/main.go wires).
+//     Sub-test D pins the LANDED behaviour and asserts the part of the
+//     premise that IS true (the disabled group's SHADOW CLAIM is
+//     inactive). Reported as a behaviour/corpus finding, not silently
+//     harmonised away.
+func TestDecision_DisabledVsOutOfScope_NoLeak(t *testing.T) {
+	// ── A: a disabled+out-of-scope MEMBER never leaks (healthy group) ────
+	t.Run("member_both_disabled_and_out_of_scope_never_attempted_never_mentioned", func(t *testing.T) {
+		// dec-both is disabled AND out of reach; dec-healthy is enabled and
+		// granted. Both are BackupOnly=false EXCEPT dec-both, which is
+		// BackupOnly so the healthy head is deterministic (the policy would
+		// skip it anyway on `!row.Enabled`).
+		env := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-healthy", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+			{ID: "dec-both", Weight: 1, BackupOnly: true, Enabled: false, Status: 200, Body: decisionBody()},
+		})
+		env.tokenStore.tokens["tok-test"].AllowedModels = []string{env.group.ID, "dec-healthy"}
+		rec := env.send(t)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("disabled+out-of-scope member next to a healthy one: status = %d, want 200; body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if got := env.hitsFor("dec-healthy"); got != 1 {
+			t.Errorf("the healthy in-reach member must serve exactly once, got %d hits", got)
+		}
+		if got := env.hitsFor("dec-both"); got != 0 {
+			t.Errorf("the disabled+out-of-scope member must never be attempted, got %d hits — neither condition may leak as an attempt", got)
+		}
+		for _, forbidden := range []string{"dec-both", "access_denied", "decision_all_members_failed"} {
+			if strings.Contains(rec.Body.String(), forbidden) {
+				t.Errorf("the 200 body names %q (%s) — neither the disabled state nor the scope exclusion may appear in the response",
+					forbidden, rec.Body.String())
+			}
+		}
+
+		// THE CONTROL: swap the disabled member for an ENABLED, equally
+		// out-of-scope one. The two answers must be byte-identical — that
+		// is the "no distinguishing detail" property.
+		control := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-healthy", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+			{ID: "dec-other", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		control.tokenStore.tokens["tok-test"].AllowedModels = []string{control.group.ID, "dec-healthy"}
+		crec := control.send(t)
+		if crec.Code != http.StatusOK || crec.Body.String() != rec.Body.String() {
+			t.Fatalf("the disabled member's state is DISTINGUISHABLE: disabled=%d/%s enabled-control=%d/%s",
+				rec.Code, rec.Body.String(), crec.Code, crec.Body.String())
+		}
+		if got := control.hitsFor("dec-other"); got != 0 {
+			t.Errorf("control: the out-of-scope member must never be attempted, got %d hits", got)
+		}
+	})
+
+	// ── B: the MODEL arm — a disabled standalone model is SERVED ──────────
+	t.Run("model_arm_disabled_standalone_is_served_so_no_error_can_leak", func(t *testing.T) {
+		// Corpus premise 1 (plan.md §9 / T2.13): there is no disabled-model
+		// rejection on this lane. A disabled model that IS in reach is
+		// served — so on the model arm the disabled case produces no error
+		// at all, and therefore nothing to leak.
+		env := newEnvOpenAI(t, fakeScript{status: 200, body: openAIDecisionSuccessBody(10, 0)})
+		env.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+			if id != "dec-disabled" {
+				return nil, false
+			}
+			return &models.ModelConfig{ID: "dec-disabled", Name: "Disabled", Kind: models.KindDecision,
+				Enabled: false, Internal: true, InternalModel: "gpt-6-luna",
+				Credentials: models.TestRefs("cred-1")}, true
+		})
+		env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+			if id != "dec-disabled" {
+				return models.ResolvedCredential{}, false
+			}
+			return models.ResolvedCredential{Provider: "openai", APIKey: "sk", BaseURL: env.upstream.URL,
+				InternalModel: "gpt-6-luna", CredentialID: "cred-1"}, true
+		})
+		rec := env.sendRequest(http.MethodPost, standardRequestBody("dec-disabled"), nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("disabled standalone model (wildcard, in reach): status = %d, want 200 — "+
+				"GetModel never filters enabled for non-group rows, so the disabled case is SERVED (T2.13 premise 1); body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if got := env.fake.hitCount.Load(); got != 1 {
+			t.Errorf("disabled standalone model: upstream hits = %d, want 1 (it is served, not rejected)", got)
+		}
+
+		// THE LEAK TEST: restricted, the disabled model's answer must be
+		// BYTE-IDENTICAL to an enabled out-of-scope model's answer — the
+		// disabled flag is invisible behind the 403.
+		disabledEnv := newEnvOpenAI(t, fakeScript{status: 200, body: openAIDecisionSuccessBody(10, 0)})
+		disabledEnv.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		disabledEnv.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+			if id != "dec-x" {
+				return nil, false
+			}
+			return &models.ModelConfig{ID: "dec-x", Name: "X", Kind: models.KindDecision, Enabled: false,
+				Internal: true, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("cred-1")}, true
+		})
+		drec := disabledEnv.sendRequest(http.MethodPost, standardRequestBody("dec-x"), nil)
+
+		enabledEnv := newEnvOpenAI(t, fakeScript{status: 200, body: openAIDecisionSuccessBody(10, 0)})
+		enabledEnv.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		enabledEnv.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+			if id != "dec-x" {
+				return nil, false
+			}
+			return &models.ModelConfig{ID: "dec-x", Name: "X", Kind: models.KindDecision, Enabled: true,
+				Internal: true, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("cred-1")}, true
+		})
+		erec := enabledEnv.sendRequest(http.MethodPost, standardRequestBody("dec-x"), nil)
+
+		if drec.Code != http.StatusForbidden {
+			t.Fatalf("disabled + out-of-scope model: status = %d, want 403; body=%s", drec.Code, drec.Body.String())
+		}
+		if erec.Code != http.StatusForbidden {
+			t.Fatalf("enabled + out-of-scope model: status = %d, want 403; body=%s", erec.Code, erec.Body.String())
+		}
+		if drec.Body.String() != erec.Body.String() {
+			t.Fatalf("the disabled flag LEAKS through the 403: disabled=%s enabled=%s",
+				drec.Body.String(), erec.Body.String())
+		}
+		if got := disabledEnv.fake.hitCount.Load(); got != 0 {
+			t.Errorf("disabled + out-of-scope model: upstream hits = %d, want 0", got)
+		}
+		if got := enabledEnv.fake.hitCount.Load(); got != 0 {
+			t.Errorf("enabled + out-of-scope model: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── C: all-disabled ⇒ 502 · all-out-of-scope ⇒ 403 (by design) ────────
+	t.Run("group_arm_all_disabled_502_vs_all_out_of_scope_403", func(t *testing.T) {
+		// All members DISABLED, group in reach (wildcard) ⇒ 502
+		// decision_all_members_failed, ZERO attempts (unservability).
+		offEnv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-off-1", Weight: 1, Enabled: false, Status: 200, Body: decisionBody()},
+			{ID: "dec-off-2", Weight: 1, BackupOnly: true, Enabled: false, Status: 200, Body: decisionBody()},
+		})
+		offRec := offEnv.send(t)
+		if offRec.Code != http.StatusBadGateway {
+			t.Fatalf("all-disabled group: status = %d, want 502; body=%s", offRec.Code, offRec.Body.String())
+		}
+		_, _, offCode := decodeOpenAIError(t, offRec.Body.Bytes())
+		if offCode != "decision_all_members_failed" {
+			t.Fatalf("all-disabled group: code = %q, want decision_all_members_failed", offCode)
+		}
+		if got := offEnv.totalHits(); got != 0 {
+			t.Errorf("all-disabled group: upstream hits = %d, want 0 (no member is a candidate)", got)
+		}
+
+		// Every member ENABLED but out of reach (the group target itself is
+		// granted — the D4 entry-only spelling) ⇒ 403, ZERO attempts.
+		scopeEnv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-on-1", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+			{ID: "dec-on-2", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		scopeEnv.tokenStore.tokens["tok-test"].AllowedModels = []string{scopeEnv.group.ID}
+		scopeRec := scopeEnv.send(t)
+		assertAccessDenied403(t, scopeRec, scopeEnv.group.ID)
+		if got := scopeEnv.totalHits(); got != 0 {
+			t.Errorf("all-out-of-scope group: upstream hits = %d, want 0", got)
+		}
+
+		// THE TWO ARE DISTINGUISHABLE BY DESIGN — and each envelope carries
+		// ONLY its own vocabulary (an availability failure never wears the
+		// permission shape and vice versa).
+		if strings.Contains(offRec.Body.String(), "access_denied") {
+			t.Errorf("the 502 body carries access_denied (%s) — an availability failure must not wear the permission shape", offRec.Body.String())
+		}
+		if strings.Contains(scopeRec.Body.String(), "decision_all_members_failed") {
+			t.Errorf("the 403 body carries decision_all_members_failed (%s) — a permission denial must not wear the availability shape", scopeRec.Body.String())
+		}
+
+		// THE CROSSOVER: members that are BOTH disabled and out of scope ⇒
+		// 502, not 403. group.go:199 requires `baseServable > 0` for the
+		// scope branch: a group with ZERO base-servable members is
+		// UNSERVABLE even though the scope also excluded members
+		// (availability, not permission).
+		bothEnv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-both-1", Weight: 1, Enabled: false, Status: 200, Body: decisionBody()},
+		})
+		bothEnv.tokenStore.tokens["tok-test"].AllowedModels = []string{bothEnv.group.ID}
+		bothRec := bothEnv.send(t)
+		if bothRec.Code != http.StatusBadGateway {
+			t.Fatalf("disabled AND out-of-scope group: status = %d, want 502 (baseServable == 0 wins: availability, not permission); body=%s",
+				bothRec.Code, bothRec.Body.String())
+		}
+		_, _, bothCode := decodeOpenAIError(t, bothRec.Body.Bytes())
+		if bothCode != "decision_all_members_failed" {
+			t.Fatalf("disabled AND out-of-scope group: code = %q, want decision_all_members_failed", bothCode)
+		}
+		if got := bothEnv.totalHits(); got != 0 {
+			t.Errorf("disabled AND out-of-scope group: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── D: the group ROW's own disabled flag — LANDED behaviour, pinned ───
+	t.Run("group_row_disabled_does_not_leak_either", func(t *testing.T) {
+		// CORPUS DISCREPANCY (phase2-plan.md T2.13 ~534): the frozen text
+		// says "a disabled group is invisible to the claims index — so a
+		// disabled group resolves as *unknown* (404)". That is true only of
+		// SHADOWED ids: a group named by its OWN id always resolves the row
+		// it names, and neither the resolve nor the group arm reads
+		// `enabled`. The landed behaviour — verified against the production
+		// binding (sqlite store → modelscache decorator → the resolver chain
+		// cmd/main.go wires) — is: a disabled group named directly is
+		// SERVED, and its SHADOW CLAIM is inactive. This sub-test pins the
+		// LANDED behaviour (reported as a corpus finding, never harmonised).
+		dbPath := filepath.Join(t.TempDir(), "disabled-group.db")
+		t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+		dbStore, err := database.NewConnection(context.Background())
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		t.Cleanup(func() { dbStore.Close() })
+		if err := dbStore.RunMigrations(context.Background()); err != nil {
+			t.Fatalf("migrations: %v", err)
+		}
+		mgr, err := database.NewModelsManager(dbStore, nil)
+		if err != nil {
+			t.Fatalf("NewModelsManager: %v", err)
+		}
+		t.Cleanup(mgr.Close)
+
+		upstream, fake := newFakeUpstream(t, fakeScript{status: 200, body: decisionBody()})
+		if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-dg", Provider: "openai", APIKey: "sk", BaseURL: upstream.URL}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-claimed", Name: "Claimed", Enabled: true, Kind: models.KindDecision,
+			Internal: true, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("cred-dg"),
+		}); err != nil {
+			t.Fatalf("seed decision member: %v", err)
+		}
+		// A DISABLED group that SHADOW-CLAIMS the member's id.
+		if err := mgr.AddModel(models.ModelConfig{
+			ID: "dec-group-off", Name: "Disabled Group", Enabled: false, Kind: models.KindGroup,
+			Internal: true, ShadowModelID: "dec-claimed",
+			Members: []models.GroupMember{{ModelID: "dec-claimed", Weight: 1}},
+		}); err != nil {
+			t.Fatalf("seed disabled group: %v", err)
+		}
+
+		cached, err := modelscache.NewCachedModelsConfig(mgr, modelscache.Options{ReconcileInterval: time.Hour})
+		if err != nil {
+			t.Fatalf("NewCachedModelsConfig: %v", err)
+		}
+		t.Cleanup(cached.Stop)
+
+		// THE HALF OF THE CORPUS PREMISE THAT IS TRUE: a disabled group's
+		// shadow claim is INACTIVE (the claimed id resolves to itself, never
+		// to the disabled group) — store.go's claim lookup requires
+		// `g.Enabled`, the decorator's mirror requires `g.Enabled`.
+		if got := cached.GetModel("dec-claimed"); got == nil || got.ID != "dec-claimed" {
+			t.Fatalf("the disabled group's shadow claim is ACTIVE: GetModel(dec-claimed) = %v, want the row itself", got)
+		}
+
+		bus := events.NewBus()
+		ts := newMemTokenStore()
+		ts.add(&auth.AuthToken{ID: "tok-dg", Name: "DG", TokenHash: auth.HashToken("sk-dg-token")})
+		// active is the decorator the handler reads through — swapped after
+		// the group is enabled (the decorator's snapshot is rebuilt from the
+		// manager, so the write becomes visible without a reconcile tick).
+		active := cached
+		h := NewHandler(stubConfig{timeout: 5 * time.Second}, bus, ts, nil)
+		h.SetModelResolver(NewModelResolverFromConfig(func(modelID string) *models.ModelConfig {
+			return active.GetModel(modelID)
+		}))
+		h.SetCredentialResolver(NewCredentialResolverFromConfig(func(modelID string) (models.ResolvedCredential, bool) {
+			return active.ResolveInternalConfigWithAffinity(modelID, modelID)
+		}))
+		h.SetModelsConfig(active)
+
+		post := func(model, token string) *httptest.ResponseRecorder {
+			r := httptest.NewRequest(http.MethodPost, "/v1/decisions", strings.NewReader(standardRequestBody(model)))
+			if token != "" {
+				r.Header.Set("Authorization", "Bearer "+token)
+			}
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			h.HandleDecision(w, r)
+			return w
+		}
+
+		// LANDED: a disabled group named by its own id is SERVED (the
+		// handler never consults `enabled` on the group arm).
+		before := fake.hitCount.Load()
+		rec := post("dec-group-off", "sk-dg-token")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("disabled group named directly (wildcard token): status = %d, want 200 per LANDED behaviour; body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if got := fake.hitCount.Load() - before; got != 1 {
+			t.Errorf("disabled group named directly: upstream hits = %d, want 1 (its enabled member serves)", got)
+		}
+
+		// THE NO-LEAK HALF THAT DOES HOLD: once the token cannot reach it,
+		// the disabled group's answer is BYTE-IDENTICAL to an ENABLED
+		// out-of-scope group's answer — the flag never surfaces.
+		ts.add(&auth.AuthToken{
+			ID: "tok-restricted", Name: "Restricted",
+			TokenHash:     auth.HashToken("sk-restricted-token"),
+			AllowedModels: []string{"some-other-model"},
+		})
+		drec := post("dec-group-off", "sk-restricted-token")
+		assertAccessDenied403(t, drec, "dec-group-off")
+		before = fake.hitCount.Load()
+
+		// The control: ENABLE the group, keep the same restricted token.
+		row := mgr.GetModelNative("dec-group-off")
+		if row == nil {
+			t.Fatal("disabled group row missing")
+		}
+		enabled := *row
+		enabled.Enabled = true
+		if err := mgr.UpdateModel("dec-group-off", enabled); err != nil {
+			t.Fatalf("UpdateModel: %v", err)
+		}
+		// The decorator's write path is not used here, so refresh its
+		// snapshot by recreating the decorator over the same manager.
+		cached2, err := modelscache.NewCachedModelsConfig(mgr, modelscache.Options{ReconcileInterval: time.Hour})
+		if err != nil {
+			t.Fatalf("NewCachedModelsConfig(2): %v", err)
+		}
+		t.Cleanup(cached2.Stop)
+		active = cached2
+		h.SetModelsConfig(active)
+		erec := post("dec-group-off", "sk-restricted-token")
+		if erec.Code != http.StatusForbidden {
+			t.Fatalf("enabled-but-out-of-scope group: status = %d, want 403; body=%s", erec.Code, erec.Body.String())
+		}
+		if erec.Body.String() != drec.Body.String() {
+			t.Fatalf("the group's disabled flag LEAKS through the 403: disabled=%s enabled=%s",
+				drec.Body.String(), erec.Body.String())
+		}
+		if got := fake.hitCount.Load() - before; got != 0 {
+			t.Errorf("enabled-but-out-of-scope group: upstream hits = %d, want 0", got)
+		}
+	})
+}

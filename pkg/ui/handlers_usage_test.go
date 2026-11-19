@@ -36,7 +36,9 @@ func setupTestServer(t *testing.T) *testServer {
 		name TEXT NOT NULL,
 		expires_at TEXT,
 		created_at TEXT NOT NULL,
-		created_by TEXT NOT NULL
+		created_by TEXT NOT NULL,
+		allowed_models TEXT DEFAULT NULL,
+		allowed_groups TEXT DEFAULT NULL
 	)`)
 	if err != nil {
 		db.Close()

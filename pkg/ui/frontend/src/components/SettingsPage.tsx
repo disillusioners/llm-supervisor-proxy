@@ -58,9 +58,21 @@ interface SettingsPageProps {
   groupError?: string | null;
   onRetryGroupModels?: () => void;
   tokens: ApiToken[];
-  onCreateToken: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<ApiToken>;
+  // The two grant axes are independent and tri-state: null = Unrestricted (no
+  // allow-list on that axis), [] = Restricted with an empty selection (grants
+  // NOTHING), ids = Restricted with exactly those ids.
+  onCreateToken: (
+    name: string,
+    expiresAt: string | null,
+    allowedModels?: string[] | null,
+    allowedGroups?: string[] | null,
+  ) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
-  onUpdateTokenPermission: (id: string, allowedModels?: string[]) => Promise<boolean>;
+  onUpdateTokenPermission: (
+    id: string,
+    allowedModels?: string[] | null,
+    allowedGroups?: string[] | null,
+  ) => Promise<boolean>;
   onRefetchTokens: () => void;
 }
 
@@ -367,9 +379,16 @@ export function SettingsPage({
   };
 
   // Token handlers
-  const handleCreateToken = async (name: string, expiresAt: string | null, allowedModels?: string[]) => {
+  const handleCreateToken = async (
+    name: string,
+    expiresAt: string | null,
+    allowedModels?: string[] | null,
+    allowedGroups?: string[] | null,
+  ) => {
     try {
-      const token = await onCreateToken(name, expiresAt, allowedModels);
+      // Both axes are forwarded as they are: null = Unrestricted, [] =
+      // Restricted-and-empty (grants NOTHING), ids = Restricted.
+      const token = await onCreateToken(name, expiresAt, allowedModels, allowedGroups);
       setNewToken(token);
       setShowTokenValue(true);
       onRefetchTokens();

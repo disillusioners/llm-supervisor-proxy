@@ -275,7 +275,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 		Name:          "Anthropic Leak Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(openaiCredID),
+		Credentials:   models.TestRefs(openaiCredID),
 		InternalModel: intModelUpstreamName,
 	}); err != nil {
 		t.Fatalf("add model %s: %v", intModel, err)
@@ -300,7 +300,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	// (the /v1/messages lane enforces auth since the security hotfix —
 	// defect v191 / anomaly 4a231ed0).
 	ctx := context.Background()
-	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", nil)
+	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", auth.FullPermission(nil, nil))
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}

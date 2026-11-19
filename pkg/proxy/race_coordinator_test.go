@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +42,10 @@ func TestNewRaceCoordinator(t *testing.T) {
 	models := []string{"gpt-4", "claude-3"}
 	rawBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), rawBody, models, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), rawBody, models, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	if coord == nil {
 		t.Fatal("newRaceCoordinator returned nil")
@@ -84,20 +90,58 @@ func TestNewRaceCoordinator(t *testing.T) {
 	}
 }
 
-func TestNewRaceCoordinatorWithEmptyModels(t *testing.T) {
+// TestRaceCoordinator_EmptyModelList_Refused is the PD-10 (T2.12)
+// dedicated regression pin.
+//
+// The constructor used to SILENTLY re-expand an empty model list to
+// {cfg.ModelID}. After the scope work an empty list is a legitimate
+// intermediate state (every candidate was filtered out by the token's
+// reach) — and the fallback would re-introduce an OUT-OF-SCOPE model,
+// converting the intended 403 ScopeExcluded into a real upstream attempt
+// and a 502. The constructor therefore REFUSES the empty list, and the
+// callers decide 403/502 before construction.
+//
+// The end-to-end half (a scope-empty group request ⇒ 403 with zero
+// upstream attempts) lives in pkg/proxy's authz pins
+// (TestChat_Group_AllMembersOutOfScope_403_Not502).
+func TestRaceCoordinator_EmptyModelList_Refused(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
-	// Empty models slice
-	models := []string{}
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), models, false)
-
-	// Should default to cfg.ModelID
-	if len(coord.models) != 1 {
-		t.Errorf("models length = %d, want 1 (defaulted to cfg.ModelID)", len(coord.models))
+	// (a) the 12-arg constructor refuses an empty list and returns a
+	// NIL coordinator — no {cfg.ModelID} re-expansion.
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), []string{}, nil, "empty-list-req", false, nil, "", false, nil)
+	if err == nil {
+		t.Fatal("newRaceCoordinatorWithEvents(empty list) returned nil error — an empty list must be REFUSED (PD-10)")
 	}
-	if coord.models[0] != "gpt-4" {
-		t.Errorf("models[0] = %s, want gpt-4", coord.models[0])
+	if coord != nil {
+		t.Fatalf("newRaceCoordinatorWithEvents(empty list) returned a NON-NIL coordinator (%+v) alongside the error — the fallback must be gone, not wrapped", coord)
+	}
+
+	// The 6-arg test wrapper refuses it too (it forwards the error).
+	coord, err = newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), nil, false)
+	if err == nil || coord != nil {
+		t.Fatalf("newRaceCoordinator(nil list) = (%v, %v), want (nil, error)", coord, err)
+	}
+
+	// A NON-empty list still constructs (the refusal is not a blanket
+	// rejection).
+	coord, err = newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, nil, "ok-req", false, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinatorWithEvents(non-empty list): %v", err)
+	}
+	if coord == nil || len(coord.models) != 1 || coord.models[0] != "gpt-4" {
+		t.Fatalf("non-empty construction: coord=%+v, want models=[gpt-4]", coord)
+	}
+
+	// (b) the source scan: the silent re-expansion literal must be GONE.
+	root := credGroupRepoRoot(t)
+	src, rerr := os.ReadFile(filepath.Join(root, "pkg", "proxy", "race_coordinator.go"))
+	if rerr != nil {
+		t.Fatalf("read race_coordinator.go: %v", rerr)
+	}
+	if strings.Contains(string(src), "models = []string{cfg.ModelID}") {
+		t.Error("pkg/proxy/race_coordinator.go still contains `models = []string{cfg.ModelID}` — the silent empty-list re-expansion (the commission's defect class) must be deleted, not wrapped")
 	}
 }
 
@@ -106,7 +150,10 @@ func TestNewRaceCoordinatorWithEvents(t *testing.T) {
 	cfg := newTestConfigSnapshot("gpt-4")
 	models := []string{"gpt-4"}
 
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), models, nil, "test-request-id", false, nil, "", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), models, nil, "test-request-id", false, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	if coord.eventBus != nil {
 		t.Error("eventBus should be nil")
@@ -124,7 +171,10 @@ func TestGetWinnerInitiallyNil(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	if coord.GetWinner() != nil {
 		t.Error("GetWinner() should return nil when no winner")
@@ -135,7 +185,10 @@ func TestGetWinnerAfterSet(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Manually set a winner via internal state
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -164,7 +217,10 @@ func TestGetStatsInitiallyEmpty(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	stats := coord.GetStats()
 
@@ -195,7 +251,10 @@ func TestGetStatsWithWinner(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Set a winner
 	req := newUpstreamRequest(1, modelTypeFallback, "claude-3", 1024)
@@ -226,7 +285,10 @@ func TestGetRequestStatusesInitiallyAllNotStarted(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	statuses := coord.GetRequestStatuses()
 
@@ -247,7 +309,10 @@ func TestGetRequestStatusesWithMainCompleted(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a completed main request
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -273,7 +338,10 @@ func TestGetRequestStatusesWithFailedRequests(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed main request
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -293,7 +361,10 @@ func TestGetRequestStatusesWithMultipleRequestTypes(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add main (completed), second (running), fallback (not started)
 	mainReq := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -331,7 +402,10 @@ func TestGetCommonFailureStatusNoRequests(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	status := coord.GetCommonFailureStatus()
 
@@ -344,7 +418,10 @@ func TestGetCommonFailureStatusNoFailures(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a completed request
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -364,7 +441,10 @@ func TestGetCommonFailureStatusAllSameHTTPStatus(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add two failed requests with same HTTP status
 	req1 := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -390,7 +470,10 @@ func TestGetCommonFailureStatusDifferentHTTPStatus(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add two failed requests with different HTTP statuses
 	req1 := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -416,7 +499,10 @@ func TestGetCommonFailureStatusParsedFromError(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request without HTTP status, but with error containing status code
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -438,7 +524,10 @@ func TestGetCommonFailureStatusTimeoutError(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with timeout error
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -459,7 +548,10 @@ func TestGetCommonFailureStatusBufferLimitError(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with buffer limit error
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -480,7 +572,10 @@ func TestGetCommonFailureStatusGenericError(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with generic error (defaults to 502)
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -505,7 +600,10 @@ func TestGetFinalErrorInfoNoRequests(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	info := coord.GetFinalErrorInfo()
 
@@ -524,7 +622,10 @@ func TestGetFinalErrorInfoAllFailedRateLimit(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add two failed requests with 429 status
 	req1 := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -559,7 +660,10 @@ func TestGetFinalErrorInfoContextOverflow(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with context overflow error
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -586,7 +690,10 @@ func TestGetFinalErrorInfoBadGateway(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with generic error
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -613,7 +720,10 @@ func TestGetFinalErrorInfoServiceUnavailable(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with 503 status
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -641,7 +751,10 @@ func TestGetFinalErrorInfoGatewayTimeout(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Add a failed request with timeout error
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -669,12 +782,15 @@ func TestGetStreamDeadlineErrorInitiallyNil(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
-
-	err := coord.GetStreamDeadlineError()
-
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
 	if err != nil {
-		t.Errorf("GetStreamDeadlineError() = %v, want nil", err)
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
+
+	deadlineErr := coord.GetStreamDeadlineError()
+
+	if deadlineErr != nil {
+		t.Errorf("GetStreamDeadlineError() = %v, want nil", deadlineErr)
 	}
 }
 
@@ -682,7 +798,10 @@ func TestGetStreamDeadlineErrorAfterSet(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Set stream deadline error
 	expectedErr := &FinalErrorInfo{
@@ -696,16 +815,16 @@ func TestGetStreamDeadlineErrorAfterSet(t *testing.T) {
 	coord.streamDeadlineError = expectedErr
 	coord.mu.Unlock()
 
-	err := coord.GetStreamDeadlineError()
+	deadlineErr := coord.GetStreamDeadlineError()
 
-	if err == nil {
+	if deadlineErr == nil {
 		t.Fatal("GetStreamDeadlineError() returned nil after setting")
 	}
-	if err.HTTPStatus != expectedErr.HTTPStatus {
-		t.Errorf("HTTPStatus = %d, want %d", err.HTTPStatus, expectedErr.HTTPStatus)
+	if deadlineErr.HTTPStatus != expectedErr.HTTPStatus {
+		t.Errorf("HTTPStatus = %d, want %d", deadlineErr.HTTPStatus, expectedErr.HTTPStatus)
 	}
-	if err.Message != expectedErr.Message {
-		t.Errorf("Message = %s, want %s", err.Message, expectedErr.Message)
+	if deadlineErr.Message != expectedErr.Message {
+		t.Errorf("Message = %s, want %s", deadlineErr.Message, expectedErr.Message)
 	}
 }
 
@@ -717,7 +836,10 @@ func TestCancelAllCancelsAllRequests(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Create requests with cancel contexts
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -772,7 +894,10 @@ func TestCancelAllExceptNilCancelsAll(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Create request with cancel context
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -807,7 +932,10 @@ func TestCancelAllExceptWinnerPreservesWinner(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4", "claude-3"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Create two requests
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -864,7 +992,10 @@ func TestWaitForWinnerWithBaseCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Cancel context immediately
 	cancel()
@@ -881,7 +1012,10 @@ func TestWaitForWinnerWithStreamChClosed(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Set a winner
 	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
@@ -913,7 +1047,10 @@ func TestCoordinatorWithNilHTTPRequest(t *testing.T) {
 	cfg := newTestConfigSnapshot("gpt-4")
 
 	// Should not panic with nil request
-	coord := newRaceCoordinator(ctx, cfg, nil, []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, nil, []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	if coord == nil {
 		t.Fatal("Coordinator should be created even with nil request")
@@ -925,7 +1062,10 @@ func TestCoordinatorWithNilRawBody(t *testing.T) {
 	cfg := newTestConfigSnapshot("gpt-4")
 
 	// Should not panic with nil rawBody
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), nil, []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), nil, []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	if coord == nil {
 		t.Fatal("Coordinator should be created even with nil rawBody")
@@ -936,7 +1076,10 @@ func TestGetStatsWithSpawnTriggers(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfigSnapshot("gpt-4")
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"gpt-4"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Manually add spawn triggers
 	coord.mu.Lock()
@@ -974,7 +1117,10 @@ func TestRaceCoordinator_SecondaryFlagSetOnSecondRequest(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	cfg.ModelsConfig = newMockModelsConfig()
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Manually spawn a second request (simulating what manage() does on idle)
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
@@ -1005,7 +1151,10 @@ func TestRaceCoordinator_MainRequestHasSecondaryFlagFalse(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	cfg.ModelsConfig = newMockModelsConfig()
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Manually spawn a main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
@@ -1036,7 +1185,10 @@ func TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	cfg.ModelsConfig = newMockModelsConfig()
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Manually spawn a fallback request
 	coord.spawn(modelTypeFallback, spawnTriggerInfo{
@@ -1067,7 +1219,10 @@ func TestRaceCoordinator_AllRequestTypes(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	cfg.ModelsConfig = newMockModelsConfig()
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Spawn main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
@@ -1126,7 +1281,10 @@ func TestRaceCoordinator_UseSecondaryUpstreamFlagAccessible(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	cfg.ModelsConfig = newMockModelsConfig()
 
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Create a request with the flag
 	req := newUpstreamRequest(0, modelTypeSecond, "test-model", 1024)
@@ -1223,7 +1381,10 @@ func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
 	cfg.ModelsConfig = modelsConfig
 
 	// Need at least 2 models for second request to spawn
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-hour-test-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-hour-test-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Spawn main request (should get peak hour model via ResolveInternalConfig)
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
@@ -1310,7 +1471,10 @@ func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
 	cfg.ModelsConfig = modelsConfig
 
 	// Need at least 2 models for second request to spawn
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-only-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-only-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Spawn main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
@@ -1380,7 +1544,10 @@ func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
 	cfg.ModelsConfig = modelsConfig
 
 	// Need at least 2 models for second request to spawn
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"combo-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"combo-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Spawn both main and second requests
 	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", failedRequest: -1})
@@ -1454,7 +1621,10 @@ func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
 	cfg.ModelsConfig = modelsConfig
 
 	// Need at least 2 models for second request to spawn
-	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"no-peak-model", "fallback-model"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"no-peak-model", "fallback-model"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	// Spawn main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", failedRequest: -1})

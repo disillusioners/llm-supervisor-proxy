@@ -128,8 +128,11 @@ func TestLiveRelay_FirstByteWinner(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model","stream":true}`)
 
 	// Live mode: pass liveFirstByteGate=true
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 		[]string{"test-model"}, nil, "test-live-fbw", false, nil, "", true, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	startTime := time.Now()
@@ -193,8 +196,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-role-only", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		start := time.Now()
@@ -233,8 +239,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-thinking-first", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		start := time.Now()
@@ -276,8 +285,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-err-only", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		// Either the coordinator returns nil (no winner, executor returned
@@ -309,8 +321,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		cfg := liveTestCfg("http://127.0.0.1:0", 5*time.Second)
 		cfg.MaxGenerationTime = 10 * time.Second
 		cfg.RaceParallelOnIdle = false
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
+		coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
 			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-2a", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 
 		a := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		a.MarkStarted()
@@ -347,8 +362,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 	t.Run("CompletedEmptyNoError_OtherAttemptWins", func(t *testing.T) {
 		cfg := liveTestCfg("http://127.0.0.1:0", 5*time.Second)
 		cfg.MaxGenerationTime = 10 * time.Second
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
+		coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
 			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-empty1", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 
 		empty := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		empty.MarkStarted()
@@ -381,8 +399,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		// guard (streamDeadlineError set, winner nil).
 		cfg := liveTestCfg("http://127.0.0.1:0", 300*time.Millisecond)
 		cfg.MaxGenerationTime = 10 * time.Second
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
+		coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
 			[]byte(`{"model":"mA","stream":true}`), []string{"mA"}, nil, "crafted-empty2", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 
 		empty := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		empty.MarkStarted()
@@ -438,8 +459,11 @@ func TestLiveRelay_StreamDeadlineZeroByte(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 	rawBody := []byte(`{"model":"m","stream":true}`)
 
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 		[]string{"m"}, nil, "test-deadline-zero", false, nil, "", true, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	// Wait for the deadline to fire. handleStreamingDeadline in live mode
@@ -491,7 +515,10 @@ func TestLiveRelay_BufferedModeKeepsIsCompletedGate(t *testing.T) {
 	rawBody := []byte(`{"model":"m","stream":true}`)
 
 	// Buffered mode: liveFirstByteGate=false (the 6-arg wrapper default).
-	coord := newRaceCoordinator(ctx, cfg, req, rawBody, []string{"m"}, false)
+	coord, err := newRaceCoordinator(ctx, cfg, req, rawBody, []string{"m"}, false)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	start := time.Now()
@@ -539,8 +566,11 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
 		// Production scoping for isStream=false: liveFirstByteGate=false.
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-non-stream", false, nil, "", false, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -578,8 +608,11 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":false}`))
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-non-stream-dl", false, nil, "", false, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -621,8 +654,11 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":false}`))
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-non-stream-hdr", false, nil, "", false, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -674,8 +710,11 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
 		// The MIS-SCOPED form: gate=true despite isStream=false.
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-non-stream-mis", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -718,7 +757,10 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 	t.Run("Buffered", func(t *testing.T) {
 		ctxB, cancelB := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelB()
-		coord := newRaceCoordinator(ctxB, cfg, req, rawBody, []string{"m"}, false)
+		coord, err := newRaceCoordinator(ctxB, cfg, req, rawBody, []string{"m"}, false)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 		start := time.Now()
 		_ = coord.WaitForWinner()
@@ -733,8 +775,11 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 	t.Run("Live", func(t *testing.T) {
 		ctxL, cancelL := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelL()
-		coord := newRaceCoordinatorWithEvents(ctxL, cfg, req, rawBody,
+		coord, err := newRaceCoordinatorWithEvents(ctxL, cfg, req, rawBody,
 			[]string{"m"}, nil, "test-dispatch-live", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 		start := time.Now()
 		_ = coord.WaitForWinner()
@@ -898,8 +943,11 @@ func TestLiveRelay_MidStreamLoserCancel(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"mA","stream":true}`))
 	rawBody := []byte(`{"model":"mA","stream":true}`)
 
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
 		[]string{"mA", "mB"}, nil, "test-loser-cancel", false, nil, "", true, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	// Snapshot the fallback attempt's (index 2, server B) buffer BEFORE
@@ -1271,8 +1319,11 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 		defer cancel()
 
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
-		coord := newRaceCoordinatorWithEvents(ctx, cfg, req,
+		coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req,
 			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-boundary", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord.Start()
 
 		// Whichever arm wins the race (ticker selects the first-byte
@@ -1300,8 +1351,11 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 		// (3a) Defensive unit form: the deadline guard's winner-nil early
 		// return (race_coordinator.go handleStreamingDeadline head).
 		cfg := liveTestCfg("http://127.0.0.1:0", 5*time.Second)
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
+		coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
 			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 
 		a := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		a.MarkStarted()
@@ -1346,8 +1400,11 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 		defer cancel2()
 
 		req2, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
-		coord2 := newRaceCoordinatorWithEvents(ctx2, cfg2, req2,
+		coord2, err := newRaceCoordinatorWithEvents(ctx2, cfg2, req2,
 			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl-2", false, nil, "", true, nil)
+		if err != nil {
+			t.Fatalf("newRaceCoordinator: %v", err)
+		}
 		coord2.Start()
 
 		winner := coord2.WaitForWinner()

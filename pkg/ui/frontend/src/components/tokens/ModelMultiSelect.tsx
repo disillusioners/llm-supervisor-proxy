@@ -5,9 +5,20 @@ interface ModelMultiSelectProps {
   selected: string[];  // Currently selected model IDs
   onChange: (selected: string[]) => void;
   disabled?: boolean;
+  // emptyLabel — the trigger/footer text shown when NOTHING is selected.
+  // Defaults to today's 'All models' / 'All models are allowed'. The token
+  // surfaces pass an accurate label instead, because an empty selection on a
+  // RESTRICTED grant axis grants NOTHING (it is not "all models").
+  emptyLabel?: string;
+  // itemNoun — the noun used in the counters ('model' by default; the group
+  // axis passes 'group').
+  itemNoun?: string;
+  // ariaLabel — the accessible name of the trigger button (also the hook the
+  // token tests use to address ONE of the two pickers).
+  ariaLabel?: string;
 }
 
-export function ModelMultiSelect({ models, selected, onChange, disabled }: ModelMultiSelectProps) {
+export function ModelMultiSelect({ models, selected, onChange, disabled, emptyLabel, itemNoun = 'model', ariaLabel }: ModelMultiSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -75,9 +86,9 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
   // Get display text
   const getDisplayText = () => {
     if (selected.length === 0) {
-      return 'All models';
+      return emptyLabel ?? 'All models';
     }
-    return `${selected.length} model${selected.length > 1 ? 's' : ''} selected`;
+    return `${selected.length} ${itemNoun}${selected.length > 1 ? 's' : ''} selected`;
   };
 
   // Check if all filtered models are selected
@@ -90,6 +101,7 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
+        aria-label={ariaLabel}
         class={`w-full flex items-center justify-between px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-sm transition-shadow focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
           disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-gray-500'
         }`}
@@ -118,9 +130,9 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
               type="text"
               value={searchQuery}
               onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
-              placeholder="Search models..."
+              placeholder={`Search ${itemNoun}s...`}
               class="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              aria-label="Search models"
+              aria-label={`Search ${itemNoun}s`}
             />
           </div>
 
@@ -187,8 +199,8 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
           <div class="px-3 py-2 border-t border-gray-700 bg-gray-800/50 rounded-b-md">
             <p class="text-xs text-gray-500">
               {selected.length === 0
-                ? 'All models are allowed'
-                : `${selected.length} of ${models.length} models selected`
+                ? (emptyLabel ?? 'All models are allowed')
+                : `${selected.length} of ${models.length} ${itemNoun}s selected`
               }
             </p>
           </div>

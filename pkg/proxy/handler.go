@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
@@ -534,6 +535,39 @@ func (h *Handler) sendModelNotAllowedError(w http.ResponseWriter, modelName stri
 	})
 }
 
+// denyModelNotAllowed is THE 403 writer of the chat lane: it records
+// the failed request, publishes the "model_not_allowed" event and
+// writes the access_denied envelope.
+//
+// The envelope quotes the CLIENT-REQUESTED string (rc.reqLog.Model) —
+// NEVER the canonical id of the resolved row (PD-9): for a claimed
+// (shadow) id the canonical group id must not leak, or the response
+// would disclose the claim topology.
+//
+// The event vocabulary is unchanged ("model_not_allowed", the same
+// payload keys) — no new outcome string is introduced.
+func (h *Handler) denyModelNotAllowed(w http.ResponseWriter, rc *requestContext) {
+	resolvedID := ""
+	if rc.resolvedModel != nil {
+		resolvedID = rc.resolvedModel.ID
+	}
+	log.Printf("[AUTH] Model '%s' (resolved: %s) not allowed for token %s (%s)", rc.reqLog.Model, resolvedID, rc.tokenID, rc.tokenName)
+
+	rc.reqLog.Status = "failed"
+	rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
+	rc.reqLog.EndTime = time.Now()
+	rc.reqLog.Duration = time.Since(rc.startTime).String()
+	h.store.Add(rc.reqLog)
+
+	h.publishEvent("model_not_allowed", map[string]interface{}{
+		"id":    rc.reqID,
+		"model": rc.reqLog.Model,
+		"token": rc.tokenID,
+	})
+
+	h.sendModelNotAllowedError(w, rc.reqLog.Model)
+}
+
 // sendError sends a JSON error response in OpenAI-compatible format
 func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, errorCode string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -728,6 +762,20 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		rc.tokenName = authToken.Name
 	}
 
+	// THE AUTHORIZATION SCOPE (ADR D2/D7) — resolved ONCE per request,
+	// AFTER auth and BEFORE any candidate construction (D13).
+	//
+	//	nil     => UNRESTRICTED (anonymous, or a wildcard token)
+	//	denyAll => DENY-ALL (an unreadable grant row)
+	//	else    => restricted: Allows(id) is a set lookup
+	//
+	// The membersOf adapter reads the IN-MEMORY models snapshot
+	// (models.GroupMembershipReader — the modelscache decorator's
+	// non-copying accessor), so this adds NO DB read on the request
+	// path (Ruling 5: a live SELECT under m.mu.RLock stalls every
+	// reader behind the writer-preferring RWMutex).
+	rc.scope = authz.Resolve(authToken, h.membersOf(&rc.conf))
+
 	// Phase 3 / Task 2a — POST-AUTH wiring site (A-1, A-1-wiring).
 	// HOISTED OUT of the `if authToken != nil` branch (Round 3j W3):
 	// anonymous / unauthenticated requests must STILL get a conversation
@@ -769,6 +817,49 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// === MODEL ACCESS CHECK (THE SCOPE PREDICATE) ===
+	//
+	// D13 (THE SCOPE DECISION PRECEDES CANDIDATE CONSTRUCTION): this
+	// gate runs BEFORE the group rewrite below, so an out-of-scope
+	// request creates NO group binding, NO sticky write, NO member
+	// expansion and NO upstream attempt — it is denied at the entry.
+	// (It used to run AFTER the rewrite: the status was 403 either way,
+	// but the side effects were not.)
+	//
+	// PD-9 (T2.16): the gate authorizes the RESOLVED row, never the
+	// client-requested string. A claim is an ID-space alias (only
+	// groups claim — modelscache/models.go:283-284), so a request naming
+	// the claimed model id resolves to the claiming GROUP row, and that
+	// group is what would be contacted. The unit of authorization is
+	// the model that will actually be contacted (ADR D1).
+	//
+	// AUDIT BRIDGE: for every NON-claimed request resolvedModel.ID ==
+	// reqLog.Model (the raw client string — handler_functions.go), so
+	// this strict check is behaviourally IDENTICAL to today's single
+	// check. Only the claimed path differs — and there the difference
+	// IS the ruling.
+	//
+	// The 403 quotes the CLIENT-REQUESTED string (rc.reqLog.Model) —
+	// never the canonical group id: a body carrying the canonical id
+	// would disclose the claim topology.
+	if rc.scope != nil {
+		if rc.resolvedModel != nil {
+			if !rc.scope.Allows(rc.resolvedModel.ID) {
+				h.denyModelNotAllowed(w, rc)
+				return
+			}
+		} else if !rc.scope.IsUnrestricted() {
+			// Unknown model + restricted token: fail closed. Doc-only
+			// arm today (the 404 gate at handler_functions.go fires
+			// earlier), kept expressed through the PREDICATE (never
+			// through len(AllowedModels)) so the conjunctive rule
+			// cannot regress here.
+			h.denyModelNotAllowed(w, rc)
+			return
+		}
+	}
+	// === END MODEL ACCESS CHECK ===
+
 	// load-balance-groups §3.6.1 (Am21) — THE modelList rewrite,
 	// OpenAI site. Runs AFTER the conversation-key derivation (the
 	// sticky pick keys on the group-salted conversation key, which
@@ -779,14 +870,32 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// list; per-attempt re-fetches then run member-native). The
 	// Anthropic mirror calls the SAME shared helper (parity by
 	// construction; the parity test pins both sites).
+	//
+	// The rewrite is SCOPED (ADR D6): the member pick consults the
+	// token's reach, so an out-of-reach member is never picked and
+	// never cooled.
 	if rc.resolvedModel != nil {
-		if newList, pick, failGroup := h.applyGroupRewrite(&rc.conf, rc.modelList, rc.conversationKey); failGroup != "" {
+		outcome := h.applyGroupRewrite(&rc.conf, rc.modelList, rc.conversationKey, rc.scope)
+		if outcome.failGroupID != "" {
+			if outcome.scopeExcluded {
+				// PD-14: a group that is empty BECAUSE OF SCOPE is a
+				// PERMISSION failure — 403 access_denied, NEVER the 502
+				// group_unservable envelope (the two failures have
+				// different owners and different operator actions).
+				//
+				// ZERO upstream attempts occurred here (the rewrite is
+				// the FIRST candidate construction) — so the
+				// attempt-count-keyed rule agrees: a permission
+				// failure, not an availability failure.
+				h.denyModelNotAllowed(w, rc)
+				return
+			}
 			// Am28 / §3.8: empty-at-runtime group ⇒ the normal
 			// resolve-failure envelope — never a panic, never a
 			// silent passthrough.
-			log.Printf("[grouplb] request %s: %s", rc.reqID, groupFailMessage(failGroup))
+			log.Printf("[grouplb] request %s: %s", rc.reqID, groupFailMessage(outcome.failGroupID))
 			rc.reqLog.Status = "failed"
-			rc.reqLog.Error = groupFailMessage(failGroup)
+			rc.reqLog.Error = groupFailMessage(outcome.failGroupID)
 			rc.reqLog.EndTime = time.Now()
 			rc.reqLog.Duration = time.Since(rc.startTime).String()
 			h.store.Add(rc.reqLog)
@@ -796,9 +905,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			})
 			h.sendError(w, http.StatusBadGateway, rc.reqLog.Error, models.ErrorTypeServerError, "group_unservable")
 			return
-		} else if pick != nil {
+		} else if outcome.pick != nil {
+			pick := outcome.pick
 			rc.modelListOriginal = rc.modelList
-			rc.modelList = newList
+			rc.modelList = outcome.list
 			rc.groupPick = pick
 			// wi-7769a812 part 2 — exhaustive member iteration: the
 			// sticky pick is this request's FIRST tried member.
@@ -812,71 +922,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			}
 			log.Printf("[grouplb] request %s: group=%s → sticky member=%s (newlyBound=%v)",
 				rc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
+		} else if outcome.list != nil {
+			// The rewrite ran but produced NO group pick (a dropped
+			// fallback-position group — PD-12/arch PD-7). The list is
+			// still swapped: the dropped entry must not survive into
+			// the execution list. No pick ⇒ no group context ⇒ the
+			// group re-entry path stays closed (it is gated on
+			// rc.groupPick != nil).
+			rc.modelListOriginal = rc.modelList
+			rc.modelList = outcome.list
 		}
 	}
-
-	// === MODEL ACCESS CHECK ===
-	// Check if the requested model is allowed for this token
-	// This check happens AFTER authentication for internal models
-	// For unknown models: only check if token has restrictions (fail-closed)
-	//
-	// load-balance-groups §3.4 (Q1 tail): the allow-list evaluates the
-	// CLIENT-REQUESTED ID STRING — for a claimed ID (claims-first
-	// GetModel returned the GROUP row) the client string is the
-	// claimed model's ID, so a token listing the shadowed ID reaches
-	// the group through that alias exactly as today; a token listing
-	// only the group's own ID reaches it only via the group ID;
-	// unlisted requests are denied fail-closed. (Pre-claims, the
-	// resolved ID and the client string were always identical — this
-	// only changes behavior for claimed requests, per plan.)
-	if authToken != nil {
-		var modelID string
-		if rc.resolvedModel != nil {
-			modelID = rc.reqLog.Model // the client-requested ID string
-		}
-		if modelID != "" {
-			// Model exists in our DB - check if allowed by token
-			if !authToken.IsModelAllowed(modelID) {
-				log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)", rc.reqLog.Model, modelID, rc.tokenID, rc.tokenName)
-
-				rc.reqLog.Status = "failed"
-				rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
-				rc.reqLog.EndTime = time.Now()
-				rc.reqLog.Duration = time.Since(rc.startTime).String()
-				h.store.Add(rc.reqLog)
-
-				h.publishEvent("model_not_allowed", map[string]interface{}{
-					"id":    rc.reqID,
-					"model": rc.reqLog.Model,
-					"token": rc.tokenID,
-				})
-
-				h.sendModelNotAllowedError(w, rc.reqLog.Model)
-				return
-			}
-		} else if len(authToken.AllowedModels) > 0 {
-			// Model not in DB AND token has restrictions → deny (fail-closed)
-			// Unknown models should not bypass allowed_models restrictions
-			log.Printf("[AUTH] Model '%s' not found in DB, token %s (%s) has restrictions - denying", rc.reqLog.Model, rc.tokenID, rc.tokenName)
-
-			rc.reqLog.Status = "failed"
-			rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
-			rc.reqLog.EndTime = time.Now()
-			rc.reqLog.Duration = time.Since(rc.startTime).String()
-			h.store.Add(rc.reqLog)
-
-			h.publishEvent("model_not_allowed", map[string]interface{}{
-				"id":    rc.reqID,
-				"model": rc.reqLog.Model,
-				"token": rc.tokenID,
-			})
-
-			h.sendModelNotAllowedError(w, rc.reqLog.Model)
-			return
-		}
-		// else: model not in DB and no restrictions → allow
-	}
-	// === END MODEL ACCESS CHECK ===
 
 	// Header-driven flag for MiniMax reasoning_details split-mode translation.
 	// Value-list semantics (R8/Q3): accepted values are case-sensitive
@@ -987,13 +1043,81 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		if rc.groupAdvances > 0 && stickyPromotionLogged {
 			reorderLogID = ""
 		}
+		// C1 — THE REACH FILTER (ADR D6/D7): every candidate outside the
+		// token's reach is removed from the execution list BEFORE the
+		// sticky ordering runs — sticky promotion must never promote an
+		// entry the filter would remove.
+		//
+		// The filter runs on EVERY loop iteration (the group re-entry
+		// rebuilds the list), so the durable invariant is C1 + C4.
+		rc.modelList = h.applyReachFilter(rc.scope, rc.modelList)
 		beforeStickyOrder := rc.modelList
 		rc.modelList = h.applyStickyOrder(&rc.conf, rc.modelList, rc.conversationKey, reorderLogID)
 		if reorderLogID != "" && !slices.Equal(beforeStickyOrder, rc.modelList) {
 			stickyPromotionLogged = true
 		}
 
-		coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate, h.stickyEngine)
+		// PD-10 (T2.12): an empty execution list is a CONTRACT VIOLATION
+		// at the coordinator — the caller must decide 403 (scope) or
+		// 502 (unservability) BEFORE construction. The constructor
+		// refuses an empty list (it used to silently re-expand it to
+		// {cfg.ModelID}, re-introducing an out-of-scope model).
+		if len(rc.modelList) == 0 {
+			// Defensive conjunct (Phase-2 sec review W2): a 403 is only
+			// ever correct when NO upstream attempt ran and the response
+			// headers are not committed. Unreachable today (the empty
+			// list ⇒ the coordinator was never constructed ⇒ attempts ==
+			// 0 and no byte was written), but the terminal branches carry
+			// the same conjunct; with >= 1 attempt this falls through to
+			// the 502 all_models_failed path below.
+			if rc.groupPick != nil && rc.upstreamAttempts == 0 && !rc.headersSent {
+				// The group was in reach but NO member was → a scope
+				// exclusion. (The pick/list consistency rule makes
+				// rc.groupPick != nil imply a real GroupID, so this
+				// test is sound — the two rules are load-bearing for
+				// each other.)
+				//
+				// ZERO upstream attempts ran (the list is empty ⇒ the
+				// coordinator was never constructed) ⇒ the
+				// attempt-count-keyed rule agrees: a permission
+				// failure, never an availability failure.
+				h.denyModelNotAllowed(w, rc)
+				return
+			}
+			// Defensive: an internally-empty build with no group pick —
+			// the entry gate already caught the reachable case.
+			log.Printf("[authz] request %s: EMPTY execution list with no group pick — refusing to construct the coordinator", rc.reqID)
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = "no executable models for this request"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+			h.publishEvent("request_failed", map[string]interface{}{
+				"id":    rc.reqID,
+				"error": rc.reqLog.Error,
+			})
+			h.sendError(w, http.StatusBadGateway, rc.reqLog.Error, models.ErrorTypeServerError, "all_models_failed")
+			return
+		}
+
+		coordinator, coordErr := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate, h.stickyEngine)
+		if coordErr != nil {
+			// The constructor REFUSES an empty list (PD-10) — the
+			// caller guard above must have caught it first. Fail clean:
+			// never a silent re-expansion, never an upstream attempt.
+			log.Printf("[authz] request %s: race coordinator refused: %v", rc.reqID, coordErr)
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = "no executable models for this request"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+			h.publishEvent("request_failed", map[string]interface{}{
+				"id":    rc.reqID,
+				"error": rc.reqLog.Error,
+			})
+			h.sendError(w, http.StatusBadGateway, rc.reqLog.Error, models.ErrorTypeServerError, "all_models_failed")
+			return
+		}
 		// Q15 (plan §3.7): the coordinator carries the group pick so
 		// the W-1 publish site (race_executor) can fire
 		// model_member_selected newlyBound-only.
@@ -1085,11 +1209,20 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				rc.soonestExpiryAcrossRace[m] = true
 			}
 		}
+		// THE ATTEMPT SEAM: the coordinator's spawn rows ARE this
+		// request's upstream-attempt record (the same accounting the
+		// all-failed verdict uses — modelAttemptCountLocked counts the
+		// model-attempt rows). The counter lives on the REQUEST context
+		// because the group re-entry builds a FRESH coordinator.
+		attemptedModels := coordinator.AttemptedModelIDs()
+		if len(attemptedModels) > 0 {
+			rc.upstreamAttempts += len(attemptedModels)
+		}
 		if rc.groupPick != nil {
 			if rc.groupTriedMembers == nil {
 				rc.groupTriedMembers = make(map[string]bool)
 			}
-			for _, m := range coordinator.AttemptedModelIDs() {
+			for _, m := range attemptedModels {
 				rc.groupTriedMembers[m] = true
 			}
 		}
@@ -1158,6 +1291,29 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				h.publishGroupHop("group_fallback_exhausted", failedGroup, failedMember, "", fr.String())
 			}
 			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
+			// ATTEMPT-COUNT-KEYED TERMINAL VERDICT (leader ruling): a
+			// re-entry that exhausted ON SCOPE is a PERMISSION failure
+			// ONLY when no upstream attempt ran at all. With >= 1
+			// attempt the terminal availability envelope (502
+			// all_models_failed) is UNCHANGED — we tried, the upstream
+			// failed, and the failure is an availability failure.
+			//
+			// The !headersSent conjunct mirrors the Anthropic lane's
+			// twin: once the response headers are on the wire a 403
+			// body would corrupt the committed stream, so the verdict
+			// falls through to the EXISTING terminal path below
+			// (handleRaceFailure), which owns the headers-sent case
+			// (it emits an SSE error instead of a JSON envelope).
+			//
+			// Behaviour-neutral today: scopeExhausted is set only by the
+			// group re-entry, which runs only AFTER a failed coordinator
+			// (so upstreamAttempts >= 1 and this branch is unreachable);
+			// the conjunct makes the branch safe if a future path sets
+			// scopeExhausted pre-attempt.
+			if rc.scopeExhausted && rc.upstreamAttempts == 0 && !rc.headersSent {
+				h.denyModelNotAllowed(w, rc)
+				return
+			}
 			h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")
 			return
 		}
@@ -1194,8 +1350,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // window handed to the engine on a genuine failure remains the
 // CONFIG-OWNED skip-cache TTL.
 func (h *Handler) tryGroupReentry(rc *requestContext) bool {
-	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
-	if !ok {
+	if _, ok := rc.conf.ModelsConfig.(models.GroupRewriter); !ok {
 		return false
 	}
 	if rc.groupTriedMembers == nil {
@@ -1207,13 +1362,27 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	// request) and the ordering sweep's head strictly advances, so
 	// the walk terminates in ≤ member-count iterations. Bounded by
 	// MaxGroupMembers for safety.
+	//
+	// The offer is SCOPED (ADR D6): the walk never offers an
+	// out-of-reach member, and an out-of-reach member is never cooled
+	// (a scope exclusion is not a health fact — it must not create
+	// cross-request state).
 	replacement, pool, avail := "", "", false
 	excludeTarget := rc.groupPick.MemberID
 	for iter := 0; iter <= models.MaxGroupMembers; iter++ {
-		replacement, pool, avail = gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, excludeTarget, rc.conf.UpstreamSkipCacheTTL)
-		if !avail || replacement == "" {
+		outcome := h.excludeGroupMemberScoped(&rc.conf, rc.scope, rc.groupPick.GroupID, rc.conversationKey, excludeTarget, rc.conf.UpstreamSkipCacheTTL)
+		if !outcome.OK || outcome.Replacement == "" {
+			if outcome.ScopeOnly {
+				// EVERY remaining candidate was out of reach: a SCOPE
+				// exhaustion, not an availability failure. The verdict
+				// is attempt-count-keyed at the terminal site (the
+				// re-entry itself only runs AFTER an attempt).
+				rc.scopeExhausted = true
+				log.Printf("[authz] request %s: group %s exhausted ON SCOPE (every remaining member is outside this token's reach)", rc.reqID, rc.groupPick.GroupID)
+			}
 			return false // single-member group / all members exhausted — real failure
 		}
+		replacement, pool, avail = outcome.Replacement, outcome.Pool, true
 		if !rc.groupTriedMembers[replacement] {
 			break
 		}
@@ -1228,11 +1397,21 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	// Rebuild the modelList via the SAME rewrite helper (the offer and
 	// the rebuild are one ordering authority — store_group_rewrite.go
 	// ExcludeGroupMember delegates to pickServableGroupMember).
-	newList, pick, failGroup := h.applyGroupRewrite(&rc.conf, rc.modelListOriginal, rc.conversationKey)
-	if failGroup != "" || pick == nil {
+	outcome := h.applyGroupRewrite(&rc.conf, rc.modelListOriginal, rc.conversationKey, rc.scope)
+	if outcome.failGroupID != "" || outcome.pick == nil {
+		if outcome.scopeExcluded {
+			// SCOPE exhaustion at the rebuild. The verdict is
+			// attempt-count-keyed (leader ruling): ZERO upstream
+			// attempts ⇒ 403 access_denied; >= 1 attempt ⇒ the
+			// terminal availability path (502) is unchanged.
+			rc.scopeExhausted = true
+			log.Printf("[authz] request %s: group %s rebuild exhausted ON SCOPE — no member of this group is inside the token's reach", rc.reqID, rc.groupPick.GroupID)
+			return false
+		}
 		log.Printf("[grouplb] request %s: re-entry rebuild failed for group %s — treating as real failure", rc.reqID, rc.groupPick.GroupID)
 		return false
 	}
+	pick := outcome.pick
 	// F3 post-rebuild guard: the rebuild is the SAME ordering
 	// authority as the offer walk, so it normally re-serves the
 	// accepted replacement — the tried-mark happens HERE (after the
@@ -1245,8 +1424,13 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	}
 	rc.groupTriedMembers[pick.MemberID] = true
 	rc.groupAdvances++
-	rc.modelList = newList
+	rc.modelList = outcome.list
 	rc.groupPick = pick
+	// C4 — THE REACH FILTER on the rebuilt list (the rebuild
+	// re-materialises the member list). C1 re-filters at the loop top
+	// of the next iteration — this makes the obligation explicit at
+	// the swap site too (both, by design).
+	rc.modelList = h.applyReachFilter(rc.scope, rc.modelList)
 	if pick.MemberID != rc.reqLog.Model {
 		rc.reqLog.RouteModel = pick.MemberID
 	} else {
