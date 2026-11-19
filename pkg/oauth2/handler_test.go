@@ -371,6 +371,72 @@ func TestStart_SanitizesRedirectTarget(t *testing.T) {
 	}
 }
 
+// D (tester R1): the redirect denylist is evaluated on the NORMALIZED path.
+// A traversal sequence ("/ui/../oauth2/start") used to pass the raw prefix
+// check and was EMITTED by http.Redirect as "/oauth2/start" — the denylist
+// bypass. Every variant must land on the sanitized fallback, and the
+// Location the handler actually emits must never be an /oauth2/* path.
+func TestStart_RedirectTargetTraversalCannotEscapeDenylist(t *testing.T) {
+	cases := []string{
+		"/ui/../oauth2/start",
+		"//oauth2/x",
+		"/x/../oauth2/start",
+		"/ui/../oauth2/logout",
+		"/ui/../oauth2/callback",
+		"/oauth2/../oauth2/start",
+		"/ui/../oauth2",
+		"/ui/../fe/api/auth/me",
+	}
+	for _, c := range cases {
+		got := sanitizeRedirectTarget(c)
+		if got != "/ui/" {
+			t.Fatalf("input %q sanitized to %q, want %q", c, got, "/ui/")
+		}
+	}
+
+	// the EMITTED Location (http.Redirect cleans it) must be the fallback too.
+	h := newTestHandler(t)
+	sess := &Session{Sub: "u", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	v, err := h.cookie.Seal(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/oauth2/start?rd="+url.QueryEscape(c), nil)
+		req.AddCookie(&http.Cookie{Name: h.cfg.CookieName, Value: v})
+		w := httptest.NewRecorder()
+		h.HandleStart(w, req)
+		if w.Code != http.StatusFound {
+			t.Fatalf("input %q: code %d", c, w.Code)
+		}
+		loc := w.Header().Get("Location")
+		if loc != "/ui/" {
+			t.Fatalf("input %q emitted Location %q, want %q", c, loc, "/ui/")
+		}
+		if strings.HasPrefix(loc, "/oauth2/") || loc == "/oauth2" || loc == "/fe/api/auth/me" {
+			t.Fatalf("input %q emitted a denylisted Location %q", c, loc)
+		}
+	}
+}
+
+// D: an allowed target keeps its shape — the normalization preserves the
+// trailing slash, so "/ui/" is still "/ui/" (and not the cleaned "/ui").
+func TestStart_SanitizesRedirectTargetKeepsAllowedShape(t *testing.T) {
+	cases := map[string]string{
+		"/ui/":         "/ui/",
+		"/ui/models":   "/ui/models",
+		"/ui//models":  "/ui/models",
+		"/fe/api/x":    "/fe/api/x",
+		"/":            "/",
+		"/ui/sub/../x": "/ui/x",
+	}
+	for in, want := range cases {
+		if got := sanitizeRedirectTarget(in); got != want {
+			t.Fatalf("input %q got %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestCallback_RejectsMissingState(t *testing.T) {
 	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback", nil)

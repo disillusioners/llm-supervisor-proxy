@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -630,6 +631,18 @@ func domainAllowed(domains []string, domain string) bool {
 	return false
 }
 
+// sanitizeRedirectTarget validates the operator-supplied post-login redirect
+// target ("rd") and falls back to /ui/ for every shape that is not a safe
+// same-origin path.
+//
+// The denylist is evaluated against the NORMALIZED path (path.Clean), because
+// http.Redirect cleans the Location it emits: a target like
+// "/ui/../oauth2/start" passes a raw prefix check but is EMITTED as
+// "/oauth2/start" — the denylist bypass the tester recorded as R1. The
+// structural checks (single leading slash, no "//" or "/\" prefix, no control
+// characters, no scheme) run on the RAW string BEFORE the normalization,
+// because path.Clean would fold "//host" into "/host" and hide the
+// scheme-relative shape.
 func sanitizeRedirectTarget(rd string) string {
 	rd = strings.TrimSpace(rd)
 	if rd == "" {
@@ -652,6 +665,9 @@ func sanitizeRedirectTarget(rd string) string {
 	if strings.Contains(rd, "://") {
 		return "/ui/"
 	}
+	// NORMALIZE before the denylist: the emitted Location is path.Clean'd by
+	// http.Redirect, so the denylist must be judged on that same shape.
+	rd = cleanRedirectPath(rd)
 	// reject /oauth2/* and /fe/api/auth/me
 	if strings.HasPrefix(rd, "/oauth2/") || rd == "/oauth2/start" || rd == "/oauth2/callback" || rd == "/oauth2/logout" {
 		return "/ui/"
@@ -659,12 +675,23 @@ func sanitizeRedirectTarget(rd string) string {
 	if rd == "/fe/api/auth/me" {
 		return "/ui/"
 	}
-	// path.Clean? spec says path.Clean semantics in middleware; for rd just basic.
 	// Also reject /oauth2 (exact)
 	if rd == "/oauth2" {
 		return "/ui/"
 	}
 	return rd
+}
+
+// cleanRedirectPath normalizes a redirect target exactly the way
+// http.Redirect normalizes the Location it emits (path.Clean), preserving the
+// trailing slash so an allowed target keeps the shape the operator asked for
+// ("/ui/" stays "/ui/", it does not become "/ui").
+func cleanRedirectPath(p string) string {
+	cleaned := path.Clean(p)
+	if strings.HasSuffix(p, "/") && !strings.HasSuffix(cleaned, "/") {
+		cleaned += "/"
+	}
+	return cleaned
 }
 
 func randomToken(n int) string {
