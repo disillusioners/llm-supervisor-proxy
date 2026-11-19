@@ -691,7 +691,10 @@ func domainAllowed(domains []string, domain string) bool {
 // structural checks (single leading slash, no "//" or "/\" prefix, no control
 // characters, no scheme) run on the RAW string BEFORE the normalization,
 // because path.Clean would fold "//host" into "/host" and hide the
-// scheme-relative shape.
+// scheme-relative shape. The same order holds for the backslash folding a
+// browser performs (WHATWG URL): the raw checks see the raw string, the
+// folding happens next, and the denylist judges the folded+cleaned path —
+// the very shape the browser will request.
 func sanitizeRedirectTarget(rd string) string {
 	rd = strings.TrimSpace(rd)
 	if rd == "" {
@@ -714,6 +717,14 @@ func sanitizeRedirectTarget(rd string) string {
 	if strings.Contains(rd, "://") {
 		return "/ui/"
 	}
+	// BROWSER NORMALIZATION (WHATWG URL): a browser folds every backslash of
+	// the path into a slash BEFORE it requests the target, so a raw backslash
+	// sequence that survives the raw checks above reaches the server as a
+	// traversal the denylist never saw ("/ui/..\..\oauth2\start" is emitted
+	// as "/oauth2/start"). The structural checks above deliberately ran on
+	// the RAW string (they catch the "//" and "/\" shapes); the folding
+	// happens HERE, before cleanRedirectPath and before the denylist.
+	rd = strings.ReplaceAll(rd, "\\", "/")
 	// NORMALIZE before the denylist: the emitted Location is path.Clean'd by
 	// http.Redirect, so the denylist must be judged on that same shape.
 	rd = cleanRedirectPath(rd)

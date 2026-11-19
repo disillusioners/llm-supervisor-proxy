@@ -400,6 +400,12 @@ func TestStart_RedirectTargetTraversalCannotEscapeDenylist(t *testing.T) {
 		"/oauth2/../oauth2/start",
 		"/ui/../oauth2",
 		"/ui/../fe/api/auth/me",
+		// BROWSER NORMALIZATION (WHATWG URL): the browser folds every
+		// backslash of the path into a slash before it requests the target,
+		// so these reach the server as the traversal the denylist must see.
+		"/ui/..\\..\\oauth2\\start",
+		"/ui/..\\oauth2\\logout",
+		"/ui/..\\fe\\api\\auth\\me",
 	}
 	for _, c := range cases {
 		got := sanitizeRedirectTarget(c)
@@ -429,6 +435,38 @@ func TestStart_RedirectTargetTraversalCannotEscapeDenylist(t *testing.T) {
 		}
 		if strings.HasPrefix(loc, "/oauth2/") || loc == "/oauth2" || loc == "/fe/api/auth/me" {
 			t.Fatalf("input %q emitted a denylisted Location %q", c, loc)
+		}
+		// a backslash in the emitted Location is a residual the BROWSER
+		// would fold into a slash: the Location must already be the shape
+		// the browser requests.
+		if strings.Contains(loc, "\\") {
+			t.Fatalf("input %q emitted a Location the browser would re-normalize: %q", c, loc)
+		}
+	}
+}
+
+// Item 1 (browser residual): a browser folds every backslash of the path into
+// a slash BEFORE it requests the target (WHATWG URL), so a raw backslash
+// sequence that passes the raw structural checks would be REQUESTED as a
+// traversal the denylist never saw. The target must therefore be
+// backslash-normalized BEFORE cleanRedirectPath and the denylist — while the
+// raw structural checks keep running on the raw string.
+func TestStart_RedirectTargetBackslashNormalizedBeforeDenylist(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`/ui/..\..\oauth2\start`, "/ui/"},
+		{`/ui/..\oauth2\logout`, "/ui/"},
+		{`/ui\..\oauth2\callback`, "/ui/"},
+		{`/ui/..\fe\api\auth\me`, "/ui/"},
+		{`\oauth2\start`, "/ui/"},    // no leading slash: the raw check fires
+		{`/\evil.com`, "/ui/"},       // the raw "/\" prefix check still fires
+		{`/ui\models`, "/ui/models"}, // a benign backslash folds to a slash
+	}
+	for _, c := range cases {
+		if got := sanitizeRedirectTarget(c.in); got != c.want {
+			t.Fatalf("input %q sanitized to %q, want %q", c.in, got, c.want)
 		}
 	}
 }
