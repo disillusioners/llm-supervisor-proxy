@@ -275,7 +275,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 		Name:          "Anthropic Leak Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(openaiCredID),
+		Credentials:   models.TestRefs(openaiCredID),
 		InternalModel: intModelUpstreamName,
 	}); err != nil {
 		t.Fatalf("add model %s: %v", intModel, err)

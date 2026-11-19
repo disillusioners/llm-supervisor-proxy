@@ -964,5 +964,3 @@ func TestE2E_ServerDisabled(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 }
-
-

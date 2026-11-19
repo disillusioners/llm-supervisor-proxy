@@ -896,7 +896,7 @@ export function useTokens() {
   }, []);
 
   // Token grant axes — the frozen token-scope wire contract
-  // (BE pkg/ui/server.go:2507-2518 create / :2574-2590 patch).
+  // (BE pkg/ui/server.go: handleTokens create / updateTokenPermission patch).
   //
   // ONE shared reading rule, TWO different write rules:
   //   ABSENT  = key missing OR explicit null  => no allow-list => UNRESTRICTED

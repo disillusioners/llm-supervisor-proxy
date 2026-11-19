@@ -14,6 +14,7 @@ package authz
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,13 +44,21 @@ func goToolPath() string {
 }
 
 // runGoListDeps returns the transitive dependency list of pkg/authz.
+//
+// A `go list` FAILURE is an ERROR, not a skip: the guard's claim is that
+// pkg/authz has no banned transitive dependency, and silently skipping the
+// transitive half narrows that claim to "the source-level scan only". The
+// child's stderr is carried into the returned error so the failure is
+// diagnosable (house precedent: pkg/imggen/import_guard_test.go).
 func runGoListDeps(moduleRoot string) ([]string, error) {
 	cmd := exec.Command(goToolPath(), "list", "-deps", "./pkg/authz/...")
 	cmd.Dir = moduleRoot
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w\n%s", err, stderr.String())
 	}
 	var deps []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -135,6 +144,10 @@ func TestPackage_ImportGuard_AuthzStaysLeaf(t *testing.T) {
 // decision, modelscache. pkg/models is deliberately NOT in this list for the
 // same reason — TestPackage_ImportGuard_AuthzImportsOnlyAuth asserts it
 // directly at the source level, which is the enforceable form.
+//
+// FAIL HARD (not skip): if `go list -deps` cannot run, this test FAILS and
+// surfaces the child's stderr. A skip would silently reduce the guard to
+// its source-level half and report the leaf invariant as still proven.
 func TestPackage_ImportGuard_AuthzLeafConstraint_TransitiveClosure(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -144,7 +157,7 @@ func TestPackage_ImportGuard_AuthzLeafConstraint_TransitiveClosure(t *testing.T)
 
 	deps, err := runGoListDeps(moduleRoot)
 	if err != nil {
-		t.Skipf("go list unavailable in this environment (%v) — source-level guard still runs", err)
+		t.Fatalf("go list -deps failed: %v", err)
 	}
 	const prefix = "github.com/disillusioners/llm-supervisor-proxy/pkg/"
 	for _, dep := range deps {

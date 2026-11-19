@@ -7,7 +7,7 @@
 // the trap.
 //
 // ── WIRE CONTRACT (landed — pkg/ui/frontend/src/hooks/useApi.ts @ b0d4875,
-//    pkg/ui/server.go:2583-2631) ────────────────────────────────────────────
+//    pkg/ui/server.go: handleTokens create / updateTokenPermission patch) ───
 //
 //   POST  /fe/api/tokens        BOTH axes always on the wire:
 //                                 null => ABSENT       (no allow-list: the axis

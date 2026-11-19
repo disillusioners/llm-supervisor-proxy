@@ -91,10 +91,10 @@ func TestProxyAuthMiddleware(t *testing.T) {
 	})
 
 	tests := []struct {
-		name               string
-		authHeader         string
-		wantStatus         int
-		wantBodyContains   string
+		name             string
+		authHeader       string
+		wantStatus       int
+		wantBodyContains string
 	}{
 		{
 			name:       "Valid token",

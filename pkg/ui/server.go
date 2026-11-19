@@ -2828,10 +2828,15 @@ func (s *Server) tokenGrantRow(id string) *models.ModelConfig {
 // (PATCH) or "not supplied" (POST) — re-checking a KEPT id would wedge the
 // operator out of editing a token whose model was deleted (anti-wedge, R1.9).
 //
-// ctx is accepted for signature stability with the plan's stated shape: the
-// current lookup is entirely cache-backed (GetModelNative/GetModel) so it
-// never blocks, but a future DB-backed existence check must not need a
-// signature change at every call site.
+// ctx is accepted for signature stability with the plan's stated shape, so a
+// future DB-backed existence check must not need a signature change at every
+// call site. It is NOT threaded into the lookup today, and the lookup is NOT
+// guaranteed non-blocking: only the cache-layer HIT path is in-memory. A
+// miss falls through to a strict DB fill, and with CACHE_LAYER_ENABLED=OFF
+// the lookup IS the raw manager's GetModel (pkg/store/database/store.go) —
+// a live SELECT under the models manager's writer-preferring RLock, with NO
+// deadline. Threading ctx into that read is a behavior change and is out of
+// scope here.
 func (s *Server) validateTokenGrants(ctx context.Context, perm auth.OptionalTokenPermission) string {
 	// No model backend bound (unit-test servers): nothing to validate
 	// against. Reads stay lenient and the resolver is authoritative at

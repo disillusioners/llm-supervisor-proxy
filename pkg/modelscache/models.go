@@ -1327,6 +1327,13 @@ func (c *CachedModelsConfig) RewriteGroupEntriesScoped(modelList []string, conve
 		// covers the OTHER degradation shape (a backend that is not this
 		// decorator at all); this one is the decorator's own inner
 		// degradation, which the request layer cannot see.
+		//
+		// PER CALL, NOT once-per-request: the announcement is not
+		// rate-limited and not de-duplicated — every call that reaches
+		// this branch logs it. That is cheap because the branch is a rare
+		// path in production (the decorator's inner backend implements the
+		// scoped seam); reading it as a once-per-request announcement
+		// would be wrong.
 		log.Printf("[authz] modelscache decorator: the inner backend lacks the scoped rewrite — permission filtering falls back to the request-layer list filter")
 	}
 	return c.RewriteGroupEntries(modelList, conversationKey)

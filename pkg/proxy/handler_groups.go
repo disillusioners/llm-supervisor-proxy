@@ -161,17 +161,21 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 		res = grs.RewriteGroupEntriesScoped(modelList, conversationKey, reach)
 	} else {
 		if reach != nil {
-			// LOUD ONCE per request: THIS backend cannot scope its pick,
-			// so the request-layer list filter (applyReachFilter) is the
-			// fail-closed backstop. The pick may be sub-optimal, but no
-			// out-of-scope candidate can reach an upstream attempt.
+			// LOUD, PER CALL (NOT once-per-request): THIS backend cannot
+			// scope its pick, so the request-layer list filter
+			// (applyReachFilter) is the fail-closed backstop. The pick may
+			// be sub-optimal, but no out-of-scope candidate can reach an
+			// upstream attempt.
 			//
 			// This branch is NOT dead: it fires for every backend that
 			// implements only the UNSCOPED seam — the structural test
-			// fakes and any third-party backend. The modelscache
-			// decorator implements the scoped seam, and its OWN inner
-			// degradation is announced inside the decorator (the request
-			// layer cannot see it from here).
+			// fakes and any third-party backend. The log is emitted on
+			// EVERY call that reaches this branch (there is no once-gating
+			// and no rate limit), which is cheap because the branch is a
+			// rare path in production: the modelscache decorator
+			// implements the scoped seam, and its OWN inner degradation is
+			// announced inside the decorator (the request layer cannot see
+			// it from here).
 			log.Printf("[authz] models backend lacks the scoped rewrite — permission filtering falls back to the request-layer list filter")
 		}
 		res = gr.RewriteGroupEntries(modelList, conversationKey)

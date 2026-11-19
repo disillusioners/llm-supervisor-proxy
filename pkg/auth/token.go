@@ -103,7 +103,9 @@ func scanGrant(raw interface{}, axis string) (ids []string, present bool, invali
 		str = string(v)
 	default:
 		// Fail closed: an unknown driver raw type is an unreadable grant.
-		log.Printf("SECURITY: unreadable %s (unknown driver raw type %T), denying all models on this axis", axisLabel(axis), raw)
+		// The scope is TOKEN-WIDE: an invalid axis makes the whole token
+		// DENY-ALL on BOTH axes (authz.Resolve), not just this axis.
+		log.Printf("SECURITY: unreadable %s axis (%s, unknown driver raw type %T); the token is DENY-ALL on both axes", axisNoun(axis), axisLabel(axis), raw)
 		return nil, false, true
 	}
 
@@ -114,7 +116,7 @@ func scanGrant(raw interface{}, axis string) (ids []string, present bool, invali
 		// indistinguishable from NULL — and NULL on BOTH axes is the
 		// WILDCARD state (ADR D3/D11). An empty column is therefore
 		// DENY-ALL, exactly like a malformed or unknown-typed column.
-		log.Printf("SECURITY: empty %s column (empty or whitespace-only text), denying all models on this axis", axisLabel(axis))
+		log.Printf("SECURITY: empty %s axis (%s: empty or whitespace-only text); the token is DENY-ALL on both axes", axisNoun(axis), axisLabel(axis))
 		return nil, false, true
 	}
 
@@ -123,20 +125,20 @@ func scanGrant(raw interface{}, axis string) (ids []string, present bool, invali
 	// 'null' as nil (indistinguishable from ABSENT) — reject it first so
 	// it lands in INVALID, per plan §2.7 / ADR D10.
 	if !startsWithJSONArray(str) {
-		log.Printf("SECURITY: malformed %s JSON (not a JSON array), denying all models on this axis", axisLabel(axis))
+		log.Printf("SECURITY: malformed %s axis (%s: not a JSON array); the token is DENY-ALL on both axes", axisNoun(axis), axisLabel(axis))
 		return nil, false, true
 	}
 
 	var granted []string
 	if err := json.Unmarshal([]byte(str), &granted); err != nil {
-		// Fail closed - deny all models on malformed JSON
-		log.Printf("SECURITY: malformed %s JSON, denying all models on this axis", axisLabel(axis))
+		// Fail closed - the token is DENY-ALL on malformed JSON
+		log.Printf("SECURITY: malformed %s axis (%s); the token is DENY-ALL on both axes", axisNoun(axis), axisLabel(axis))
 		return nil, false, true
 	}
 	if granted == nil {
 		// Defensive: `[]` unmarshals to a non-nil empty slice; a nil
 		// here means the literal was not an array after all.
-		log.Printf("SECURITY: malformed %s JSON (decoded to nil), denying all models on this axis", axisLabel(axis))
+		log.Printf("SECURITY: malformed %s axis (%s: decoded to nil); the token is DENY-ALL on both axes", axisNoun(axis), axisLabel(axis))
 		return nil, false, true
 	}
 	return granted, true, false
@@ -150,6 +152,21 @@ func axisLabel(axis string) string {
 		return "grant axis"
 	}
 	return axis
+}
+
+// axisNoun renders the log NOUN for a grant axis — the kind of id the axis
+// holds ("models" / "groups"). It exists so a scan failure never names the
+// wrong kind of grant: the groups axis is not "models". It NEVER carries a
+// token value or any part of the row's contents.
+func axisNoun(axis string) string {
+	switch axis {
+	case "allowed_models":
+		return "models"
+	case "allowed_groups":
+		return "groups"
+	default:
+		return "grant"
+	}
 }
 
 // startsWithJSONArray reports whether s (already known non-blank) begins

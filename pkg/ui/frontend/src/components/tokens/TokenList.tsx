@@ -13,8 +13,9 @@ import {
 
 interface TokenListProps {
   tokens: ApiToken[];
-  // The UNFILTERED model list (kind included): the axis split is made by ROW
-  // KIND, and a group row is never a model grant.
+  // The UNFILTERED model list (kind included): it fills each axis's picker
+  // options, and each axis's OWN picker selection is authoritative — a
+  // selection's axis is the picker it was made in, NOT the row's kind.
   models: TokenModelRow[];
   onRevoke: (id: string) => Promise<void>;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
@@ -197,9 +198,9 @@ export function TokenList({
     setEditGroupIds([]);
   };
 
-  // Save the grant changes. The two axes are split by ROW KIND and written
-  // independently: Unrestricted => null (KEEP on PATCH), Restricted => the
-  // ids, or [] when the selection was cleared (never null).
+  // Save the grant changes. The two axes are written INDEPENDENTLY from their
+  // own picker selections: Unrestricted => null (KEEP on PATCH), Restricted =>
+  // the ids, or [] when the selection was cleared (never null).
   const saveEdit = async (tokenId: string) => {
     const token = tokens.find((t) => t.id === tokenId);
     if (!token) return;
