@@ -166,7 +166,10 @@ func TestHandleAuthMe_StateStoreCount(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/fe/api/auth/me")
+	resp, err := http.Get(srv.URL + "/fe/api/auth/me")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	var body map[string]any
 	json.NewDecoder(resp.Body).Decode(&body)
