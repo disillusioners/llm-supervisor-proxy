@@ -75,6 +75,11 @@ test:
 		echo "FAIL: pkg/ui must not import pkg/oauth2 (import guard, internal-oauth2 seam B1)"; \
 		exit 1; \
 	fi
+	@echo ">> import guard: pkg/identity must not import ANY repo package (internal-oauth2 leaf, plan §5.8)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/[a-z]+(/|")' pkg/identity/; then \
+		echo "FAIL: pkg/identity must not import ANY repo package (import guard, internal-oauth2 leaf — plan §5.8: pkg/identity imports NOTHING from the repo)"; \
+		exit 1; \
+	fi
 	@echo ">> census anti-drift gate: registered mux patterns vs pkg/oauth2/middleware_test.go (BLK-4)"
 	@$(MAKE) census-gate
 	@go test ./...

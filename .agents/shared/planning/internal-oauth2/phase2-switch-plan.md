@@ -208,12 +208,14 @@ done
 2. If **every** account is verified → keep the strict posture: `OAUTH2_EMAIL_DOMAINS: "daoduc.org"`, `OAUTH2_REQUIRE_EMAIL_VERIFIED: true` ⇒ unverified ⇒ 403.
 3. If **any** account is unverified → **tighten the allowlist first** (set `OAUTH2_EMAIL_DOMAINS` to the exact operator domain(s)) and **do not proceed** until every operator account on `door.daoduc.org` is verified. **Fail-closed: no runtime bypass, no WARN mitigation.** Strict 403 in every mode. Record the decision + the outcome in the evidence block.
 4. Record the outcome in the evidence block (§5.3) and confirm the corresponding rendered env before D1 (§2.2 validator).
+5. **HARD PRECONDITION (tester R2 / phase1 §5.5's live cross-check):** before enabling on any host — here, before D1 — decode ONE real Casdoor id_token from this host's IdP (`door.daoduc.org`) and assert the internal verifier accepts it. Inspect the **JOSE header `typ` + claims shape ONLY** — never echo a secret or a token value; record only the shape. Record the outcome in the evidence block (§5.3).
 
 ---
 
 ## 2.4 Mandatory pre-flight harness — Phase 3 gate (NEW)
 
 > **Phase 3 may NOT execute until this harness PASSES.** The harness is mechanical (no judgment): every check below is a command with a defined pass/fail and a recorded evidence line. Run it in the same shell that will execute D1 (same-shell rule, runbook §Environment block). Record the evidence block (§2.4.4) in the evidence block (§5.3).
+> **HARD PRECONDITION (tester R2 / phase1 §5.5's live cross-check):** before enabling on any host, decode ONE real Casdoor id_token from that host's IdP and assert the internal verifier accepts it — inspect the **JOSE header `typ` + claims shape ONLY** (never echo a secret or a token value) and record the PASS/FAIL line in the §2.4.4 evidence block.
 
 ### 2.4.1 (a) Mechanical chart validation — three states (REAL render, not prose)
 
