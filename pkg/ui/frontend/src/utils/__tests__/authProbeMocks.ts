@@ -19,9 +19,24 @@
 // the AR-60 census must stay clean outside the guarded production
 // modules.
 import { vi } from 'vitest';
+import { AUTH_ME_PATH } from '../authProbe';
 
-/** The identity-probe path fragment (the probe endpoint). */
-export const AUTH_ME_FRAGMENT = '/fe/api/auth/me';
+/**
+ * Is this request the identity probe?
+ *
+ * Matched by the PARSED PATHNAME — the SAME contract the production
+ * guard uses (utils/apiFetch.isAuthProbe). The old substring form
+ * mis-routed a request that merely CARRIES the probe path (e.g.
+ * `/fe/api/models?next=/fe/api/auth/me`) to the probe handler, which
+ * hid the guard's redirect hazard behind a mock artefact.
+ */
+function isProbeRequest(url: string): boolean {
+  try {
+    return new URL(url, window.location.origin).pathname === AUTH_ME_PATH;
+  } catch {
+    return false; // unparseable -> not the probe
+  }
+}
 
 /** A JSON response (the default shape of every probe answer). */
 export function jsonResponse(payload: unknown, status = 200): Response {
@@ -98,7 +113,7 @@ export interface AuthWireHandlers {
 export function installAuthWire(handlers: AuthWireHandlers) {
   const wire = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input.toString();
-    if (url.includes(AUTH_ME_FRAGMENT)) {
+    if (isProbeRequest(url)) {
       if (!handlers.probe) throw new Error('unexpected probe request');
       return handlers.probe(init);
     }
@@ -112,5 +127,5 @@ export function installAuthWire(handlers: AuthWireHandlers) {
 
 /** Count the probe requests on a wire mock (the AR-16 re-probe pins). */
 export function probeCallCount(wire: { mock: { calls: unknown[][] } }): number {
-  return wire.mock.calls.filter(([u]) => String(u).includes(AUTH_ME_FRAGMENT)).length;
+  return wire.mock.calls.filter(([u]) => isProbeRequest(String(u))).length;
 }

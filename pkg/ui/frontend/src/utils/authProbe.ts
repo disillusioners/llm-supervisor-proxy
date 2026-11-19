@@ -21,7 +21,15 @@
 // or a body without a boolean `enabled` is UNKNOWN — never `{enabled:false}`
 // and never cached as such.
 
-/** The identity-probe endpoint (the gate-exempt read-only route). */
+/**
+ * The identity-probe endpoint (the gate-exempt read-only route).
+ *
+ * THE single source of truth for the probe path: both probe call sites
+ * (hooks/useAuth.ts, hooks/useEvents.ts) request it, and the guard's
+ * probe-exemption matcher (utils/apiFetch.isAuthProbe) compares the
+ * PARSED PATHNAME of an incoming request against this constant. The
+ * path is never spelled out as a literal anywhere else.
+ */
 export const AUTH_ME_PATH = '/fe/api/auth/me';
 
 /** The probe budget: the request is aborted after this many ms. */

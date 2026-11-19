@@ -28,6 +28,7 @@
 // break are untouched; dormant mode never touches the counter (it
 // never redirects).
 import { authState } from '../hooks/useAuth';
+import { AUTH_ME_PATH } from './authProbe';
 import {
   isRedirectStormTripped,
   showRedirectStormError,
@@ -62,9 +63,62 @@ function latchArmed(): boolean {
   return true;
 }
 
+/**
+ * The browser origin the FE is served from — '' when there is no window.
+ * Without an origin nothing can be shown to be same-origin, so the
+ * matcher answers FALSE for every input in that case.
+ */
+function currentOrigin(): string {
+  if (typeof window === 'undefined') return '';
+  const loc = window.location;
+  return loc && typeof loc.origin === 'string' ? loc.origin : '';
+}
+
+/**
+ * The URL string of a request input, whatever shape it arrives in: a
+ * plain string, a URL, or a Request. null when the shape carries no
+ * readable URL (the matcher then answers FALSE).
+ */
+function probeUrlCandidate(input: RequestInfo | URL): string | null {
+  if (typeof input === 'string') return input;
+  if (typeof URL !== 'undefined' && input instanceof URL) return input.href;
+  const request = input as unknown as { url?: unknown };
+  return typeof request.url === 'string' ? request.url : null;
+}
+
+/**
+ * The probe exemption predicate — is this request the identity probe?
+ *
+ * Matched by the PARSED PATHNAME against the SHARED AUTH_ME_PATH
+ * constant (utils/authProbe) — never by a substring of the raw URL. The
+ * old substring form was over-broad in BOTH directions:
+ *   * `/fe/api/models?next=/fe/api/auth/me` matched, so a 401 there
+ *     would NEVER redirect (an auth-loop hazard);
+ *   * a cross-origin request to the same path is not our probe at all.
+ *
+ * TOTAL by construction: every input shape yields a boolean.
+ *
+ * UNPARSEABLE INPUT -> FALSE (the ordinary redirect path). Rationale:
+ * the two real probe call sites (hooks/useAuth.ts, hooks/useEvents.ts)
+ * issue the RELATIVE AUTH_ME_PATH, which always parses, so an
+ * unparseable input CANNOT be the probe and the exemption is never
+ * needed for it. FALSE keeps the ordinary 401 -> login redirect for
+ * every other input (the safe default for a gate), while TRUE would
+ * silently exempt an arbitrary 401 from the redirect. The matcher must
+ * never throw either: a throw inside the 401 branch would replace the
+ * redirect with an unhandled error — strictly worse than a redirect.
+ */
 export function isAuthProbe(input: RequestInfo | URL): boolean {
-  const url = typeof input === 'string' ? input : input.toString();
-  return url.includes('/fe/api/auth/me');
+  const raw = probeUrlCandidate(input);
+  if (raw === null) return false;
+  const origin = currentOrigin();
+  let parsed: URL;
+  try {
+    parsed = origin ? new URL(raw, origin) : new URL(raw);
+  } catch {
+    return false; // unparseable -> NOT the probe
+  }
+  return parsed.pathname === AUTH_ME_PATH && parsed.origin === origin;
 }
 
 /** AR-43: the shared one-shot reload primitive (at most once per page load). */

@@ -238,4 +238,84 @@ describe('apiFetch — the guarded 401 choke point', () => {
     expect(assignSpy).not.toHaveBeenCalled();
     expect(reloadSpy).not.toHaveBeenCalled();
   });
+
+  // ---- isAuthProbe — the adversarial URL-shape table (item 3) ----
+  //
+  // The matcher is a security gate: it exempts the identity probe from
+  // the 401 -> login redirect. The old substring form was over-broad in
+  // BOTH directions, so the contract is pinned per URL SHAPE:
+  //
+  //   shape                                    verdict
+  //   ---------------------------------------  ---------------------------
+  //   /fe/api/auth/me                           TRUE  (the probe)
+  //   /fe/api/auth/me?x=1                       TRUE  (a query is not another resource)
+  //   /fe/api/auth/me#section                   TRUE  (a fragment never reaches the server)
+  //   /fe/api/auth/me/                          FALSE (a DIFFERENT resource — a 401 there MUST redirect)
+  //   <same-origin>/fe/api/auth/me              TRUE  (absolute, same origin)
+  //   https://evil.example.com/fe/api/auth/me  FALSE (same path, other origin — NOT our probe)
+  //   /fe/api/auth/meta                         FALSE (lookalike)
+  //   /fe/api/auth/me/extra                     FALSE (lookalike)
+  //
+  // The table lives HERE and not in authProbe.test.ts because the
+  // matcher's contract is the GUARD's 401-exemption predicate: it only
+  // means something together with the redirect it drives (the hazard
+  // regression below pins the pair). utils/authProbe stays the pure
+  // probe-BODY parser and owns the shared path constant, which this
+  // matcher IMPORTS rather than duplicates.
+  const ADVERSARIAL_SHAPES: Array<{ shape: string; input: string; expected: boolean }> = [
+    { shape: '1 bare path', input: '/fe/api/auth/me', expected: true },
+    { shape: '2 with a query string', input: '/fe/api/auth/me?x=1', expected: true },
+    { shape: '3 with a hash fragment', input: '/fe/api/auth/me#section', expected: true },
+    { shape: '4 with a trailing slash', input: '/fe/api/auth/me/', expected: false },
+    {
+      shape: '5 absolute, same origin',
+      input: new URL('/fe/api/auth/me', window.location.origin).href,
+      expected: true,
+    },
+    {
+      shape: '6 absolute, other origin',
+      input: 'https://evil.example.com/fe/api/auth/me',
+      expected: false,
+    },
+    { shape: '7 lookalike /fe/api/auth/meta', input: '/fe/api/auth/meta', expected: false },
+    { shape: '8 lookalike /fe/api/auth/me/extra', input: '/fe/api/auth/me/extra', expected: false },
+  ];
+
+  it.each(ADVERSARIAL_SHAPES)('isAuthProbe shape $shape => $expected', ({ input, expected }) => {
+    expect(isAuthProbe(input)).toBe(expected);
+  });
+
+  it('the matcher is TOTAL: an unparseable input answers FALSE and never throws', () => {
+    // The documented fallback: an unparseable input is NOT the probe,
+    // so a 401 on it takes the ordinary redirect path.
+    const unparseable = ['http://[invalid', 'https://', 'http://%'];
+    for (const input of unparseable) {
+      expect(isAuthProbe(input), `input=${input}`).toBe(false);
+    }
+    expect(() => isAuthProbe('http://[invalid')).not.toThrow();
+  });
+
+  it('the matcher reads every input shape guardedFetch forwards (string, URL, Request)', () => {
+    const origin = window.location.origin;
+    expect(isAuthProbe(new URL('/fe/api/auth/me', origin))).toBe(true);
+    expect(isAuthProbe(new URL('https://evil.example.com/fe/api/auth/me'))).toBe(false);
+    expect(isAuthProbe(new Request('/fe/api/auth/me'))).toBe(true);
+    expect(isAuthProbe(new Request('/fe/api/models?next=/fe/api/auth/me'))).toBe(false);
+  });
+
+  it('the redirect hazard: a 401 on /fe/api/models?next=/fe/api/auth/me is NOT the probe and DOES redirect', async () => {
+    const wire = installAuthWire({
+      probe: () => anonymousProbeResponse(),
+      target: () => jsonResponse({ error: 'unauthenticated' }, 401),
+    });
+
+    const res = await guardedFetch('/fe/api/models?next=/fe/api/auth/me');
+    expect(res.status).toBe(401);
+    // The gate fired: the request was NOT exempted, so its 401 redirects.
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    // Exactly ONE probe request — the gate's own resolution. The models
+    // request was answered by the TARGET handler: the canonical mock
+    // routes by the same parsed-pathname contract as the guard.
+    expect(probeCallCount(wire)).toBe(1);
+  });
 });
