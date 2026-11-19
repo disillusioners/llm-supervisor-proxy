@@ -91,12 +91,17 @@ func TestCookie_Under4KB(t *testing.T) {
 
 func TestCookie_SealTimeBudgetEnforced(t *testing.T) {
 	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
 	c := &CookieCodec{name: "sess", key: key, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
-	// name >128 truncated, but sub/email within caps. To exceed 4096, huge name? name truncated to 128 so not. Use sub? sub max 64. Hard to exceed. Instead test that oversized encoded rejected? Our Seal checks. We'll trust.
-	s := &Session{Sub: "u", Name: string(make([]byte, 10000)), ExpiresAt: time.Now().Add(time.Hour).Unix()}
-	// name truncated, seal succeeds
-	if _, err := c.Seal(s); err != nil {
-		t.Logf("seal err: %v", err)
+	// Force the budget threshold down to prove the seal-time check rejects.
+	old := maxCookieBytes
+	maxCookieBytes = 16
+	defer func() { maxCookieBytes = old }()
+	s := &Session{Sub: "u", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	if _, err := c.Seal(s); err == nil {
+		t.Fatal("expected seal-time budget rejection")
 	}
 }
 
@@ -155,6 +160,9 @@ func TestCookie_SetFlags(t *testing.T) {
 	}
 	if !ck.Secure {
 		t.Fatal("not secure")
+	}
+	if ck.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("samesite: %v", ck.SameSite)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"sync"
 	"testing"
 	"time"
 )
@@ -59,18 +60,31 @@ func TestJWKS_PinsKtyAlgCrv(t *testing.T) {
 }
 
 func TestJWKS_KidMissTriggersRefresh(t *testing.T) {
+	calls := 0
 	cache := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, error) {
-		return map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}, nil
+		calls++
+		return map[string]crypto.PublicKey{"k2": &rsa.PublicKey{E: 65537}}, nil
 	})
-	_, err := cache.Key(context.Background(), "k2", "RS256")
-	if err == nil {
-		t.Log("no error (unexpected but ok)")
+	pub, err := cache.Key(context.Background(), "k2", "RS256")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pub == nil {
+		t.Fatal("nil key")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 refresh, got %d", calls)
 	}
 }
 
 func TestJWKS_SingleFlightCollapsesConcurrentMisses(t *testing.T) {
+	calls := 0
+	var mu sync.Mutex
 	cache := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, error) {
 		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		calls++
+		mu.Unlock()
 		return map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}, nil
 	})
 	done := make(chan struct{})
@@ -78,6 +92,11 @@ func TestJWKS_SingleFlightCollapsesConcurrentMisses(t *testing.T) {
 	go func() { cache.Key(context.Background(), "k2", "RS256"); done <- struct{}{} }()
 	<-done
 	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected 1 fetch, got %d", calls)
+	}
 }
 
 func TestJWKS_SingleFlightRearmsAfterCompletion(t *testing.T) {
@@ -86,18 +105,34 @@ func TestJWKS_SingleFlightRearmsAfterCompletion(t *testing.T) {
 		calls++
 		return map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}, nil
 	})
+	// first miss triggers refresh
 	cache.Key(context.Background(), "k2", "RS256")
-	cache.Key(context.Background(), "k2", "RS256")
-	if calls < 2 {
-		// may be throttled; acceptable
+	// advance internal refresh clock past minRefresh
+	cache.mu.Lock()
+	cache.lastRefresh = time.Now().Add(-2 * time.Minute)
+	cache.mu.Unlock()
+	// second miss triggers another refresh
+	cache.Key(context.Background(), "k3", "RS256")
+	if calls != 2 {
+		t.Fatalf("expected 2 fetches across two cycles, got %d", calls)
 	}
 }
 
 func TestJWKS_TTLAndKidMissShareOneKey(t *testing.T) {
+	calls := 0
 	cache := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, error) {
+		calls++
 		return map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}, nil
 	})
-	cache.Key(context.Background(), "k1", "RS256")
+	if _, err := cache.Key(context.Background(), "k1", "RS256"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Key(context.Background(), "k1", "RS256"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one shared refresh, got %d", calls)
+	}
 }
 
 func TestJWKS_RefreshIsRateLimited(t *testing.T) {
@@ -107,16 +142,34 @@ func TestJWKS_RefreshIsRateLimited(t *testing.T) {
 	cache.lastRefresh = time.Now()
 	_, err := cache.Key(context.Background(), "missing", "RS256")
 	if err != ErrJWKSRateLimited {
-		t.Logf("err: %v", err)
+		t.Fatalf("expected rate limit, got: %v", err)
 	}
 }
 
 func TestJWKS_MissWaitersBlockOnInFlightRefresh(t *testing.T) {
+	calls := 0
 	cache := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, error) {
 		time.Sleep(20 * time.Millisecond)
+		calls++
 		return map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}, nil
 	})
-	cache.Key(context.Background(), "k2", "RS256")
+	done := make(chan struct{}, 2)
+	go func() { cache.Key(context.Background(), "k2", "RS256"); done <- struct{}{} }()
+	time.Sleep(5 * time.Millisecond)
+	go func() { cache.Key(context.Background(), "k2", "RS256"); done <- struct{}{} }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadlock")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadlock")
+	}
+	if calls < 1 {
+		t.Fatalf("expected at least 1 refresh, got %d", calls)
+	}
 }
 
 func TestJWKS_StaleCacheSurvivesFetchFailure(t *testing.T) {
@@ -130,7 +183,7 @@ func TestJWKS_StaleCacheSurvivesFetchFailure(t *testing.T) {
 	cache.grace = 4 * time.Hour
 	_, err := cache.Key(context.Background(), "k1", "RS256")
 	if err != nil {
-		t.Logf("err: %v", err)
+		t.Fatalf("expected stale grace to serve, got: %v", err)
 	}
 }
 
@@ -143,7 +196,7 @@ func TestJWKS_RotatedAwayKidInvalidatesOldTokens(t *testing.T) {
 	cache.lastRefresh = time.Now().Add(-2 * time.Hour)
 	_, err := cache.Key(context.Background(), "k1", "RS256")
 	if err == nil {
-		t.Log("expected unknown kid after refresh")
+		t.Fatal("expected unknown kid after refresh")
 	}
 }
 

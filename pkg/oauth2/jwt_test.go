@@ -389,12 +389,11 @@ func TestJWT_RejectsAtJwtInIdTokenPath(t *testing.T) {
 }
 
 func TestJWT_RejectsJWKAlgMismatch(t *testing.T) {
-	// parse-level: a JWK with alg RS384 but allowed set excludes? Just ensure ParseJWK with mismatched?
-	// We'll just pass.
-	cfg := testCfg()
-	priv := rsaKey(t)
-	_ = cfg
-	_ = priv
+	jwk := JWK{Kty: "RSA", Kid: "k", Use: "sig", Alg: "RS384", N: "AQAB", E: "AQAB"}
+	_, err := ParseJWK(jwk, map[string]struct{}{"RS256": {}})
+	if err == nil {
+		t.Fatal("expected rejection for RS384 when only RS256 allowed")
+	}
 }
 
 func TestJWT_RejectsKeyOpsWithoutVerify(t *testing.T) {

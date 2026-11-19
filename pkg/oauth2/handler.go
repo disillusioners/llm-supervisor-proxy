@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -111,6 +112,25 @@ func (s *stateStore) delete(state string) {
 		delete(s.records, state)
 		s.count--
 	}
+}
+
+// consume atomically gets and deletes a state record under the same lock,
+// closing the replay TOCTOU window (M7).
+func (s *stateStore) consume(state string) (*stateRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[state]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(rec.CreatedAt) > 10*time.Minute {
+		delete(s.records, state)
+		s.count--
+		return nil, false
+	}
+	delete(s.records, state)
+	s.count--
+	return rec, true
 }
 
 func (s *stateStore) countLive() int {
@@ -277,10 +297,7 @@ func (h *Handler) HandleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// set txn cookie
-	h.txn.SetCookie(w, txnSession)
-	// but txn cookie value must be the sealed txnCookieValue, not re-sealed. SetCookie re-seals producing different nonce. Need set manually.
-	// Override: set cookie with txnCookieValue
+	// set txn cookie: exactly ONE, whose value's SHA-256 equals the stored TxnDigest.
 	http.SetCookie(w, &http.Cookie{
 		Name:     h.cfg.TxnCookieName,
 		Value:    txnCookieValue,
@@ -323,11 +340,7 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
-		http.Error(w, "oauth2_callback_error", http.StatusBadGateway)
-		// spec: 502 {"error":"oauth2_callback_error"}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "oauth2_callback_error"})
+		writeJSONError(w, http.StatusBadGateway, "oauth2_callback_error")
 		return
 	}
 
@@ -336,13 +349,11 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
-	rec, ok := h.states.get(state)
+	rec, ok := h.states.consume(state)
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
-	// one-time: delete
-	h.states.delete(state)
 
 	// txn cookie binding
 	txnCookie, err := r.Cookie(h.cfg.TxnCookieName)
@@ -474,11 +485,25 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if redirectTo == "" {
 		redirectTo = "/ui/"
 	}
-	// if discovery metadata fresh, redirect to end_session_endpoint
-	meta, err := h.provider.Discover(r.Context())
-	if err == nil && meta != nil && meta.EndSessionEndpoint != "" {
-		// check freshness: fetchedAt within ttl? We'll just use it.
-		u := meta.EndSessionEndpoint
+	// if cached discovery metadata is fresh AND provides end_session_endpoint, take the hop.
+	// AR-23: a stale cache (or none) skips the hop without forcing a refresh.
+	endSession := ""
+	meta := h.provider.CachedMetadata()
+	fetchedAt := h.provider.FetchedAt()
+	if meta != nil && meta.EndSessionEndpoint != "" && !fetchedAt.IsZero() && time.Since(fetchedAt) < h.cfg.JWKSCacheTTL {
+		endSession = meta.EndSessionEndpoint
+	}
+	if meta == nil {
+		// best-effort: try a fresh discover; a just-fetched doc is fresh
+		m, err := h.provider.Discover(r.Context())
+		if err == nil && m != nil && m.EndSessionEndpoint != "" {
+			if ft := h.provider.FetchedAt(); !ft.IsZero() && time.Since(ft) < h.cfg.JWKSCacheTTL {
+				endSession = m.EndSessionEndpoint
+			}
+		}
+	}
+	if endSession != "" {
+		u := endSession
 		q := url.Values{}
 		q.Set("post_logout_redirect_uri", h.cfg.ExternalURL+redirectTo)
 		if h.cfg.ClientID != "" {
@@ -551,15 +576,11 @@ func s256(verifier string) string {
 }
 
 func hostPart(remoteAddr string) string {
-	// host part of RemoteAddr
-	if idx := strings.LastIndex(remoteAddr, ":"); idx >= 0 {
-		// handle ipv6? simple
-		if !strings.Contains(remoteAddr, "]") {
-			return remoteAddr[:idx]
-		}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
 	}
-	// if no colon
-	return remoteAddr
+	return host
 }
 
 func writeJSONError(w http.ResponseWriter, status int, code string) {

@@ -17,6 +17,10 @@ import (
 
 const MaxCookieBytes = 4096
 
+// maxCookieBytes is the runtime threshold used by Seal/Open; defaults to
+// MaxCookieBytes and is overridable in tests to prove the budget check.
+var maxCookieBytes = MaxCookieBytes
+
 const (
 	MaxSubBytes   = 64
 	MaxEmailBytes = 254
@@ -75,7 +79,7 @@ func (c *CookieCodec) Seal(s *Session) (string, error) {
 	ct := gcm.Seal(nil, nonce, b, []byte(c.name))
 	out := append(nonce, ct...)
 	enc := base64.RawURLEncoding.EncodeToString(out)
-	if len(enc) > MaxCookieBytes {
+	if len(enc) > maxCookieBytes {
 		return "", fmt.Errorf("sealed cookie exceeds %d bytes", MaxCookieBytes)
 	}
 	return enc, nil
@@ -85,7 +89,7 @@ func (c *CookieCodec) Open(value string) (*Session, error) {
 	if value == "" {
 		return nil, errors.New("empty cookie")
 	}
-	if len(value) > MaxCookieBytes {
+	if len(value) > maxCookieBytes {
 		return nil, errors.New("cookie too large")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(value)

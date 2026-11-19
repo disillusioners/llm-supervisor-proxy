@@ -34,10 +34,21 @@ func TestGuard_EnabledWrapsMux(t *testing.T) {
 		t.Fatal("guard nil")
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	g.RegisterRoutes(mux)
 	h := g.Wrap(mux)
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	// gate installed: unauthenticated /fe/api/config => 401
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/config", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	_ = w
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("gate not installed: %d", w.Code)
+	}
+	// /healthz passes
+	req2 := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("healthz: %d", w2.Code)
+	}
 }

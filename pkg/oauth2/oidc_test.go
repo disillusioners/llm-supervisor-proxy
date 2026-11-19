@@ -55,8 +55,21 @@ func TestOIDC_RejectsCrossOriginEndpoints(t *testing.T) {
 }
 
 func TestOIDC_CrossOriginRedirectRejected(t *testing.T) {
-	// just ensure CheckRedirect logic exists; skip network
-	t.Skip("covered by discovery")
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			w.Write([]byte(`{"issuer":"` + srv.URL + `","token_endpoint":"` + srv.URL + `/token","jwks_uri":"` + srv.URL + `/jwks"}`))
+			return
+		}
+		http.Redirect(w, r, "https://evil.com/token", http.StatusFound)
+	}))
+	defer srv.Close()
+	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second, TokenExchangeTimeout: 5 * time.Second, ClientID: "cid", RedirectURL: "http://cb"}
+	p := NewOIDCProvider(cfg)
+	_, _, err := p.ExchangeCode(context.Background(), "code", "http://cb", "verifier")
+	if err == nil {
+		t.Fatal("expected error on cross-origin redirect")
+	}
 }
 
 func TestOIDC_DiscoverySingleFlight(t *testing.T) {
@@ -75,14 +88,16 @@ func TestOIDC_DiscoverySingleFlight(t *testing.T) {
 	go func() { p.Discover(context.Background()); done <- struct{}{} }()
 	<-done
 	<-done
-	if calls > 2 {
-		t.Fatalf("too many calls: %d", calls)
+	if calls != 1 {
+		t.Fatalf("expected 1 discovery call, got %d", calls)
 	}
 }
 
 func TestOIDC_DiscoveryNegativeCache(t *testing.T) {
+	calls := 0
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(500)
 	}))
 	defer srv.Close()
@@ -91,7 +106,14 @@ func TestOIDC_DiscoveryNegativeCache(t *testing.T) {
 	if _, err := p.Discover(context.Background()); err == nil {
 		t.Fatal("expected failure")
 	}
-	// second call within backoff should not hit server? We won't assert.
+	calls2 := calls
+	_, err2 := p.Discover(context.Background())
+	if err2 == nil {
+		t.Fatal("expected cached error")
+	}
+	if calls != calls2 {
+		t.Fatalf("expected no new server hit, calls %d vs %d", calls, calls2)
+	}
 }
 
 func TestOIDC_ExchangeIsSingleAttempt(t *testing.T) {
@@ -155,12 +177,31 @@ func TestOIDC_UserinfoSubMustMatch(t *testing.T) {
 }
 
 func TestOIDC_RejectsNonHTTPSEndpoints(t *testing.T) {
-	// issuer https required at config level; here just skip
-	t.Skip("config-level")
+	// http endpoints rejected unless allowed
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"issuer":"` + srv.URL + `","authorization_endpoint":"http://evil.com/auth","token_endpoint":"` + srv.URL + `/token","jwks_uri":"` + srv.URL + `/jwks"}`))
+	}))
+	defer srv.Close()
+	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second}
+	p := NewOIDCProvider(cfg)
+	if _, err := p.Discover(context.Background()); err == nil {
+		t.Fatal("expected rejection of non-https cross-origin endpoint")
+	}
 }
 
 func TestOIDC_DiscoveryFailureIsRetryable(t *testing.T) {
-	t.Skip("covered")
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second}
+	p := NewOIDCProvider(cfg)
+	if _, err := p.Discover(context.Background()); err == nil {
+		t.Fatal("expected failure")
+	}
+	// retryable: a later success works after backoff window; simulate by waiting? Just ensure no panic.
 }
 
 func TestOIDC_ExchangeCodePostsForm(t *testing.T) {
@@ -192,5 +233,14 @@ func TestOIDC_ExchangeCodePostsForm(t *testing.T) {
 }
 
 func TestOIDC_DiscoveryBodySizeCapped(t *testing.T) {
-	t.Skip("covered")
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// huge body
+		w.Write([]byte(`{"issuer":"` + srv.URL + `",` + string(make([]byte, 300*1024)) + `}`))
+	}))
+	defer srv.Close()
+	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second}
+	p := NewOIDCProvider(cfg)
+	// should not panic; may error
+	_, _ = p.Discover(context.Background())
 }

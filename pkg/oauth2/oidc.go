@@ -145,6 +145,28 @@ func (p *OIDCProvider) setFetchErr(err error) {
 	p.mu.Unlock()
 }
 
+// FetchedAt returns the time the discovery metadata was last successfully
+// fetched (zero value if never). Used by AR-23 to gate the logout
+// end-session hop on metadata freshness.
+func (p *OIDCProvider) FetchedAt() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.fetchedAt
+}
+
+// CachedMetadata returns the currently cached discovery metadata without
+// triggering a network fetch. Used by AR-23 so logout can decide whether
+// the cached metadata is fresh without forcing a refresh.
+func (p *OIDCProvider) CachedMetadata() *ProviderMetadata {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.meta == nil {
+		return nil
+	}
+	m := *p.meta
+	return &m
+}
+
 func sameOriginOrAllowed(cfg *Config, endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
