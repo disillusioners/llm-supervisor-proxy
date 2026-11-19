@@ -271,6 +271,19 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
+// dormantAuthMeBody is the PRE-MARSHALLED body served by /fe/api/auth/me
+// while internal OAuth2 is dormant (review item S11, internal-oauth2
+// round 1). The dormant branch used to re-marshal a map[string]any on
+// every request; map marshalling relies on Go's sorted-key encoding, so
+// the bytes are PINNED here and guarded by
+// TestHandleAuthMe_DormantBodyByteStable, which proves three ways this
+// literal is exactly what the old map re-marshal produced (constant ==
+// json.Encoder(map) == live handler write), trailing newline included.
+//
+// Field order on the wire (sorted, as the legacy map marshal emitted it):
+// authenticated, enabled, state_store_count, user.
+var dormantAuthMeBody = []byte(`{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n")
+
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -280,7 +293,10 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	p := s.identityProvider()
 	if p == nil || !p.Enabled() {
-		json.NewEncoder(w).Encode(map[string]any{"enabled": false, "authenticated": false, "user": nil, "state_store_count": 0})
+		// Dormant — one fixed write of the pre-marshalled constant.
+		// The bytes are byte-identical to the previous per-request
+		// map re-marshal (pinned by TestHandleAuthMe_DormantBodyByteStable).
+		w.Write(dormantAuthMeBody)
 		return
 	}
 	count := p.StateStoreCount()

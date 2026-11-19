@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,6 +27,54 @@ func (f *fakeIdentityProvider) Current(r *http.Request) (*identity.Identity, err
 }
 
 func (f *fakeIdentityProvider) StateStoreCount() int { return f.count }
+
+// TestHandleAuthMe_DormantBodyByteStable pins the hoisted dormant body
+// (review S11, internal-oauth2 round 1): the package-level constant must
+// stay byte-identical to what the legacy per-request map re-marshal
+// produced — same fields, same sorted-key order, same trailing newline —
+// and the handler must emit exactly those bytes in one write.
+func TestHandleAuthMe_DormantBodyByteStable(t *testing.T) {
+	const want = `{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n"
+
+	// 1. The hoisted constant itself.
+	if got := string(dormantAuthMeBody); got != want {
+		t.Fatalf("dormantAuthMeBody = %q, want %q", got, want)
+	}
+
+	// 2. The literal must still be what the legacy encoding path produced:
+	// a fresh json.Encoder writing the equivalent map must emit identical
+	// bytes (this is the drift lock — if anyone changes the map shape or
+	// the constant independently, one of these comparisons fails).
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(map[string]any{
+		"enabled": false, "authenticated": false, "user": nil, "state_store_count": 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != want {
+		t.Fatalf("legacy map re-marshal = %q, want %q (constant drifted from the encoder output)", got, want)
+	}
+
+	// 3. The live handler writes exactly those bytes.
+	s := &Server{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/auth/me", s.handleAuthMe)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/fe/api/auth/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != want {
+		t.Fatalf("handler body = %q, want %q", got, want)
+	}
+}
 
 func TestHandleAuthMe_Dormant(t *testing.T) {
 	s := &Server{}
