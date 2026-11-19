@@ -610,9 +610,18 @@ func TestHandler_EmptyAllowedModels_AllowsAll(t *testing.T) {
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	// Should be 200 - empty array means all models allowed
-	if rr.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	// conjunctive contract: a PRESENT-EMPTY axis is RESTRICTED and grants nothing (pkg/authz/scope.go Resolve())
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 access_denied, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// verify access_denied body shape
+	var errResp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	errorObj, _ := errResp["error"].(map[string]interface{})
+	if errorObj["type"] != "access_denied" || errorObj["message"] != "model not allowed for this token" || errorObj["model"] != "gpt-4" {
+		t.Errorf("unexpected body: %s", rr.Body.String())
 	}
 }
 
