@@ -1290,7 +1290,20 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// attempt the terminal availability envelope (502
 			// all_models_failed) is UNCHANGED — we tried, the upstream
 			// failed, and the failure is an availability failure.
-			if rc.scopeExhausted && rc.upstreamAttempts == 0 {
+			//
+			// The !headersSent conjunct mirrors the Anthropic lane's
+			// twin: once the response headers are on the wire a 403
+			// body would corrupt the committed stream, so the verdict
+			// falls through to the EXISTING terminal path below
+			// (handleRaceFailure), which owns the headers-sent case
+			// (it emits an SSE error instead of a JSON envelope).
+			//
+			// Behaviour-neutral today: scopeExhausted is set only by the
+			// group re-entry, which runs only AFTER a failed coordinator
+			// (so upstreamAttempts >= 1 and this branch is unreachable);
+			// the conjunct makes the branch safe if a future path sets
+			// scopeExhausted pre-attempt.
+			if rc.scopeExhausted && rc.upstreamAttempts == 0 && !rc.headersSent {
 				h.denyModelNotAllowed(w, rc)
 				return
 			}

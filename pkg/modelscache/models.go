@@ -1319,6 +1319,16 @@ func (c *CachedModelsConfig) RewriteGroupEntriesScoped(modelList []string, conve
 	if gr, ok := c.inner.(models.GroupRewriterScoped); ok {
 		return gr.RewriteGroupEntriesScoped(modelList, conversationKey, reach)
 	}
+	if reach != nil {
+		// THE DEGRADATION IS ANNOUNCED HERE (ids only — never a token
+		// value, never a grant): the inner backend cannot scope its pick,
+		// so the request layer's reach filter (applyReachFilter) is the
+		// fail-closed backstop. The request-layer log at the call site
+		// covers the OTHER degradation shape (a backend that is not this
+		// decorator at all); this one is the decorator's own inner
+		// degradation, which the request layer cannot see.
+		log.Printf("[authz] modelscache decorator: the inner backend lacks the scoped rewrite — permission filtering falls back to the request-layer list filter")
+	}
 	return c.RewriteGroupEntries(modelList, conversationKey)
 }
 
@@ -1326,12 +1336,26 @@ func (c *CachedModelsConfig) RewriteGroupEntriesScoped(modelList []string, conve
 // the inner manager. A backend without the capability degrades to the
 // legacy (unscoped) exclude — the legacy call can never report
 // ScopeOnly=true, so the caller keeps its availability path.
+//
+// DEFENSE IN DEPTH (the degraded branch): the legacy exclude cannot
+// scope its offer, so the replacement it hands back is checked against
+// the reach set HERE. An out-of-reach replacement is REFUSED (the zero
+// value: OK=false) instead of being offered and stamped by the re-entry
+// walk — the same rule the request layer applies to the same degraded
+// shape (pkg/proxy's excludeGroupMemberScoped fallback).
 func (c *CachedModelsConfig) ExcludeGroupMemberScoped(groupID, conversationKey, memberID string, cooldown time.Duration, reach models.ReachFilter) models.GroupExcludeOutcome {
 	if gr, ok := c.inner.(models.GroupRewriterScoped); ok {
 		return gr.ExcludeGroupMemberScoped(groupID, conversationKey, memberID, cooldown, reach)
 	}
 	replacement, pool, ok := c.ExcludeGroupMember(groupID, conversationKey, memberID, cooldown)
-	return models.GroupExcludeOutcome{Replacement: replacement, Pool: pool, OK: ok}
+	if !ok || replacement == "" {
+		return models.GroupExcludeOutcome{}
+	}
+	if reach != nil && !reach.Allows(replacement) {
+		// The legacy offer ignored the reach set — refuse it here.
+		return models.GroupExcludeOutcome{}
+	}
+	return models.GroupExcludeOutcome{Replacement: replacement, Pool: pool, OK: true}
 }
 
 // GroupMembers answers "what are the CURRENT member ids of this group"
