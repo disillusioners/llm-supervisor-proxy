@@ -6,7 +6,6 @@ import {
   TokenModelRow,
   effectiveGrantNote,
   modeOfStored,
-  splitByAxis,
   wireValue,
 } from './grantAxes';
 
@@ -95,13 +94,13 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
       setSaving(true);
       onStatus(null);
       const expires = expiresAt ? new Date(expiresAt).toISOString() : null;
-      // The axis split is made by ROW KIND (the `models` prop is the
-      // authority), and a stored grant never moves between axes.
-      const { modelIds, groupIds } = splitByAxis(
-        [...selectedModels, ...selectedGroups],
-        models,
-        token,
-      );
+      // F1 — each axis's OWN picker selection is authoritative. The
+      // pickers are split by surface (group rows live only in the group
+      // picker), so re-partitioning the union would move a stored
+      // target-only group id between axes and drop an id legally stored on
+      // BOTH axes. De-duplicate per axis instead.
+      const modelIds = [...new Set(selectedModels)];
+      const groupIds = [...new Set(selectedGroups)];
       // Unrestricted => null (no allow-list on that axis). Restricted => the
       // ids, or [] when nothing is selected — [] grants NOTHING and is NEVER
       // null.

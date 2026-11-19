@@ -8,7 +8,6 @@ import {
   TokenModelRow,
   effectiveGrantNote,
   modeOfStored,
-  splitByAxis,
   wireValue,
 } from './grantAxes';
 
@@ -212,11 +211,13 @@ export function TokenList({
     try {
       setSaving(true);
       onStatus(null);
-      const { modelIds, groupIds } = splitByAxis(
-        [...editModelIds, ...editGroupIds],
-        models,
-        token,
-      );
+      // F1 — each axis's OWN picker selection is authoritative. The
+      // pickers are already split by surface (group rows live only in the
+      // group picker), so re-partitioning the union would move a stored
+      // target-only group id between axes and drop an id legally stored on
+      // BOTH axes. De-duplicate per axis instead.
+      const modelIds = [...new Set(editModelIds)];
+      const groupIds = [...new Set(editGroupIds)];
       const allowedModels = wireValue(modelMode, modelIds);
       const allowedGroups = wireValue(groupMode, groupIds);
       // Optimistic update — BOTH axes.

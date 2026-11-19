@@ -123,3 +123,100 @@ describe('TokenForm — new group selection lands on groups axis (C3 c)', () => 
     expect(args[3]).toEqual(['grp-1']); // new group lands on groups axis
   });
 });
+
+describe('TokenList — both-axes / cross-axis save payloads (F1)', () => {
+  beforeEach(() => { document.body.innerHTML = ''; });
+  afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+  function renderList(tokens: ApiToken[], onUpdatePermission = vi.fn()) {
+    return {
+      onUpdatePermission,
+      ...render(
+        <TokenList
+          tokens={tokens}
+          models={MODELS}
+          onRevoke={vi.fn()}
+          onStatus={vi.fn()}
+          onCreateToken={vi.fn()}
+          onUpdatePermission={onUpdatePermission}
+          onRefetchTokens={vi.fn()}
+        />,
+      ),
+    };
+  }
+
+  function clickEdit(container: Element) {
+    fireEvent.click(container.querySelector('button[title="Edit token grants"]') as HTMLElement);
+  }
+
+  function clickSave(container: Element) {
+    const btn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Save') as HTMLElement;
+    fireEvent.click(btn);
+  }
+
+  function modeSelect(container: Element, axis: 'models' | 'groups'): HTMLSelectElement {
+    const label = axis === 'models' ? 'Models access mode' : 'Groups access mode';
+    return container.querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+  }
+
+  function openPicker(container: Element, axis: 'models' | 'groups') {
+    const label = axis === 'models' ? 'Allowed models' : 'Allowed groups';
+    fireEvent.click(container.querySelector(`button[aria-label="${label}"]`) as HTMLElement);
+  }
+
+  function pickRow(container: Element, name: string) {
+    const span = Array.from(container.querySelectorAll('li span')).find((s) => s.textContent === name);
+    const li = span?.closest('li');
+    const cb = li?.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    fireEvent.click(cb);
+  }
+
+  it('TokenList_BothAxes_NoChangeSave_KeepsIdOnBothAxes', async () => {
+    const onUpdatePermission = vi.fn().mockResolvedValue(true);
+    const { container } = renderList(
+      [token({ allowed_models: ['grp-1'], allowed_groups: ['grp-1'] })],
+      onUpdatePermission,
+    );
+    clickEdit(container);
+    clickSave(container);
+    await waitFor(() => expect(onUpdatePermission).toHaveBeenCalled());
+    const [id, models, groups] = onUpdatePermission.mock.calls[0];
+    expect(id).toBe('tok-1');
+    expect(models).toEqual(['grp-1']);
+    expect(groups).toEqual(['grp-1']);
+    // (f) no duplicates on any axis
+    expect(new Set(models).size).toBe(models.length);
+    expect(new Set(groups).size).toBe(groups.length);
+  });
+
+  it('TokenList_CrossAxisAddition_IsPreserved', async () => {
+    const onUpdatePermission = vi.fn().mockResolvedValue(true);
+    const { container } = renderList(
+      [token({ allowed_models: ['grp-1'], allowed_groups: null })],
+      onUpdatePermission,
+    );
+    clickEdit(container);
+    fireEvent.change(modeSelect(container, 'groups'), { target: { value: 'restricted' } });
+    openPicker(container, 'groups');
+    pickRow(container, 'Group One');
+    clickSave(container);
+    await waitFor(() => expect(onUpdatePermission).toHaveBeenCalled());
+    const [, models, groups] = onUpdatePermission.mock.calls[0];
+    expect(models).toEqual(['grp-1']); // models copy untouched
+    expect(groups).toEqual(['grp-1']); // explicit groups-axis addition preserved
+  });
+
+  it('TokenList_DuplicateStoredIds_AreDedupedPerAxis', async () => {
+    const onUpdatePermission = vi.fn().mockResolvedValue(true);
+    const { container } = renderList(
+      [token({ allowed_models: ['grp-1', 'grp-1'], allowed_groups: ['grp-1', 'grp-1'] })],
+      onUpdatePermission,
+    );
+    clickEdit(container);
+    clickSave(container);
+    await waitFor(() => expect(onUpdatePermission).toHaveBeenCalled());
+    const [, models, groups] = onUpdatePermission.mock.calls[0];
+    expect(models).toEqual(['grp-1']);
+    expect(groups).toEqual(['grp-1']);
+  });
+});

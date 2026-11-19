@@ -269,12 +269,11 @@ export interface ApiToken {
   // The BE's auth layer carries ModelsInvalid / GroupsInvalid on the
   // AuthToken struct (pkg/auth/token.go:48-49): a grant column that exists
   // but cannot be read (malformed JSON, unknown driver type, empty string)
-  // is INVALID => DENY-ALL on that axis, never wildcard. As of HEAD
-  // 60d0db4 the admin DTO `TokenResponse` (pkg/ui/server.go:2497) does NOT
-  // expose either flag, so both are always `undefined` today. They are
-  // declared — and read defensively — so the deny-all warning lights up
-  // automatically if/when the DTO starts carrying them. `undefined` means
-  // "no information", never "valid".
+  // is INVALID => DENY-ALL on that axis, never wildcard. The admin DTO
+  // `TokenResponse` (pkg/ui/server.go) emits BOTH flags on every token
+  // echo (list + create), so `false` is explicit. They are still read
+  // defensively (`=== true`) so an older BE that omits the keys behaves
+  // as "no information", never as "valid".
   allowed_models_invalid?: boolean;
   allowed_groups_invalid?: boolean;
 }
