@@ -35,9 +35,9 @@
 |---|---|
 | Go | **8 production Go source files**: `pkg/oauth2/` (7: `config`, `cookie`, `oidc`, `jwks`, `jwt`, `handler`, `middleware`) + `pkg/identity/` (1: `identity.go` — neutral leaf `Identity` + `Provider`); `cmd/main.go` wiring (`guard != nil` → `idp = guard`, via `buildOAuth2FromEnv()`); `pkg/ui` `handleAuthMe` + `/fe/api/auth/me` |
 | Authn surface | `/`, `/ui`, `/ui/*`, `/fe/api/*` gated when enabled — **in-binary**, fail-closed default classification (D2a) |
-| FE | `guardedFetch` + latch, `useAuth`, 22 fetch-site migration + broadened census (AR-60), bounded SSE probe, `Header.tsx` badge/logout, `pkg/ui/static/` rebuild |
-| Helm | Three-state chart: `values.yaml` toggles (`internalOAuth2.enabled`, `oauth2Proxy.enabled`, `overlap`, `oauth2Proxy.replicas`), 5 template changes, render assertions H1–H4+ |
-| Tests | **12 Go test files** (10 in §9.1 — 9 unconditional + `guard_test.go` conditional — and 2 in §9.2: `pkg/ui/handlers_auth_test.go`, `cmd/oauth2_boot_test.go`); **7 FE suite rows** (§9.3: 5 new + 2 existing re-asserted); `helm template` three-state matrix; house gates |
+| FE | `guardedFetch` + latch, `useAuth`, shared identity probe (`authProbe`), redirect-storm breaker, 22 fetch-site migration + broadened census (AR-60), bounded SSE probe, `Header.tsx` badge/logout, `pkg/ui/static/` rebuild |
+| Helm | Three-state chart: `values.yaml` toggles (`internalOAuth2.enabled`, `oauth2Proxy.enabled`, `overlap`, `oauth2Proxy.replicas`), 5 template changes, render assertions H1–H7 |
+| Tests | **13 Go test files** (11 in §9.1 — 10 unconditional + `guard_test.go` (the conditional fired) — and 2 in §9.2: `pkg/ui/handlers_auth_test.go`, `cmd/oauth2_boot_test.go`); **9 FE suite rows** (§9.3: 7 new + 2 existing re-asserted); `helm template` three-state matrix; house gates |
 | Phase 2 doc | ADR-001 choreography per host: daoduc D0–D4 two-upgrade; ensem A→B→C→D per-path `/oauth2`-first (HARD HELD) |
 
 ### Non-goals (explicit)
@@ -124,7 +124,7 @@ request → recoveryMiddleware
 
 **Object-existence rule (Issue 1):** the edge `oauth2-proxy` Deployment+Service are rendered **unconditionally** — Helm can never prune the rollback anchor; `oauth2Proxy.enabled` gates **only the ingress wiring** (auth annotations + `/oauth2` backend); `oauth2Proxy.replicas` is the idle knob (template must test for the *presence* of the key, since a bare `{{if}}` treats `0` as falsy).
 
-`fail` only on genuinely contradictory input (`internalOAuth2.enabled` + `oauth2Proxy.enabled` **without** `overlap=true`). Render assertions H1–H4+ cover all three states; `required` guard demands issuer/client values whenever internal mode is on (AR-48).
+`fail` only on genuinely contradictory input (`internalOAuth2.enabled` + `oauth2Proxy.enabled` **without** `overlap=true`). Render assertions H1–H7 cover all three states; `required` guard demands issuer/client values whenever internal mode is on (AR-48).
 
 ---
 
@@ -163,7 +163,7 @@ Condensed from `phase1-plan.md` §3 (D1–D17; each has a named test):
 | New Go package | `pkg/oauth2/{config,cookie,oidc,jwks,jwt,handler,middleware}.go` (+ `_test.go` per file, incl. the council's negative tests) | new |
 | Composition | `cmd/main.go` (env → config → guard → routes → middleware order), `cmd/oauth2_boot_test.go` | edit + new test |
 | UI server | `pkg/identity/identity.go` (new leaf package), `pkg/ui` `handleAuthMe` + `handlers_auth_test.go` | new + edit |
-| Frontend | `src/utils/apiFetch.ts`, `src/hooks/useAuth.ts`, 21 fetch sites in `useApi.ts` + `ModelForm.tsx:461` (22 total), `useEvents.ts` (bounded probe), `Header.tsx`, `App.tsx` + 7 FE suite rows (5 new + 2 existing re-asserted); census pins `EventSource\|WebSocket\|XMLHttpRequest\|sendBeacon\|axios\|navigator.serviceWorker` | edit + new |
+| Frontend | `src/utils/apiFetch.ts`, `src/utils/authProbe.ts`, `src/utils/redirectStorm.ts`, `src/hooks/useAuth.ts`, 21 fetch sites in `useApi.ts` + `ModelForm.tsx:462` (22 total), `useEvents.ts` (bounded probe), `Header.tsx`, `App.tsx` + 9 FE suite rows (7 new + 2 existing re-asserted); census pins `EventSource\|WebSocket\|XMLHttpRequest\|sendBeacon\|axios\|navigator.serviceWorker` | edit + new |
 | Embedded SPA | `pkg/ui/static/` rebuilt & committed (determinism proof kept, T14) | regenerated |
 | Helm | `k8s/values.yaml` + 5 templates implementing the three states + `oauth2Proxy.replicas` split + `required` guard | edit |
 | Docs | the five files in `.agents/shared/planning/internal-oauth2/` | this cycle |

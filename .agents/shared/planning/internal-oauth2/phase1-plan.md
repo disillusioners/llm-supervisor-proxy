@@ -878,10 +878,16 @@ srv := &http.Server{ ..., Handler: handler, ... }
 |------|---------|
 | `src/hooks/useAuth.ts` | `useAuth()` — one-shot `/fe/api/auth/me` probe → `{ enabled, authenticated, user, stateStoreCount, loading, error }` (the FE reads the optional **`state_store_count`** field — the capped store's live count, Note 4 — and may surface it as a diagnostic; it is a count only, never state material); publishes the resolved mode to a **module-level store** (`authState`) so non-hook code (the fetch guard) can read it without prop-drilling. |
 | `src/utils/apiFetch.ts` | `guardedFetch(input, init)` — wraps `fetch`; on `401` (and only when the internal mode is enabled) triggers the login redirect exactly once (D12). Also exports `authRedirectTarget()` (computes `rd`) and `resetAuthRedirectLatch()` (test hook). |
+| `src/utils/authProbe.ts` | the ONE shared identity-probe contract (fold d860b0a probe-parse dedup): `AUTH_ME_PATH`, `AUTH_PROBE_TIMEOUT_MS` (3000), the runtime type guard for the untrusted body, and the outcome classification (`answer` / `unknown` / `not-in-charge`) — consumed by `useAuth.ts` + `useEvents.ts` so the two probes cannot drift (AR-16). |
+| `src/utils/redirectStorm.ts` | the redirect-storm breaker (review item S10): a per-tab `sessionStorage` hop counter that aborts the redirect cycle once the hop threshold is reached and surfaces a visible, dismissible error banner; dormant mode never arms it; a successful authenticated probe clears it. |
 | `src/utils/__tests__/apiFetch.test.ts` | Vitest suite for the 401 → redirect contract. |
 | `src/hooks/__tests__/useAuth.test.ts` | Vitest suite for the identity probe. |
 | `src/hooks/__tests__/useEvents.auth.test.tsx` | Vitest suite for the SSE 401 / reconnect-break contract. |
 | `src/components/__tests__/Header.auth.test.tsx` | Vitest suite for the badge/logout rendering. |
+| `src/__tests__/clientChannels.test.ts` | AR-60 census suite — the repo-wide `fetch(`/`EventSource`/`WebSocket`/`XMLHttpRequest`/`sendBeacon`/`axios`/`navigator.serviceWorker` scan returns only the guarded call sites + the auth probe + the single `EventSource` in `useEvents.ts`. |
+| `src/utils/__tests__/redirectStorm.test.ts` | Vitest suite for the breaker contract (3 hops redirect, the 4th suppressed with a dismissible error state; success clears the counter; dormant never arms; the per-page-load latch counts one page-load as ONE hop). |
+| `src/utils/__tests__/authProbe.test.ts` | Vitest suite for the shared probe-parse contract (ONE path + ONE timeout budget; boolean-`enabled` type guard; `answer`/`unknown`/`not-in-charge` outcomes, AR-16). |
+| `src/utils/__tests__/authProbeMocks.ts` | the canonical mock helper for `GET /fe/api/auth/me` responses (**a helper, not a suite** — the five canonical shapes the FE auth tests import, eliminating per-file 200-where-401 mock drift; tester item R5). |
 
 ### 7.3 `guardedFetch` contract (the single 401 choke point)
 
@@ -1237,7 +1243,7 @@ internalOAuth2:
 | Go test files (this section, §9.1) | **11** | `config_test.go`, `cookie_test.go`, `jwt_test.go`, `jwks_test.go`, `oidc_test.go`, `handler_test.go`, `middleware_test.go`, `statestore_test.go`, `ratelimit_test.go`, `testhelpers_test.go` (**10 unconditional** — the last is the shared test seam/helper file) + `guard_test.go` (**1 unconditional** — the conditional fired: `Guard` IS a separate type from `Middleware`) |
 | Go test files (integration, §9.2) | **2** | `pkg/ui/handlers_auth_test.go`, `cmd/oauth2_boot_test.go` |
 | **Total Go test files** | **13** | 11 (§9.1) + 2 (§9.2) |
-| FE test suites (§9.3) | **8** rows | **6 new** — `apiFetch.test.ts`, `useAuth.test.ts`, `useEvents.auth.test.tsx`, `Header.auth.test.tsx`, `clientChannels.test.ts`, `redirectStorm.test.ts` — plus **2 existing** re-asserted (`Header.test.tsx`, `tsc-baseline.test.ts`) |
+| FE test suites (§9.3) | **9** rows | **7 new** — `apiFetch.test.ts`, `useAuth.test.ts`, `useEvents.auth.test.tsx`, `Header.auth.test.tsx`, `clientChannels.test.ts`, `redirectStorm.test.ts`, `authProbe.test.ts` — plus **2 existing** re-asserted (`Header.test.tsx`, `tsc-baseline.test.ts`) |
 
 
 | File | Test names (proposed) | Asserts |
@@ -1270,6 +1276,7 @@ internalOAuth2:
 | `src/components/__tests__/Header.auth.test.tsx` | the badge + "Sign out" render when `enabled && authenticated`; they are **absent** when dormant (`enabled: false`) and absent when unauthenticated; the logout click issues a **POST** form submission to `/oauth2/logout` (AR-36 — a GET would be 405). |
 | **`src/__tests__/clientChannels.test.ts`** (new) | **AR-60 census:** `grep -rnE "(^|[^A-Za-z])fetch\(|EventSource|WebSocket|XMLHttpRequest|sendBeacon|axios|navigator\.serviceWorker" pkg/ui/frontend/src` returns only the guarded call sites + the auth probe + the single `EventSource` in `useEvents.ts` — no unguarded channel. |
 | **`src/utils/__tests__/redirectStorm.test.ts`** (new) | **the redirect-storm breaker:** 3 hops across simulated page loads redirect; the **4th is suppressed** with a visible, dismissible error state; a successful authenticated probe **clears the counter** (a later 401 redirects normally); dormant mode **never arms** the breaker; the per-page-load AR-42 latch counts one page-load's attempts as ONE hop. |
+| **`src/utils/__tests__/authProbe.test.ts`** (new) | **the shared probe-parse contract:** ONE endpoint path (`AUTH_ME_PATH`) + ONE 3000 ms timeout budget (`AUTH_PROBE_TIMEOUT_MS`); the runtime type guard accepts only a body with a boolean `enabled` — anything else is UNKNOWN and **never cached as `enabled:false`** (AR-16); the 200 dormant and 200 signed-in bodies and the 401 enabled+anonymous shape are EXPLICIT answers; a 401 with an unparseable body is UNKNOWN; a status neither 200 nor 401 is `not-in-charge`; `preferred_username` never normalized into the user sub-shape. |
 | `src/components/__tests__/Header.test.tsx` (existing) | still passes (the new hook call is stubbed). |
 | `src/utils/__tests__/tsc-baseline.test.ts` (existing) | `tsc --noEmit` exits **2** with the **exact** baseline: `TOTAL_ERRORS=18` across the **same 9 files**; `tsc-baseline.txt` is **byte-identical** to the base (sha256 before/after). New FE files contribute **0** errors. |
 
