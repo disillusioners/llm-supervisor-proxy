@@ -1063,7 +1063,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// refuses an empty list (it used to silently re-expand it to
 		// {cfg.ModelID}, re-introducing an out-of-scope model).
 		if len(rc.modelList) == 0 {
-			if rc.groupPick != nil {
+			// Defensive conjunct (Phase-2 sec review W2): a 403 is only
+			// ever correct when NO upstream attempt ran and the response
+			// headers are not committed. Unreachable today (the empty
+			// list ⇒ the coordinator was never constructed ⇒ attempts ==
+			// 0 and no byte was written), but the terminal branches carry
+			// the same conjunct; with >= 1 attempt this falls through to
+			// the 502 all_models_failed path below.
+			if rc.groupPick != nil && rc.upstreamAttempts == 0 && !rc.headersSent {
 				// The group was in reach but NO member was → a scope
 				// exclusion. (The pick/list consistency rule makes
 				// rc.groupPick != nil imply a real GroupID, so this

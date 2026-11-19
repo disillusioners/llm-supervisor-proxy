@@ -590,7 +590,14 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// the walk. The Anthropic lane has no coordinator to refuse it, so
 	// the guard lives here.
 	if len(arc.modelList) == 0 {
-		if arc.groupPick != nil {
+		// Defensive conjunct (Phase-2 sec review W2): a 403 is only
+		// ever correct when NO upstream attempt ran and the response
+		// headers are not committed. Unreachable today (the empty list
+		// ⇒ the walk never ran ⇒ attempts == 0 and no byte was written),
+		// but the terminal branches carry the same conjunct; with >= 1
+		// attempt this falls through to the 502 all_models_failed path
+		// below.
+		if arc.groupPick != nil && arc.upstreamAttempts == 0 && !arc.headersSent {
 			// The group was in reach but NO member was → a scope
 			// exclusion. ZERO upstream attempts ran ⇒ a permission
 			// failure, never an availability failure.
