@@ -357,3 +357,55 @@ index mtime dates a commit — an mtime alone cannot date an edit.
 4. The leader then issues the final verdict.
 
 - **⚠️ Tree-cleanliness precondition for the re-run.** The parallel test-only lane leaves UNTRACKED test files in the shared worktree (observed: `pkg/decision/zz_probe_tmp_test.go`, and an in-flight edit to `pkg/store/database/migrations_test.go`). An untracked `*_test.go` compiles INTO its package during `go test`, so it would add test names that are absent from the §13.1a ledger (sweep "unlisted" noise) and pollute the package under test. The gen-9 re-run MUST start from a clean tree — either the parallel lane has finished/committed, or a scratch checkout of the target SHA is used (`git --no-pager archive <sha> | tar -x -C /tmp/gate-gen9/`) — and `git status --porcelain` MUST show no `*_test.go` entries before the run. If the tree cannot be made clean, re-run in the scratch checkout and say so in the report.
+
+---
+
+# FINAL VERDICT ADDENDUM — gen-10 anchor, HEAD `1e65774` (2026-11-19)
+
+**Verdict: PASS.** Issued after the gen-10 re-verification recipe (below) ran in full at the final anchor.
+
+## Anchor verification (STOP-gate re-run)
+- Corpus gen-10 manifest `f68743d6ab905336306f0830580c01dc7bca500a42a099cf896c923935bc24aa` **REPRODUCES** via BOTH exclusion forms (`sed '7d'` and `grep -v 'corpus frozen at'` — byte-identical per-file bytes, 185,939 B); the freeze line is exactly line 7 of `plan.md` (single match).
+- HEAD = `1e65774c7b57bcb34900a2880febaf77e0367193`; `git rev-list --count a3f0335..HEAD` = 20; working tree clean of every `*_test.go`/source file (`pkg/decision/zz_probe_tmp_test.go` verified ABSENT) — only `.agents/` session entries dirty.
+- **Delta provenance `e502978..1e65774`: TEST-ONLY** — 4 files, all `*_test.go`, +1589 (`pkg/decision/handler_group_test.go` +376, `pkg/decision/handler_test.go` +319, `pkg/proxy/authz_claim_pins_test.go` +653, `pkg/store/database/migrations_test.go` +241). Production Go, FE sources, `pkg/ui/static`, migration SQL: **byte-identical** to `eb137a1` ⇒ the first-pass `-race` (heavy+light, zero races), `go build ./cmd`, `go vet`, `tsc` 18/9 parity, bundle zero-diff/determinism, and the G-H1 tail verification **carry over** to `1e65774` (their subjects did not change).
+
+## Re-verification runs at `1e65774` (scratch `/tmp/gate-1e65774/`)
+| Lane | Result | Detail |
+|---|---|---|
+| Pack A (9 pkgs) | ✅ EXIT=0, 150 s | **1466** top-level `--- PASS` (+9 vs `eb137a1` = exactly the 9 obligation pins) / 0 FAIL / 11 pre-existing SKIP / 2519 RUN / **0 `[setup failed]`**; proxy 147.243 s, store/database 54.156 s, decision 2.039 s; no flakes fired |
+| Scoped 9-pin re-run | ✅ EXIT=0, 4 s | all 9 obligation pins PASS isolated (`pins9_scoped.log`) AND in-pack (`packA.log`) |
+| Pack B (35 pkgs) | ✅ PASS (adjudicated), raw EXIT=1, 52 s | **1187** PASS / **2** FAIL = the 2 quarantined httpbin 403s only / 1 pre-existing SKIP; arithmetic closes exactly (1187+2+1 = 1190 top-level RUN); TOCTOU passed outright; **all 8 `TestPackage_ImportGuard_*` RAN and PASSED** (fail-hard mechanism, not skip — GOPATH/GOMODCACHE pinned) |
+| FE vitest | ✅ EXIT=0, 16 s | 41 files / **448 passed** / 0 failed / 0 `×` — zero FE delta |
+| G12(b) restated | ✅ | `TestPackage_NoPerAxisLenGuardOutsideAuth` PASS (non-skipped, 0.18 s); repo scan = **exactly the 3 authorized hits**: `pkg/authz/scope.go:93` (map capacity), `pkg/modelscache/tokens.go:144` (slice copy), `pkg/proxy/handler.go:855` (comment) — zero unauthorized guards. Gen-10 wording resolves the gen-8 prose/predicate gap |
+| §5.1 alignment | ✅ | all 30 §5.1 ruling-pin names ⊆ the 88 §13.1a names (0 missing); the 9 new pins appear verbatim in BOTH §5.1 and §13.1a; speculative names explicitly pre-existing/deferred |
+| gofmt delta | ✅ | 0/6 files touched in `eb137a1..1e65774` flagged at HEAD **and** at base `a3f0335` — zero new drift |
+
+## 121-pin anti-vacuous sweep — FINAL
+**`expected=121 (88 Go + 33 FE) | added=121 (88 Go + 33 FE) | unlisted=0 | absent=0 | duplicates=0 | real-findings=0`**
+
+- All **88** Go pins: literal top-level `--- PASS:` exactly once each in `/tmp/gate-1e65774/{packA.log, packB.log}`; all **33** FE titles: executed exactly once in `fe_test.log` (0 `×`).
+- Set arithmetic vs base `a3f0335`: added-Go = 88 (incl. the 2 renames counted once under new names + the 9 obligation pins), added-FE = 33 ⇒ `added == expected == 121`.
+- Reconciliation: `TestComputeConversationKey_TokenSalting` pre-existing (executed, not added); `TestConversationKey_MidBindingRevocation` deferred (absent from added and executed sets).
+- The 112 pins from the first-pass table above **carry over re-verified** in the final logs; the **9 new rows** (landed `1e65774`):
+
+| Name | File | n | Verdict |
+|---|---|---|---|
+| `TestDecision_DisabledVsOutOfScope_NoLeak` | pkg/decision/handler_group_test.go | 1 | PASS |
+| `TestDecision_Precedence_401_404_400_403_502` | pkg/decision/handler_test.go | 1 | PASS |
+| `TestChat_FallbackPositionGroup_NoPhantomPick` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestChat_ShadowClaimed_403QuotesClaimedString` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestChat_ShadowClaimed_AliasOnlyToken_403` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestAnthropic_ShadowClaimed_AliasOnlyToken_403` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestChat_ShadowClaimed_GroupGrant_AdmitsClaimedRequest` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestChainGroupEntry_NeverAdmitted_No502` | pkg/proxy/authz_claim_pins_test.go | 1 | PASS |
+| `TestMigration034_PGMalformedRowSkippedNotAbort` | pkg/store/database/migrations_test.go | 1 | PASS |
+
+- **Non-vacuity of the 9:** my own evidence = literal PASS in the full Pack A log AND in an isolated scoped re-run (`pins9_scoped.log`, 4 s, 3 pkgs ok). This corroborates the landing lane's mutation proof (16 mutations incl. 8 production-code injections, per the lane's report — cited, not re-derived here).
+
+## Tip-vs-gate-HEAD provenance (restated)
+- Commissioned gate HEAD: `81e8788` (first pass, gen-8) — evidence at `eb137a1` for the dynamic lanes after the test-only assertion fix.
+- Final anchor: `1e65774` = `eb137a1` + 3 tester artifact commits (`135e1e8`, `f244b1d`, `e502978`) + the 9-pin lane (`1e65774`). Everything dynamic was **re-run at `1e65774`** (this addendum); everything static (race, build, vet, tsc, bundle, G-H1) is **proven byte-identical** between `eb137a1` and `1e65774`.
+- **Ship SHA = the branch tip after this artifact commit** (the commit containing this addendum). Do NOT ship `81e8788` or `eb137a1`.
+
+## Verdict
+**PASS.** Gate matrix 1–9 green at the final anchor (with the two standing quarantined httpbin 403s as the only non-green tests, adjudicated non-blocking per QUARANTINE.md). Carried follow-ups (non-blocking): leader item **E1** (pre-ship count of `allowed_models=''`/`allowed_groups=''` rows on both hosts — now DENY-ALL), O1 dead FE exports, O2 TokenForm-edit-path pin, O3 W1 body assertion, O4 legacy `IsModelAllowed` shim, O6 `-race` budget calibration (real wall 317 s ≈ `max(pkg)`).
