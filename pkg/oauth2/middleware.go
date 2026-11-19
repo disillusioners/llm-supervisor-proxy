@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -113,43 +112,14 @@ func NewGuard(cfg *Config) (*Guard, error) {
 		return nil, nil
 	}
 	provider := NewOIDCProvider(cfg)
-	fetch := func(ctx context.Context) (map[string]crypto.PublicKey, error) {
+	fetch := func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
 		meta, err := provider.Discover(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ctx2, cancel := context.WithTimeout(ctx, cfg.DiscoveryTimeout)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx2, http.MethodGet, meta.JWKSURI, nil)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := provider.client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		var js JWKSet
-		if err := json.Unmarshal(body, &js); err != nil {
-			return nil, err
-		}
-		out := map[string]crypto.PublicKey{}
-		for _, j := range js.Keys {
-			key, err := ParseJWK(j, cfg.AllowedAlgs)
-			if err != nil {
-				continue
-			}
-			kid := j.Kid
-			if kid == "" {
-				kid = fmt.Sprintf("key-%d", len(out))
-			}
-			out[kid] = key
-		}
-		return out, nil
+		return fetchJWKSSet(ctx2, provider.client, meta.JWKSURI, cfg.AllowedAlgs)
 	}
 	cache := NewJWKSCache(cfg.JWKSCacheTTL, cfg.JWKSMinRefresh, cfg.JWKSStaleGrace, fetch)
 	verifier := NewVerifier(cfg, cache)

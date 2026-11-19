@@ -4,9 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +13,12 @@ import (
 )
 
 func newTestHandler(t *testing.T) *Handler {
+	return newTestHandlerWithCookieKey(t, 32)
+}
+
+// newTestHandlerWithCookieKey builds the test handler; a cookieKeyLen other
+// than 32 yields a session codec whose Seal always fails (the S6 path).
+func newTestHandlerWithCookieKey(t *testing.T, cookieKeyLen int) *Handler {
 	srv, _ := newStubIdP(t)
 	t.Cleanup(func() { srv.Close() })
 	testStubServer = srv
@@ -45,48 +48,228 @@ func newTestHandler(t *testing.T) *Handler {
 	for i := range root {
 		root[i] = byte(i + 1)
 	}
-	sk, tk, _ := deriveSubkeys(root)
+	_, tk, _ := deriveSubkeys(root)
 	cfg.rootKey = root
-	cookie := &CookieCodec{name: cfg.CookieName, key: sk, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
+	sessionKey := make([]byte, cookieKeyLen)
+	for i := range sessionKey {
+		sessionKey[i] = byte(i + 1)
+	}
+	cookie := &CookieCodec{name: cfg.CookieName, key: sessionKey, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
 	txn := &CookieCodec{name: cfg.TxnCookieName, key: tk, secure: true, sameSite: http.SameSiteLaxMode, path: "/oauth2", maxAge: 600}
 	provider := NewOIDCProvider(cfg)
-	fetch := func(ctx context.Context) (map[string]crypto.PublicKey, error) {
+	fetch := func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
 		meta, err := provider.Discover(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, meta.JWKSURI, nil)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := provider.client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		var js JWKSet
-		if err := json.Unmarshal(body, &js); err != nil {
-			return nil, err
-		}
-		out := map[string]crypto.PublicKey{}
-		for _, j := range js.Keys {
-			key, err := ParseJWK(j, cfg.AllowedAlgs)
-			if err != nil {
-				continue
-			}
-			kid := j.Kid
-			if kid == "" {
-				kid = fmt.Sprintf("key-%d", len(out))
-			}
-			out[kid] = key
-		}
-		return out, nil
+		return fetchJWKSSet(ctx, provider.client, meta.JWKSURI, cfg.AllowedAlgs)
 	}
 	cache := NewJWKSCache(cfg.JWKSCacheTTL, time.Minute, cfg.JWKSCacheTTL*2, fetch)
 	verifier := NewVerifier(cfg, cache)
 	h := NewHandler(cfg, provider, verifier, cookie, txn)
 	return h
+}
+
+// newThrottleHandler builds a handler whose IdP key set can withhold the
+// signing key, with a short JWKS min-refresh window so the throttle window
+// is testable.
+func newThrottleHandler(t *testing.T, idp *throttleIdP) *Handler {
+	cfg := &Config{
+		Enabled:              true,
+		IssuerURL:            idp.server.URL,
+		ClientID:             "cid",
+		ExternalURL:          "https://app.example.com",
+		RedirectURL:          idp.server.URL + "/oauth2/callback",
+		CookieName:           "llmproxy_oauth2",
+		TxnCookieName:        "llmproxy_oauth2_txn",
+		CookieSecure:         true,
+		CookieSameSite:       http.SameSiteLaxMode,
+		SessionTTL:           time.Hour,
+		EmailDomains:         []string{"example.com"},
+		RequireEmailVerified: true,
+		AllowedAlgs:          map[string]struct{}{"RS256": {}},
+		StateStoreMax:        8,
+		RateLimitRPM:         60,
+		RateLimitBurst:       60,
+		JWKSCacheTTL:         time.Hour,
+		JWKSMinRefresh:       150 * time.Millisecond,
+		JWKSStaleGrace:       time.Hour,
+		DiscoveryTimeout:     5 * time.Second,
+		TokenExchangeTimeout: 5 * time.Second,
+		UserinfoTimeout:      5 * time.Second,
+	}
+	root := make([]byte, 32)
+	for i := range root {
+		root[i] = byte(i + 1)
+	}
+	sk, tk, _ := deriveSubkeys(root)
+	cfg.rootKey = root
+	cookie := &CookieCodec{name: cfg.CookieName, key: sk, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
+	txn := &CookieCodec{name: cfg.TxnCookieName, key: tk, secure: true, sameSite: http.SameSiteLaxMode, path: "/oauth2", maxAge: 600}
+	provider := NewOIDCProvider(cfg)
+	fetch := func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
+		meta, err := provider.Discover(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return fetchJWKSSet(ctx, provider.client, meta.JWKSURI, cfg.AllowedAlgs)
+	}
+	cache := NewJWKSCache(cfg.JWKSCacheTTL, cfg.JWKSMinRefresh, cfg.JWKSStaleGrace, fetch)
+	verifier := NewVerifier(cfg, cache)
+	return NewHandler(cfg, provider, verifier, cookie, txn)
+}
+
+// txnStateFor mints a state record bound to a fresh txn cookie and returns
+// both the record and the cookie value.
+func txnStateFor(t *testing.T, h *Handler, state, nonce, verifier string) (*stateRecord, string) {
+	t.Helper()
+	tv, err := h.txn.Seal(&Session{IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(tv))
+	rec := &stateRecord{
+		State:        state,
+		Nonce:        nonce,
+		CodeVerifier: verifier,
+		RedirectTo:   "/ui/",
+		TxnDigest:    hexEncode(sum[:]),
+		CreatedAt:    time.Now(),
+	}
+	h.states.add(rec)
+	return rec, tv
+}
+
+// S3: a kid-miss throttle answers 503 and does NOT consume the one-time
+// state — the operator's login survives the throttle window and the same
+// callback can be retried once the window passes.
+func TestCallback_JWKSRateLimitAnswers503AndPreservesState(t *testing.T) {
+	idp := newThrottleIdP(t, "throttle-kid")
+	h := newThrottleHandler(t, idp)
+	verifier := "verifier-throttle"
+	stubRegisterCode("code-throttle", "nonce-throttle", verifier, "user@example.com", true)
+
+	// attempt 1: the key set does not carry the kid yet => unknown kid (400).
+	// The refresh is recorded, so the NEXT miss inside the window is throttled.
+	_, tv1 := txnStateFor(t, h, "st1", "nonce-throttle", verifier)
+	req1 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st1&code=code-throttle", nil)
+	req1.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv1})
+	w1 := httptest.NewRecorder()
+	h.HandleCallback(w1, req1)
+	if w1.Code != http.StatusBadRequest {
+		t.Fatalf("attempt 1 code: %d body: %s", w1.Code, w1.Body.String())
+	}
+
+	// attempt 2: the miss lands inside the min-refresh window => throttled.
+	_, tv2 := txnStateFor(t, h, "st2", "nonce-throttle", verifier)
+	req2 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st2&code=code-throttle", nil)
+	req2.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv2})
+	w2 := httptest.NewRecorder()
+	h.HandleCallback(w2, req2)
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("attempt 2 code: %d body: %s", w2.Code, w2.Body.String())
+	}
+	if body := strings.TrimSpace(w2.Body.String()); body != `{"error":"jwks_rate_limited"}` {
+		t.Fatalf("attempt 2 body: %s", body)
+	}
+	// the one-time state must NOT have been consumed by the throttle
+	if _, ok := h.states.get("st2"); !ok {
+		t.Fatal("the throttled callback consumed the one-time state")
+	}
+	// the txn cookie must NOT have been cleared — the browser keeps it
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == h.cfg.TxnCookieName && c.MaxAge < 0 {
+			t.Fatal("the throttled callback cleared the txn cookie")
+		}
+	}
+
+	// the key set now publishes the kid; the SAME state retries successfully
+	// once the throttle window has passed.
+	idp.setPublish(true)
+	time.Sleep(2 * h.cfg.JWKSMinRefresh)
+	req3 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st2&code=code-throttle", nil)
+	req3.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv2})
+	w3 := httptest.NewRecorder()
+	h.HandleCallback(w3, req3)
+	if w3.Code != http.StatusFound {
+		t.Fatalf("retry code: %d body: %s", w3.Code, w3.Body.String())
+	}
+	found := false
+	for _, c := range w3.Result().Cookies() {
+		if c.Name == h.cfg.CookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the retry did not set a session cookie")
+	}
+}
+
+// S6: when the session cookie cannot be sealed the login fails loudly — a
+// stable error code is returned and NO session cookie is written.
+func TestCallback_SealFailureIsSurfacedAndNoSessionCookieIsWritten(t *testing.T) {
+	h := newTestHandlerWithCookieKey(t, 5) // an invalid AES key size => Seal fails
+	verifier := "verifier-seal"
+	stubRegisterCode("code-seal", "nonce-seal", verifier, "user@example.com", true)
+	_, tv := txnStateFor(t, h, "sseal", "nonce-seal", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=sseal&code=code-seal", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"error":"session_cookie_seal_failed"}` {
+		t.Fatalf("body: %s", body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.cfg.CookieName && c.Value != "" {
+			t.Fatal("a session cookie was written despite the seal failure")
+		}
+	}
+}
+
+// S7: with no OAUTH2_EXTERNAL_URL the end-session hop is skipped rather than
+// building a RELATIVE post_logout_redirect_uri from an empty base.
+func TestLogout_SkipsEndSessionWhenExternalURLMissing(t *testing.T) {
+	h := newTestHandler(t)
+	h.cfg.ExternalURL = ""
+	// fresh metadata that DOES advertise an end_session endpoint
+	if _, err := h.provider.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h.provider.CachedMetadata() == nil || h.provider.CachedMetadata().EndSessionEndpoint == "" {
+		t.Fatal("the cached metadata carries no end_session endpoint")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/logout", nil)
+	w := httptest.NewRecorder()
+	h.HandleLogout(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("code: %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if strings.Contains(loc, "post_logout_redirect_uri") {
+		t.Fatalf("a relative post_logout_redirect_uri was built: %s", loc)
+	}
+	if strings.Contains(loc, "/logout?") {
+		t.Fatalf("expected no end-session hop, got %s", loc)
+	}
+	if loc != "/ui/" {
+		t.Fatalf("expected the local redirect, got %s", loc)
+	}
+
+	// control: with an external URL the hop IS taken and the uri is absolute.
+	h2 := newTestHandler(t)
+	if _, err := h2.provider.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/oauth2/logout", nil)
+	w2 := httptest.NewRecorder()
+	h2.HandleLogout(w2, req2)
+	loc2 := w2.Header().Get("Location")
+	if !strings.Contains(loc2, "post_logout_redirect_uri=https%3A%2F%2Fapp.example.com%2Fui%2F") {
+		t.Fatalf("expected an absolute post_logout_redirect_uri, got %s", loc2)
+	}
 }
 
 func TestStart_RedirectsWithStateNoncePKCE(t *testing.T) {

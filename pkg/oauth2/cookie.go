@@ -17,6 +17,15 @@ import (
 
 const MaxCookieBytes = 4096
 
+// ErrCodeSessionCookieSeal is the stable error code surfaced when a session
+// cookie cannot be sealed. It is a CODE, never a value: the sealed cookie, the
+// session claims and the key material are never echoed.
+const ErrCodeSessionCookieSeal = "session_cookie_seal_failed"
+
+// ErrCodeLogoutNoExternalURL is the stable error code surfaced when the
+// end-session hop is skipped because no absolute base URL is configured.
+const ErrCodeLogoutNoExternalURL = "logout_end_session_skipped_no_external_url"
+
 // maxCookieBytes is the runtime threshold used by Seal/Open; defaults to
 // MaxCookieBytes and is overridable in tests to prove the budget check.
 var maxCookieBytes = MaxCookieBytes
@@ -136,10 +145,13 @@ func (c *CookieCodec) Open(value string) (*Session, error) {
 	return &s, nil
 }
 
-func (c *CookieCodec) SetCookie(w http.ResponseWriter, s *Session) {
+// SetCookie seals the session and writes it as a cookie. A seal failure is
+// NEVER swallowed: no cookie is written and the error is returned so the
+// caller can surface a stable code and refuse the login.
+func (c *CookieCodec) SetCookie(w http.ResponseWriter, s *Session) error {
 	val, err := c.Seal(s)
 	if err != nil {
-		return
+		return fmt.Errorf("%s: %w", ErrCodeSessionCookieSeal, err)
 	}
 	maxAge := c.maxAge
 	if maxAge == 0 && s != nil {
@@ -161,6 +173,7 @@ func (c *CookieCodec) SetCookie(w http.ResponseWriter, s *Session) {
 		Secure:   c.secure,
 		SameSite: c.sameSite,
 	})
+	return nil
 }
 
 func (c *CookieCodec) ClearCookie(w http.ResponseWriter) {

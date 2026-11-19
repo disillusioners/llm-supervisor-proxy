@@ -428,6 +428,13 @@ func ConfigFromEnv() (*Config, error) {
 			if err != nil || u.Scheme == "" || u.Host == "" {
 				return nil, fmt.Errorf("invalid OAUTH2_ALLOWED_ENDPOINTS entry: %s", e)
 			}
+			// The allowlist is compared by ORIGIN (scheme://host). An entry
+			// carrying a path, a query or a fragment can never match that
+			// comparison and would silently never fire — reject it loudly
+			// instead of accepting a rule that does nothing.
+			if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+				return nil, fmt.Errorf("OAUTH2_ALLOWED_ENDPOINTS entry must be an origin without path/query/fragment: %s", e)
+			}
 			cfg.AllowedEndpoints = append(cfg.AllowedEndpoints, e)
 		}
 	}

@@ -27,7 +27,31 @@ func TestStateStore_OverflowIs429(t *testing.T) {
 	}
 }
 
+// TestStateStore_SingleUse pins what its name promises: a minted state record
+// is consumed exactly once — a replay of the same state is refused.
 func TestStateStore_SingleUse(t *testing.T) {
+	s := newStateStore(2)
+	// mint
+	s.add(&stateRecord{State: "x", CreatedAt: time.Now()})
+	if _, ok := s.get("x"); !ok {
+		t.Fatal("the state was not minted")
+	}
+	// consume
+	rec, ok := s.consume("x")
+	if !ok || rec == nil {
+		t.Fatal("consume failed")
+	}
+	// replay
+	if _, ok := s.consume("x"); ok {
+		t.Fatal("replay allowed")
+	}
+	if _, ok := s.get("x"); ok {
+		t.Fatal("the consumed state is still present")
+	}
+}
+
+// TestStateStore_DeleteRemovesRecord covers the explicit delete path.
+func TestStateStore_DeleteRemovesRecord(t *testing.T) {
 	s := newStateStore(2)
 	s.add(&stateRecord{State: "x", CreatedAt: time.Now()})
 	s.delete("x")

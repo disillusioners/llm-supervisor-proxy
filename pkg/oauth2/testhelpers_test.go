@@ -168,6 +168,107 @@ func sha256Challenge(v string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+// throttleIdP is a stub IdP whose JWKS document can withhold the signing key
+// (a "kid miss") and publish it later — the exact shape that produces the JWKS
+// refresh throttle (ErrJWKSRateLimited) on the second miss inside the
+// min-refresh window.
+type throttleIdP struct {
+	server  *httptest.Server
+	priv    *rsa.PrivateKey
+	kid     string
+	mu      sync.Mutex
+	publish bool
+}
+
+func newThrottleIdP(t *testing.T, kid string) *throttleIdP {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &throttleIdP{priv: priv, kid: kid}
+	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 p.server.URL,
+				"authorization_endpoint": p.server.URL + "/auth",
+				"token_endpoint":         p.server.URL + "/token",
+				"jwks_uri":               p.server.URL + "/jwks",
+			})
+		case "/jwks":
+			p.mu.Lock()
+			publish := p.publish
+			p.mu.Unlock()
+			keys := []map[string]string{}
+			if publish {
+				keys = append(keys, map[string]string{
+					"kty": "RSA",
+					"kid": p.kid,
+					"use": "sig",
+					"alg": "RS256",
+					"n":   base64.RawURLEncoding.EncodeToString(p.priv.N.Bytes()),
+					"e":   base64.RawURLEncoding.EncodeToString([]byte{0x01, 0x00, 0x01}),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+		case "/token":
+			r.ParseForm()
+			code := r.FormValue("code")
+			verifier := r.FormValue("code_verifier")
+			testStubCodesMu.Lock()
+			entry, ok := testStubCodes[code]
+			testStubCodesMu.Unlock()
+			if !ok {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+				return
+			}
+			if entry.challenge != "" && entry.challenge != sha256Challenge(verifier) {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+				return
+			}
+			verified := true
+			if entry.verified != nil {
+				verified = *entry.verified
+			}
+			header := map[string]string{"alg": "RS256", "kid": p.kid, "typ": "JWT"}
+			hb, _ := json.Marshal(header)
+			claims := map[string]any{
+				"iss":            p.server.URL,
+				"sub":            "user1",
+				"aud":            "cid",
+				"exp":            time.Now().Add(time.Hour).Unix(),
+				"iat":            time.Now().Unix(),
+				"nonce":          entry.nonce,
+				"email":          entry.email,
+				"name":           "Test User",
+				"email_verified": verified,
+			}
+			pb, _ := json.Marshal(claims)
+			signing := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(pb)
+			hh := sha256.Sum256([]byte(signing))
+			sig, _ := rsa.SignPKCS1v15(rand.Reader, p.priv, crypto.SHA256, hh[:])
+			tok := signing + "." + base64.RawURLEncoding.EncodeToString(sig)
+			json.NewEncoder(w).Encode(map[string]string{"id_token": tok, "access_token": "at"})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(func() { p.server.Close() })
+	return p
+}
+
+// setPublish controls whether the JWKS document carries the signing key.
+func (p *throttleIdP) setPublish(v bool) {
+	p.mu.Lock()
+	p.publish = v
+	p.mu.Unlock()
+}
+
 func hexEncode(b []byte) string {
 	const hexd = "0123456789abcdef"
 	out := make([]byte, len(b)*2)

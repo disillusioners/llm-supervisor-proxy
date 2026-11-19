@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,12 +141,34 @@ func TestCookie_NoPreferredUsernameClaim(t *testing.T) {
 	_ = b
 }
 
+// S6: a seal failure must be SURFACED — no cookie is written and the caller
+// receives the error. The error carries a stable code, never a value.
+func TestCookie_SetCookieSurfacesSealFailure(t *testing.T) {
+	key := make([]byte, 32)
+	c := &CookieCodec{name: "sess", key: key, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
+	// a sub longer than the claim cap makes Seal fail
+	s := &Session{Sub: strings.Repeat("a", MaxSubBytes+1), ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	w := httptest.NewRecorder()
+	err := c.SetCookie(w, s)
+	if err == nil {
+		t.Fatal("expected the seal failure to be surfaced")
+	}
+	if !strings.Contains(err.Error(), ErrCodeSessionCookieSeal) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(w.Result().Cookies()) != 0 {
+		t.Fatal("a cookie was written despite the seal failure")
+	}
+}
+
 func TestCookie_SetFlags(t *testing.T) {
 	key := make([]byte, 32)
 	c := &CookieCodec{name: "sess", key: key, secure: true, sameSite: http.SameSiteLaxMode, path: "/"}
 	s := &Session{Sub: "u", ExpiresAt: time.Now().Add(time.Hour).Unix()}
 	w := httptest.NewRecorder()
-	c.SetCookie(w, s)
+	if err := c.SetCookie(w, s); err != nil {
+		t.Fatal(err)
+	}
 	resp := w.Result()
 	cookies := resp.Cookies()
 	if len(cookies) == 0 {

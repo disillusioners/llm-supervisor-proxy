@@ -177,6 +177,12 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Claims, error) {
 	if err != nil {
 		return nil, err
 	}
+	// W2: the JWK.alg ↔ JOSE header alg pin, enforced on the VERIFY path. A
+	// key that declares an algorithm must never verify a token whose header
+	// declares a different one (the same predicate the key resolution applies).
+	if _, err := checkKeyAlg(header.Kid, header.Alg, v.cache.DeclaredAlg(header.Kid), pub); err != nil {
+		return nil, err
+	}
 
 	signingInput := parts[0] + "." + parts[1]
 
@@ -227,7 +233,9 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*Claims, error) {
 		return nil, errors.New("unsupported alg")
 	}
 
-	// JWK alg mismatch / key_ops handled at parse time; also check if JWK carries alg? Not available here.
+	// the JWK alg mismatch is rejected above, when the key is resolved for
+	// verification (the JWK's declared alg is only known there); key_ops is
+	// rejected at parse time.
 
 	var claims Claims
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {

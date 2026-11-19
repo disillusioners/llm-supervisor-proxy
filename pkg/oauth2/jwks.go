@@ -8,11 +8,21 @@ import (
 	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"sync"
 	"time"
 )
+
+// maxJWKSBodyBytes bounds the JWKS document read from the IdP. A malicious or
+// compromised IdP must not be able to OOM the proxy with an unbounded body.
+const maxJWKSBodyBytes = 256 * 1024
+
+// minRSAModulusBits is the RSA modulus floor enforced by ParseJWK.
+const minRSAModulusBits = 2048
 
 type JWKSet struct {
 	Keys []JWK `json:"keys"`
@@ -78,10 +88,14 @@ type JWKSCache struct {
 	grace       time.Duration
 	ttl         time.Duration
 	minRefresh  time.Duration
-	fetch       func(ctx context.Context) (map[string]crypto.PublicKey, error)
+	fetch       func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error)
 }
 
-func NewJWKSCache(ttl, minRefresh, grace time.Duration, fetch func(ctx context.Context) (map[string]crypto.PublicKey, error)) *JWKSCache {
+// NewJWKSCache builds a JWKS cache. The fetch function returns the parsed
+// keys keyed by kid AND the algorithm each key declares ("" when the JWK
+// carries no "alg" member) — the declared alg is what pins a token's header
+// alg to the key on the verify path.
+func NewJWKSCache(ttl, minRefresh, grace time.Duration, fetch func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error)) *JWKSCache {
 	return &JWKSCache{
 		keys:       map[string]crypto.PublicKey{},
 		keyAlg:     map[string]string{},
@@ -93,13 +107,33 @@ func NewJWKSCache(ttl, minRefresh, grace time.Duration, fetch func(ctx context.C
 	}
 }
 
+// DeclaredAlg returns the algorithm the key with the given kid declares
+// ("" when the JWK carries no "alg" member).
+func (c *JWKSCache) DeclaredAlg(kid string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.keyAlg[kid]
+}
+
+// checkKeyAlg enforces the JWK.alg ↔ JOSE header alg pin on the VERIFY path:
+// a key that declares an algorithm must never verify a token whose header
+// declares a different one. A key with no declared alg is unconstrained (many
+// IdPs omit the member) and is accepted.
+func checkKeyAlg(kid, headerAlg, declaredAlg string, pub crypto.PublicKey) (crypto.PublicKey, error) {
+	if headerAlg != "" && declaredAlg != "" && declaredAlg != headerAlg {
+		return nil, fmt.Errorf("jwk alg mismatch: key %q declares %s but the token header declares %s", kid, declaredAlg, headerAlg)
+	}
+	return pub, nil
+}
+
 func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.PublicKey, error) {
 	c.mu.RLock()
 	pub, ok := c.keys[kid]
+	declared := c.keyAlg[kid]
 	fresh := time.Since(c.fetchedAt) < c.ttl
 	c.mu.RUnlock()
 	if ok && fresh {
-		return pub, nil
+		return checkKeyAlg(kid, alg, declared, pub)
 	}
 
 	now := time.Now()
@@ -127,12 +161,16 @@ func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.Pub
 		c.lastRefresh = time.Now()
 		c.mu.Unlock()
 		err := c.sf.Do(ctx, func(ctx context.Context) error {
-			keys, err := c.fetch(ctx)
+			keys, algs, err := c.fetch(ctx)
 			if err != nil {
 				return err
 			}
+			if algs == nil {
+				algs = map[string]string{}
+			}
 			c.mu.Lock()
 			c.keys = keys
+			c.keyAlg = algs
 			c.fetchedAt = time.Now()
 			c.mu.Unlock()
 			return nil
@@ -141,8 +179,9 @@ func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.Pub
 			c.mu.RLock()
 			if c.keys != nil && time.Since(c.fetchedAt) < c.grace {
 				if p, ok := c.keys[kid]; ok {
+					declared := c.keyAlg[kid]
 					c.mu.RUnlock()
-					return p, nil
+					return checkKeyAlg(kid, alg, declared, p)
 				}
 			}
 			c.mu.RUnlock()
@@ -152,12 +191,62 @@ func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.Pub
 
 	c.mu.RLock()
 	pub, ok = c.keys[kid]
+	declared = c.keyAlg[kid]
 	c.mu.RUnlock()
 	if !ok {
 		return nil, ErrJWKSUnknownKid
 	}
-	_ = alg
-	return pub, nil
+	return checkKeyAlg(kid, alg, declared, pub)
+}
+
+// fetchJWKSSet downloads and parses a JWKS document. The body read is bounded
+// (a hostile IdP must not be able to exhaust memory) and a non-200 response is
+// rejected BEFORE the JSON parse, so an HTML error page can never reach
+// json.Unmarshal. It returns the parsed keys keyed by kid plus the algorithm
+// each key declares.
+func fetchJWKSSet(ctx context.Context, client *http.Client, jwksURI string, allowed map[string]struct{}) (map[string]crypto.PublicKey, map[string]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURI, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("jwks fetch failed: status %d", resp.StatusCode)
+	}
+	// one byte over the cap is read so an oversized body is DETECTED instead of
+	// silently truncated into a confusing parse error.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBodyBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(body) > maxJWKSBodyBytes {
+		return nil, nil, fmt.Errorf("jwks response exceeds %d bytes", maxJWKSBodyBytes)
+	}
+	var js JWKSet
+	if err := json.Unmarshal(body, &js); err != nil {
+		return nil, nil, err
+	}
+	keys := map[string]crypto.PublicKey{}
+	algs := map[string]string{}
+	for _, j := range js.Keys {
+		key, err := ParseJWK(j, allowed)
+		if err != nil {
+			continue
+		}
+		kid := j.Kid
+		if kid == "" {
+			kid = fmt.Sprintf("key-%d", len(keys))
+		}
+		keys[kid] = key
+		if j.Alg != "" {
+			algs[kid] = j.Alg
+		}
+	}
+	return keys, algs, nil
 }
 
 func ParseJWK(j JWK, allowed map[string]struct{}) (crypto.PublicKey, error) {
@@ -194,6 +283,9 @@ func ParseJWK(j JWK, allowed map[string]struct{}) (crypto.PublicKey, error) {
 			return nil, err
 		}
 		n := new(big.Int).SetBytes(nBytes)
+		if n.BitLen() < minRSAModulusBits {
+			return nil, fmt.Errorf("rsa modulus too small: %d bits, want >= %d", n.BitLen(), minRSAModulusBits)
+		}
 		e := 0
 		for _, b := range eBytes {
 			e = e*256 + int(b)

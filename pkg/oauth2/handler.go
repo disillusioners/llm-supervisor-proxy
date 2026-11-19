@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -133,6 +135,27 @@ func (s *stateStore) consume(state string) (*stateRecord, bool) {
 	return rec, true
 }
 
+// restore re-inserts a consumed state record. It is used when a TRANSIENT
+// upstream failure (e.g. a throttled JWKS refresh) must not burn the one-time
+// state: the operator's login survives the throttle window and the same state
+// can be retried. It never resurrects a record the store cannot hold.
+func (s *stateStore) restore(rec *stateRecord) bool {
+	if rec == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.records[rec.State]; exists {
+		return false
+	}
+	if len(s.records) >= s.max {
+		return false
+	}
+	s.records[rec.State] = rec
+	s.count++
+	return true
+}
+
 func (s *stateStore) countLive() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -152,11 +175,23 @@ func (s *stateStore) countLive() int {
 
 // rate limiter token bucket per IP
 type rateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	rpm     int
-	burst   int
+	mu         sync.Mutex
+	buckets    map[string]*bucket
+	rpm        int
+	burst      int
+	maxBuckets int
+	idleTTL    time.Duration
 }
+
+// Policy (per-IP bucket map pruning): the bucket map is keyed on the client
+// IP, so it must not grow without bound. On every insert of a NEW bucket the
+// map is swept of buckets that have been idle for longer than idleTTL; if the
+// map is still at the cap afterwards, the oldest bucket is evicted. The map is
+// therefore hard-bounded by maxBuckets.
+const (
+	rateLimiterMaxBuckets = 4096
+	rateLimiterIdleTTL    = 10 * time.Minute
+)
 
 type bucket struct {
 	tokens float64
@@ -164,7 +199,40 @@ type bucket struct {
 }
 
 func newRateLimiter(rpm, burst int) *rateLimiter {
-	return &rateLimiter{buckets: map[string]*bucket{}, rpm: rpm, burst: burst}
+	return &rateLimiter{
+		buckets:    map[string]*bucket{},
+		rpm:        rpm,
+		burst:      burst,
+		maxBuckets: rateLimiterMaxBuckets,
+		idleTTL:    rateLimiterIdleTTL,
+	}
+}
+
+// pruneLocked drops buckets that have been idle for longer than idleTTL.
+func (rl *rateLimiter) pruneLocked(now time.Time) {
+	for ip, b := range rl.buckets {
+		if now.Sub(b.last) > rl.idleTTL {
+			delete(rl.buckets, ip)
+		}
+	}
+}
+
+// evictOldestLocked drops the single oldest bucket — the hard cap backstop
+// when the idle sweep did not free a slot.
+func (rl *rateLimiter) evictOldestLocked() {
+	oldestIP := ""
+	var oldest time.Time
+	first := true
+	for ip, b := range rl.buckets {
+		if first || b.last.Before(oldest) {
+			oldestIP = ip
+			oldest = b.last
+			first = false
+		}
+	}
+	if oldestIP != "" {
+		delete(rl.buckets, oldestIP)
+	}
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
@@ -173,6 +241,12 @@ func (rl *rateLimiter) allow(ip string) bool {
 	now := time.Now()
 	b, ok := rl.buckets[ip]
 	if !ok {
+		// a new client IP: sweep the idle buckets first so the map cannot be
+		// used as an unbounded memory sink.
+		rl.pruneLocked(now)
+		if len(rl.buckets) >= rl.maxBuckets {
+			rl.evictOldestLocked()
+		}
 		b = &bucket{tokens: float64(rl.burst), last: now}
 		rl.buckets[ip] = b
 	}
@@ -374,11 +448,12 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
-	// delete txn cookie
-	h.txn.ClearCookie(w)
-
+	// delete txn cookie — done ONLY on the paths that complete the transaction.
+	// A transient failure (throttled JWKS refresh) must leave the txn cookie
+	// intact so the same login can be retried.
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		// spec says 400 invalid_state? Actually code missing => 400 (no specific). Use invalid_state.
 		return
@@ -386,14 +461,27 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	idToken, accessToken, err := h.provider.ExchangeCode(r.Context(), code, h.cfg.RedirectURL, rec.CodeVerifier)
 	if err != nil {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadGateway, "token_exchange_failed")
 		return
 	}
 	claims, err := h.verifier.Verify(r.Context(), idToken)
 	if err != nil {
+		if errors.Is(err, ErrJWKSRateLimited) {
+			// The IdP key set is momentarily throttled. This is NOT a failed
+			// login: answer 503 and put the one-time state back so the
+			// operator can retry the same callback once the throttle window
+			// passes. The txn cookie is deliberately NOT cleared.
+			h.states.restore(rec)
+			writeJSONError(w, http.StatusServiceUnavailable, "jwks_rate_limited")
+			return
+		}
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return
 	}
+	// the transaction completed: the txn cookie is no longer needed.
+	h.txn.ClearCookie(w)
 	// nonce check
 	if claims.Nonce != rec.Nonce {
 		writeJSONError(w, http.StatusBadRequest, "invalid_nonce")
@@ -464,7 +552,13 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		IssuedAt:  time.Now().Unix(),
 		ExpiresAt: time.Now().Add(h.cfg.SessionTTL).Unix(),
 	}
-	h.cookie.SetCookie(w, session)
+	// A seal failure is NEVER swallowed: no session cookie is written and the
+	// caller is told. The stable code is logged; the value never is.
+	if err := h.cookie.SetCookie(w, session); err != nil {
+		log.Printf("[oauth2] %s: session cookie not written (%v)", ErrCodeSessionCookieSeal, err)
+		writeJSONError(w, http.StatusInternalServerError, ErrCodeSessionCookieSeal)
+		return
+	}
 
 	redirectTo := rec.RedirectTo
 	if redirectTo == "" {
@@ -503,6 +597,15 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if endSession != "" {
+		// post_logout_redirect_uri MUST be absolute. With an empty ExternalURL
+		// the concatenation below would yield a RELATIVE uri ("/ui/"), which
+		// the IdP rejects or mis-resolves. Policy: no-hop fallback — skip the
+		// end-session hop rather than build a uri from an empty base.
+		if h.cfg.ExternalURL == "" {
+			log.Printf("[oauth2] %s: end-session hop skipped, OAUTH2_EXTERNAL_URL is not set", ErrCodeLogoutNoExternalURL)
+			http.Redirect(w, r, redirectTo, http.StatusFound)
+			return
+		}
 		u := endSession
 		q := url.Values{}
 		q.Set("post_logout_redirect_uri", h.cfg.ExternalURL+redirectTo)

@@ -4,9 +4,53 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
+
+// W6: the shared client's CheckRedirect is installed ONCE in the constructor
+// and is never mutated per call — two CONCURRENT exchanges must be race-free
+// and must not replace the redirect policy.
+func TestOIDC_ConcurrentExchangeCodeDoesNotMutateCheckRedirect(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			w.Write([]byte(`{"issuer":"` + srv.URL + `","token_endpoint":"` + srv.URL + `/token","jwks_uri":"` + srv.URL + `/jwks"}`))
+			return
+		}
+		w.Write([]byte(`{"id_token":"dummy"}`))
+	}))
+	defer srv.Close()
+	cfg := &Config{IssuerURL: srv.URL, DiscoveryTimeout: 5 * time.Second, TokenExchangeTimeout: 5 * time.Second, ClientID: "cid", RedirectURL: "http://cb"}
+	p := NewOIDCProvider(cfg)
+	if p.client.CheckRedirect == nil {
+		t.Fatal("CheckRedirect must be installed in the constructor")
+	}
+	before := reflect.ValueOf(p.client.CheckRedirect).Pointer()
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := p.ExchangeCode(context.Background(), "code", "http://cb", "verifier")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent exchange failed: %v", err)
+		}
+	}
+	after := reflect.ValueOf(p.client.CheckRedirect).Pointer()
+	if before != after {
+		t.Fatal("CheckRedirect was replaced during the concurrent exchanges")
+	}
+}
 
 func TestOIDC_DiscoveryParses(t *testing.T) {
 	var srv *httptest.Server

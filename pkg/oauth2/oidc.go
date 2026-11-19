@@ -35,9 +35,23 @@ type OIDCProvider struct {
 func NewOIDCProvider(cfg *Config) *OIDCProvider {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, MaxIdleConns: 10, IdleConnTimeout: 30 * time.Second}
 	return &OIDCProvider{
-		cfg:    cfg,
-		client: &http.Client{Transport: transport},
-		sf:     &singleflight{},
+		cfg: cfg,
+		// CheckRedirect is installed ONCE here and never mutated afterwards:
+		// the client is shared by every concurrent callback, so mutating it
+		// per call was a data race.
+		client: &http.Client{
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					return http.ErrUseLastResponse
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
+			},
+		},
+		sf: &singleflight{},
 	}
 }
 
@@ -213,16 +227,9 @@ func (p *OIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, code
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// CheckRedirect: reject cross-origin
-	p.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-			return http.ErrUseLastResponse
-		}
-		if len(via) >= 10 {
-			return fmt.Errorf("too many redirects")
-		}
-		return nil
-	}
+	// CheckRedirect is installed once in NewOIDCProvider — it is NEVER mutated
+	// here: the client is shared by concurrent callbacks and mutating it per
+	// call was a data race.
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -269,6 +276,10 @@ func (p *OIDCProvider) FetchUserinfo(ctx context.Context, accessToken, idTokenSu
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// a non-200 response must never reach the JSON parse below.
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("userinfo returned status %d", resp.StatusCode)
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
 		return nil, err

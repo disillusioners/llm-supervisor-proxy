@@ -3,6 +3,7 @@ package oauth2
 import (
 	"encoding/base64"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,6 +171,30 @@ func TestConfigFromEnv_TTLClamps(t *testing.T) {
 	}
 	if cfg.SessionTTL != 24*time.Hour {
 		t.Fatalf("ttl not clamped max: %v", cfg.SessionTTL)
+	}
+}
+
+// S4: an OAUTH2_ALLOWED_ENDPOINTS entry that carries a path can never match
+// the origin comparison and would silently never fire — it must be rejected
+// at config load with a precise message.
+func TestConfigFromEnv_RejectsPathBearingAllowedEndpoint(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv(EnvAllowedEndpoints, "https://other.example.com/path")
+	_, err := ConfigFromEnv()
+	if err == nil {
+		t.Fatal("expected an error for a path-bearing allowed endpoint")
+	}
+	if !strings.Contains(err.Error(), "OAUTH2_ALLOWED_ENDPOINTS") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// control: an origin-only entry is accepted.
+	t.Setenv(EnvAllowedEndpoints, "https://other.example.com")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("an origin-only entry must be accepted: %v", err)
+	}
+	if len(cfg.AllowedEndpoints) != 1 || cfg.AllowedEndpoints[0] != "https://other.example.com" {
+		t.Fatalf("allowed endpoints: %v", cfg.AllowedEndpoints)
 	}
 }
 

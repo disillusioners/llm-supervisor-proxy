@@ -10,6 +10,9 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -437,6 +440,97 @@ func TestJWT_RejectsES256WithDERSignature(t *testing.T) {
 	v := NewVerifier(cfg, cache)
 	if _, err := v.Verify(context.Background(), tok); err == nil {
 		t.Fatal("expected rejection of DER")
+	}
+}
+
+// W2: a JWK whose declared alg differs from the token header alg must be
+// rejected on the VERIFY path — the pin is enforced when the key is used to
+// verify, not only when the key set is parsed.
+func TestJWT_VerifyRejectsJWKAlgMismatchAgainstTokenHeader(t *testing.T) {
+	cfg := testCfg()
+	priv := rsaKey(t)
+	// the key set declares RS512 …
+	srv512 := jwksServerFor(t, priv, "k1", "RS512")
+	defer srv512.Close()
+	// … while the token header declares RS256. The signature itself is valid
+	// for RS256, so ONLY the alg pin can reject this token.
+	tok := makeRSAJWT(t, "RS256", validClaims(), priv, "k1")
+	cache512 := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
+		return fetchJWKSSet(ctx, srv512.Client(), srv512.URL+"/jwks", cfg.AllowedAlgs)
+	})
+	v512 := NewVerifier(cfg, cache512)
+	_, err := v512.Verify(context.Background(), tok)
+	if err == nil {
+		t.Fatal("expected the verify path to reject the jwk alg mismatch")
+	}
+	if !strings.Contains(err.Error(), "alg mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// control: the same token verifies when the key declares RS256.
+	srv256 := jwksServerFor(t, priv, "k1", "RS256")
+	defer srv256.Close()
+	cache256 := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
+		return fetchJWKSSet(ctx, srv256.Client(), srv256.URL+"/jwks", cfg.AllowedAlgs)
+	})
+	v256 := NewVerifier(cfg, cache256)
+	if _, err := v256.Verify(context.Background(), tok); err != nil {
+		t.Fatalf("a matching alg must verify: %v", err)
+	}
+}
+
+// jwksServerFor serves a one-key JWKS document with the given declared alg.
+func jwksServerFor(t *testing.T, priv *rsa.PrivateKey, kid, alg string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := priv.N.Bytes()
+		e := []byte{0x01, 0x00, 0x01}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]string{{
+				"kty": "RSA",
+				"kid": kid,
+				"use": "sig",
+				"alg": alg,
+				"n":   base64.RawURLEncoding.EncodeToString(n),
+				"e":   base64.RawURLEncoding.EncodeToString(e),
+			}},
+		})
+	}))
+}
+
+// S1: a token whose nbf lies in the future must be rejected.
+func TestJWT_RejectsFutureNotBefore(t *testing.T) {
+	cfg := testCfg()
+	priv := rsaKey(t)
+	claims := validClaims()
+	claims.NotBefore = time.Now().Add(2 * time.Hour).Unix()
+	tok := makeRSAJWT(t, "RS256", claims, priv, "k1")
+	cache := newCache("k1", &priv.PublicKey)
+	v := NewVerifier(cfg, cache)
+	_, err := v.Verify(context.Background(), tok)
+	if err == nil {
+		t.Fatal("expected a future nbf to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not yet valid") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// S1: a single-element aud that is not the client_id must be rejected.
+func TestJWT_RejectsSingleElementAudNotClientID(t *testing.T) {
+	cfg := testCfg()
+	priv := rsaKey(t)
+	claims := validClaims()
+	claims.Audience = []string{"another-client"}
+	tok := makeRSAJWT(t, "RS256", claims, priv, "k1")
+	cache := newCache("k1", &priv.PublicKey)
+	v := NewVerifier(cfg, cache)
+	_, err := v.Verify(context.Background(), tok)
+	if err == nil {
+		t.Fatal("expected an aud mismatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "aud mismatch") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
