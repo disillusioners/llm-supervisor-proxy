@@ -1,3 +1,13 @@
+Current Plan: internal-oauth2 (dormant-by-default internal OAuth2 authentication + documented per-host cutover off the external oauth2-proxy edge gate — plan approval)
+Tracking File: internal-oauth2-tracking.md
+Iteration: 003
+Status: ESCALATED
+Mode: Plan Approval (plan-approval) — iter 003: 2 partitioned workers (plan-overview+phase1-plan / plan-overview+phase2-switch with cross-doc reference resolution); corpus = plan-overview.md 256L + phase1-plan.md 1474L + phase2-switch-plan.md 1240L (2970L); prior modes (iter 001 = 3 partitioned workers, iter 002 = 2 partitioned workers) recorded in tracking file; supporting refs architecture-recommendation.md + architecture-decision-record.md consulted, not under approval
+Worktree: /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-internal-oauth2 @ 92c4234 (branch feature/internal-oauth2, base origin/latest 92c4234)
+Last Updated: 2026-11-19 (iteration 003 REJECTED — 4 blocking, each a NEW defect class in EXECUTABLE artifacts: (1) phase1 §5.7/§6.2/§9.1 route-census citation range pkg/ui/server.go:193-246 omits /ui/ (:164) and / (:184) + mcp RegisterProxyHandlers; (2) phase2 §3.2.2 step b L335 render assertion greps Envoy "value: /oauth2" but daoduc renders nginx "path: /oauth2" → false FAIL + exit 1 on a correct overlap render; (3) phase2 §4.5.3 steps 1-2 L838-847 kubectl apply overwrites the spec.strategy=Recreate patch with the manifest RollingUpdate/maxSurge 1 → defeats AR-53 no-two-pod-straddle on the PRIMARY host; (4) phase2 §3.3 L373-374 vs §6 L1137-1138 overlap probe expectations self-contradictory + P-E expects 200+app cookie on class-5 /fe/api/models (401 JSON) → a correct 401 = STOP before D3. All 14 iter-001/002 blockers verified landed; these 4 are new-class. Max iterations reached (3) — ESCALATED to Leader.)
+Final Verdict: REJECTED x3 (001, 002, 003) — max iterations reached (3), escalated to Leader 2026-11-19. Unresolved (iteration 003, all executable-artifact defects): P2 kubectl-apply overwrites the Recreate strategy patch (ensem/primary, AR-53 voided); P1 daoduc render assertion greps the wrong ingress form (D1 false-fail); P3 overlap probe expectations contradict each other and the app gating contract (false STOP before D3); P1 phase1 route-census citation range omits /ui/ and / (browser-facing gated routes).
+Superseded entry: token-authz-allowed-groups (REJECTED x3, ESCALATED 2026-11-19 — see token-authz-allowed-groups-tracking.md)
+
 Current Plan: token-authz-allowed-groups (AUTH COMMISSION — Token Permission Model: allowed_groups token field + per-layer exclusion + decision-group allowlist fix)
 Tracking File: token-authz-allowed-groups-tracking.md
 Iteration: 003 (final)

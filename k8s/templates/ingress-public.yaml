@@ -1,7 +1,23 @@
+{{- include "llm-supervisor-proxy.oauth2ModeGuard" . -}}
 {{- if .Values.ingress.enabled -}}
 {{- $fullName := include "llm-supervisor-proxy.fullname" . -}}
 {{- $svcPort := .Values.service.port -}}
 {{- $host := (index .Values.ingress.hosts 0).host -}}
+{{- /*
+/oauth2 path ownership (ADR-001 I-1 Loop): whenever the app enforces, /oauth2/*
+must route to the APP — including the overlap state (the app's flow must be
+reachable the moment it enforces). The oauth2-proxy service backs /oauth2
+only while the edge is in-path AND the app is not enforcing.
+*/}}
+{{- $oauth2BackendName := "" -}}
+{{- $oauth2BackendPort := 0 -}}
+{{- if .Values.internalOAuth2.enabled -}}
+{{- $oauth2BackendName = $fullName -}}
+{{- $oauth2BackendPort = $svcPort -}}
+{{- else if .Values.oauth2Proxy.enabled -}}
+{{- $oauth2BackendName = "oauth2-proxy" -}}
+{{- $oauth2BackendPort = 4180 -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,13 +42,15 @@ spec:
     - host: {{ $host }}
       http:
         paths:
+{{- if $oauth2BackendName }}
           - path: /oauth2
             pathType: Prefix
             backend:
               service:
-                name: oauth2-proxy
+                name: {{ $oauth2BackendName }}
                 port:
-                  number: 4180
+                  number: {{ $oauth2BackendPort }}
+{{- end }}
           - path: /v1
             pathType: Prefix
             backend:

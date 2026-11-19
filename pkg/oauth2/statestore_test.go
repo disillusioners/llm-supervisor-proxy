@@ -1,0 +1,94 @@
+package oauth2
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+func TestStateStore_CapAndEviction(t *testing.T) {
+	s := newStateStore(2)
+	s.add(&stateRecord{State: "a", CreatedAt: time.Now()})
+	s.add(&stateRecord{State: "b", CreatedAt: time.Now()})
+	s.add(&stateRecord{State: "c", CreatedAt: time.Now()})
+	if len(s.records) > 2 {
+		t.Fatal("cap exceeded")
+	}
+}
+
+func TestStateStore_OverflowIs429(t *testing.T) {
+	s := newStateStore(1)
+	s.add(&stateRecord{State: "a", CreatedAt: time.Now()})
+	s.add(&stateRecord{State: "b", CreatedAt: time.Now()}) // evicts oldest
+	_, overflow := s.add(&stateRecord{State: "c", CreatedAt: time.Now()})
+	if !overflow {
+		t.Fatal("expected overflow")
+	}
+}
+
+// TestStateStore_SingleUse pins what its name promises: a minted state record
+// is consumed exactly once — a replay of the same state is refused.
+func TestStateStore_SingleUse(t *testing.T) {
+	s := newStateStore(2)
+	// mint
+	s.add(&stateRecord{State: "x", CreatedAt: time.Now()})
+	if _, ok := s.get("x"); !ok {
+		t.Fatal("the state was not minted")
+	}
+	// consume
+	rec, ok := s.consume("x")
+	if !ok || rec == nil {
+		t.Fatal("consume failed")
+	}
+	// replay
+	if _, ok := s.consume("x"); ok {
+		t.Fatal("replay allowed")
+	}
+	if _, ok := s.get("x"); ok {
+		t.Fatal("the consumed state is still present")
+	}
+}
+
+// TestStateStore_DeleteRemovesRecord covers the explicit delete path.
+func TestStateStore_DeleteRemovesRecord(t *testing.T) {
+	s := newStateStore(2)
+	s.add(&stateRecord{State: "x", CreatedAt: time.Now()})
+	s.delete("x")
+	if _, ok := s.get("x"); ok {
+		t.Fatal("expected deleted")
+	}
+}
+
+func TestStateStore_OverflowHTTP429(t *testing.T) {
+	h := newTestHandler(t)
+	// fill + evict once
+	for i := 0; i < 6; i++ {
+		h.states.add(&stateRecord{State: "s" + string(rune('a'+i)), CreatedAt: time.Now()})
+	}
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/start", nil)
+	w := httptest.NewRecorder()
+	h.HandleStart(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After")
+	}
+}
+
+func TestStateStore_ConsumeAtomic(t *testing.T) {
+	s := newStateStore(2)
+	s.add(&stateRecord{State: "x", CreatedAt: time.Now()})
+	rec, ok := s.consume("x")
+	if !ok || rec == nil {
+		t.Fatal("consume failed")
+	}
+	if _, ok := s.get("x"); ok {
+		t.Fatal("not deleted")
+	}
+	// second consume fails
+	if _, ok := s.consume("x"); ok {
+		t.Fatal("replay allowed")
+	}
+}

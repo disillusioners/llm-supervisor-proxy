@@ -6,7 +6,7 @@ BINDIR=$(PREFIX)/bin
 # version lives only in the binary via the -ldflags below.
 VERSION ?= dev
 
-.PHONY: all build build-frontend clean install uninstall test run help
+.PHONY: all build build-frontend clean install uninstall test run help census-gate
 
 # Default target
 all: build-frontend build
@@ -65,7 +65,53 @@ test:
 		echo "FAIL: pkg/decision must not import pkg/imggen (import guard, Decision Models §3.5 transitive closure)"; \
 		exit 1; \
 	fi
+	@echo ">> import guard: pkg/oauth2 must not import pkg/proxy / pkg/ui / pkg/store (internal-oauth2)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/(proxy|ui|store)(/|")' pkg/oauth2/; then \
+		echo "FAIL: pkg/oauth2 must not import pkg/proxy / pkg/ui / pkg/store (import guard, internal-oauth2)"; \
+		exit 1; \
+	fi
+	@echo ">> import guard: pkg/ui must not import pkg/oauth2 (internal-oauth2 seam B1)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/oauth2(/|")' pkg/ui/; then \
+		echo "FAIL: pkg/ui must not import pkg/oauth2 (import guard, internal-oauth2 seam B1)"; \
+		exit 1; \
+	fi
+	@echo ">> import guard: pkg/identity must not import ANY repo package (internal-oauth2 leaf, plan §5.8)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/[a-z]+(/|")' pkg/identity/; then \
+		echo "FAIL: pkg/identity must not import ANY repo package (import guard, internal-oauth2 leaf — plan §5.8: pkg/identity imports NOTHING from the repo)"; \
+		exit 1; \
+	fi
+	@echo ">> census anti-drift gate: registered mux patterns vs pkg/oauth2/middleware_test.go (BLK-4)"
+	@$(MAKE) census-gate
 	@go test ./...
+
+census-gate:
+	@set -e; \
+	reg=$$(mktemp); cens=$$(mktemp); trap 'rm -f $$reg $$cens' EXIT; \
+	grep -hEo 'mux\.(Handle|HandleFunc)\("[^"]*"' pkg/ui/server.go pkg/mcp/mcp.go cmd/main.go pkg/oauth2/handler.go \
+	  | sed -E 's/mux\.(Handle|HandleFunc)\("([^"]*)"/\2/' | sort -u > $$reg; \
+	grep -oE 'route: "[^"]*"' pkg/oauth2/middleware_test.go \
+	  | sed -E 's/route: "([^"]*)"/\1/' | sort -u > $$cens; \
+	missing=$$(comm -23 $$reg $$cens); \
+	if [ -n "$$missing" ]; then \
+	  echo "FAIL: registered mux pattern(s) missing from the census (BLK-4 anti-drift):"; \
+	  printf '%s\n' "$$missing" | sed 's/^/  /'; \
+	  exit 1; \
+	fi; \
+	extra=$$(comm -13 $$reg $$cens); \
+	bad=""; \
+	for p in $$extra; do \
+	  case "$$p" in \
+	    /ui) ;; \
+	    *) bad="$$bad $$p";; \
+	  esac; \
+	done; \
+	if [ -n "$$bad" ]; then \
+	  echo "FAIL: census route(s) with no registration site (not allow-listed):$$bad"; \
+	  exit 1; \
+	fi; \
+	echo ">> census gate: registered=$$(wc -l < $$reg) census-paths=$$(wc -l < $$cens) — OK"; \
+	echo "   allow-listed no-site: /ui (derived from /ui/ trailing-slash redirect)"; \
+	echo "   allow-listed method-variant: /fe/api/version POST (method-agnostic registration at pkg/ui/server.go serves all methods)"
 
 clean:
 	@echo "Cleaning..."

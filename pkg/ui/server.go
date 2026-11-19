@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/identity"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -131,6 +132,7 @@ type Server struct {
 	bufferStore  *bufferstore.BufferStore
 	tokenStore   auth.TokenStoreInterface
 	dbStore      *database.Store
+	idProvider   identity.Provider
 	mu           sync.Mutex
 }
 
@@ -145,6 +147,21 @@ func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *
 		tokenStore:   tokenStore,
 		dbStore:      dbStore,
 	}
+}
+
+// SetIdentityProvider installs the internal OAuth2 identity provider.
+// A nil provider means internal OAuth2 is dormant. Nil-safe.
+func (s *Server) SetIdentityProvider(p identity.Provider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idProvider = p
+}
+
+// identityProvider returns the installed provider (nil when dormant).
+func (s *Server) identityProvider() identity.Provider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idProvider
 }
 
 // version is set at build time via -ldflags (passed from main package)
@@ -191,6 +208,9 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 	// API at /fe/api
 	mux.HandleFunc("/fe/api/version", s.handleVersion)
+	// Internal OAuth2 identity probe (registered ALWAYS so the SPA can
+	// distinguish "dormant" from "enabled but signed out" in one call).
+	mux.HandleFunc("/fe/api/auth/me", s.handleAuthMe)
 	mux.HandleFunc("/fe/api/ram", s.handleRam)
 	mux.HandleFunc("/fe/api/config", s.handleConfig)
 	mux.HandleFunc("/fe/api/models", s.handleModels)
@@ -249,6 +269,51 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
+}
+
+// DormantAuthMeBody is the EXACT dormant /fe/api/auth/me wire body — the ONE
+// source of truth for those bytes (review item S11, internal-oauth2 round 1;
+// tidier #3). The dormant branch used to re-marshal a map[string]any on every
+// request; map marshalling relies on Go's sorted-key encoding, so the bytes
+// are PINNED here and guarded by TestHandleAuthMe_DormantBodyByteStable,
+// which proves three ways this literal is exactly what the old map
+// re-marshal produced (constant == json.Encoder(map) == live handler write),
+// trailing newline included.
+//
+// Field order on the wire (sorted, as the legacy map marshal emitted it):
+// authenticated, enabled, state_store_count, user.
+//
+// The byte view below is what the handler writes; the cmd-level boot test
+// pins against this same constant (ui.DormantAuthMeBody) instead of keeping a
+// second copy of the literal.
+const DormantAuthMeBody = `{"authenticated":false,"enabled":false,"state_store_count":0,"user":null}` + "\n"
+
+// dormantAuthMeBody is the byte view of DormantAuthMeBody.
+var dormantAuthMeBody = []byte(DormantAuthMeBody)
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	p := s.identityProvider()
+	if p == nil || !p.Enabled() {
+		// Dormant — one fixed write of the pre-marshalled constant.
+		// The bytes are byte-identical to the previous per-request
+		// map re-marshal (pinned by TestHandleAuthMe_DormantBodyByteStable).
+		w.Write(dormantAuthMeBody)
+		return
+	}
+	count := p.StateStoreCount()
+	id, err := p.Current(r)
+	if err != nil || id == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{"error": "unauthenticated", "enabled": true, "authenticated": false, "user": nil, "state_store_count": count})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"enabled": true, "authenticated": true, "user": id, "state_store_count": count})
 }
 
 func (s *Server) handleRam(w http.ResponseWriter, r *http.Request) {
