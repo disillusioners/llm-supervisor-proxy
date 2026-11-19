@@ -90,5 +90,8 @@ CLIENT_SECRET / COOKIE_SECRET) MUST be present.
 {{- if not .Values.internalOAuth2.existingSecret -}}
 {{- fail "internalOAuth2.existingSecret is required when internalOAuth2.enabled=true (the secret holding CLIENT_ID / CLIENT_SECRET / COOKIE_SECRET — the client-id source is mounted via secretKeyRef, never as a literal)" -}}
 {{- end -}}
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- fail "internalOAuth2.enabled=true requires replicaCount: 1 (AR-11/AR-65: the /oauth2/start state store is in-memory per-pod; replicaCount>1 strands logins across pods — set replicaCount: 1)" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
