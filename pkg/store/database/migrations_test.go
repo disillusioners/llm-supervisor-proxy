@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1558,6 +1559,246 @@ func TestMigration034_SQLiteDialectParity(t *testing.T) {
 	// is "non-NULL, valid JSON array, non-empty" — which is exactly PRESENT.
 	if gotGroups == "[]" {
 		t.Error("allowed_groups = '[]' — the repartition emptied the populated axis")
+	}
+}
+
+// TestMigration034_PGMalformedRowSkippedNotAbort is the PD-2 obligation pin.
+//
+// Corpus clause (phase1-plan.md T1.10 / PD-2 note — "The skip must SKIP the
+// ROW, not the migration"): "with a `[broken` row seeded, RunMigrations
+// returns nil, the malformed row is byte-identical afterwards, every
+// well-formed group-naming row is repartitioned, and `schema_migrations`
+// gains `034`. Pinned by `TestMigration034_PGMalformedRowSkippedNotAbort`
+// (T1.10) — sqlite-dialect harness can only approximate the `DO $$` block,
+// so the pin is a source-level structural assertion plus a dialect-independent
+// behaviour test".
+//
+// The corpus prescribes TWO halves for this one name:
+//
+//	(1) STRUCTURAL — the PostgreSQL `034` up SQL must VISIT a `[`-prefixed
+//	    row and, PER ROW, trap the `invalid_text_representation` raised by the
+//	    `::jsonb` cast, then SKIP that row (no re-raise, no write to it) and
+//	    carry on with the next row. The SQLite harness cannot execute plpgsql,
+//	    so the PG half is asserted against the frozen SQL TEXT (the same
+//	    method TestMigration034_PGGuardShape uses), which still catches the
+//	    real regression class: an edit that hoists the EXCEPTION out of the
+//	    loop, deletes it, re-raises inside it, heals the row, or makes the
+//	    guard unreachable.
+//
+//	(2) BEHAVIOURAL — dialect-independent: with a `[broken` row seeded, the
+//	    BOOT path (`Store.RunMigrations`, the exact call the pod makes —
+//	    pkg/store/database/init.go:19) returns nil, the malformed row is
+//	    BYTE-IDENTICAL afterwards, every well-formed group-naming row in the
+//	    SAME run IS repartitioned (which is what proves the run was live and
+//	    the malformed row was skipped rather than the whole batch ignored),
+//	    and `schema_migrations` gains `034`.
+//
+// The frozen SQL is NEVER edited by this test (TEST-ONLY lane).
+func TestMigration034_PGMalformedRowSkippedNotAbort(t *testing.T) {
+	// ── (1) STRUCTURAL half: the PG up SQL ─────────────────────────────
+	sqlBytes, err := postgresMigrations.ReadFile("migrations/postgres/034_add_allowed_groups.up.sql")
+	if err != nil {
+		t.Fatalf("read the PG 034 up file: %v", err)
+	}
+	sqlText := stripSQLLineComments(string(sqlBytes))
+
+	// (1a) the guarded block exists.
+	if !strings.Contains(sqlText, "DO $$") {
+		t.Fatal("PG 034 has no DO $$ block — a malformed row would abort the in-process boot migration")
+	}
+
+	// (1b) the loop head and its LOOP keyword.
+	forIdx := strings.Index(sqlText, "FOR r IN")
+	loopIdx := strings.Index(sqlText, "LOOP")
+	if forIdx < 0 || loopIdx < 0 {
+		t.Fatal("PG 034 has no FOR ... LOOP — the row-by-row guard is missing")
+	}
+	if forIdx > loopIdx {
+		t.Fatalf("PG 034: FOR (byte %d) comes AFTER LOOP (byte %d) — the loop head is malformed", forIdx, loopIdx)
+	}
+
+	// (1c) the row filter must ADMIT a `[`-prefixed value. Otherwise the
+	// guard below is dead code and a malformed row is never visited — the
+	// skip would be an accident of the filter, not of the guard.
+	//
+	// The check compiles the filter's own regex literal and asks it the
+	// question the corpus asks: does it match the PD-2 malformed probe
+	// value `[broken`? `^\s*\[` does; a tightened filter such as
+	// `^\s*\["` does not — and that tightening would silently turn the
+	// guard into dead code.
+	admitsBracketPrefix := false
+	for _, lit := range pgQuotedLiterals(sqlText[forIdx:loopIdx]) {
+		if lit == "" {
+			continue
+		}
+		re, err := regexp.Compile(lit)
+		if err != nil {
+			continue
+		}
+		if re.MatchString("[broken") {
+			admitsBracketPrefix = true
+			break
+		}
+	}
+	if !admitsBracketPrefix {
+		t.Error("PG 034's row filter does not admit a `[`-prefixed allowed_models value (the filter's regex does not match the malformed probe '[broken') — the per-row guard would never see a malformed row")
+	}
+
+	// (1d) the inner per-row BEGIN comes after the LOOP.
+	innerBegin := strings.Index(sqlText[loopIdx:], "BEGIN")
+	if innerBegin < 0 {
+		t.Fatal("PG 034 has no inner BEGIN inside the FOR ... LOOP — the per-row guard is missing")
+	}
+	innerBegin += loopIdx
+
+	// (1e) the EXCEPTION handler must sit INSIDE the loop, after the inner
+	// BEGIN — hoisted out of the loop, one bad row aborts the whole batch,
+	// which is the exact PD-2 defect.
+	excIdx := strings.Index(sqlText, "EXCEPTION WHEN invalid_text_representation")
+	if excIdx < 0 {
+		t.Fatal("PG 034 has no `EXCEPTION WHEN invalid_text_representation` handler — a malformed row would abort the migration")
+	}
+	if excIdx < innerBegin {
+		t.Errorf("PG 034: the EXCEPTION handler (byte %d) precedes the inner per-row BEGIN (byte %d) — the guard must wrap the cast inside the loop", excIdx, innerBegin)
+	}
+
+	// (1f) the raising cast must live INSIDE the guarded region: the
+	// `::jsonb` cast of a '[broken' value is what raises
+	// invalid_text_representation, so it must be between the inner BEGIN and
+	// the EXCEPTION handler.
+	castIdx := strings.Index(sqlText[innerBegin:], "::jsonb")
+	if castIdx < 0 {
+		t.Fatal("PG 034 has no `::jsonb` cast inside the guarded block — the handler cannot trap anything")
+	}
+	castIdx += innerBegin
+	if castIdx > excIdx {
+		t.Errorf("PG 034: the `::jsonb` cast (byte %d) sits AFTER the EXCEPTION handler (byte %d) — the cast that raises must be inside the guarded region", castIdx, excIdx)
+	}
+
+	// (1g) the statement that WRITES must be inside the guarded region too.
+	updateIdx := strings.Index(sqlText, "UPDATE auth_tokens")
+	if updateIdx < 0 {
+		t.Fatal("PG 034 has no `UPDATE auth_tokens` — the repartition is missing")
+	}
+	if updateIdx < innerBegin || updateIdx > excIdx {
+		t.Errorf("PG 034: the repartition UPDATE (byte %d) is outside the guarded region (inner BEGIN byte %d, EXCEPTION byte %d) — a malformed row would abort the migration", updateIdx, innerBegin, excIdx)
+	}
+
+	// (1h) the handler body: SKIP THE ROW, never abort, never heal.
+	handlerEnd := strings.Index(sqlText[excIdx:], "END;")
+	if handlerEnd < 0 {
+		t.Fatal("PG 034's EXCEPTION handler has no END; — the guard block is malformed")
+	}
+	handler := sqlText[excIdx : excIdx+handlerEnd]
+	if strings.Contains(handler, "RAISE EXCEPTION") {
+		t.Error("PG 034's EXCEPTION handler re-raises (RAISE EXCEPTION) — the skip must SKIP THE ROW, not abort the migration")
+	}
+	if strings.Contains(handler, "RAISE;") {
+		t.Error("PG 034's EXCEPTION handler re-raises the caught error (bare `RAISE;`) — the skip must SKIP THE ROW, not abort the migration")
+	}
+	if strings.Contains(handler, "UPDATE") {
+		t.Error("PG 034's EXCEPTION handler writes to the row — the malformed row must be left BYTE-IDENTICAL (skipped, not healed)")
+	}
+	if !strings.Contains(handler, "RAISE WARNING") {
+		t.Error("PG 034's EXCEPTION handler does not RAISE WARNING — the skipped row would be invisible in pod stdout at the default log level")
+	}
+
+	// (1i) the loop must CLOSE after the handler (the batch carries on to the
+	// next row) and the file must COMMIT (the skip ends in a commit, not an
+	// abort).
+	if !strings.Contains(sqlText[excIdx:], "END LOOP;") {
+		t.Error("PG 034's guarded row loop does not close after the EXCEPTION handler — the batch would stop at the first malformed row")
+	}
+	if !strings.Contains(sqlText, "COMMIT;") {
+		t.Error("PG 034 does not COMMIT — a skipped row would leave the migration unapplied")
+	}
+
+	// ── (2) BEHAVIOURAL half: the dialect-independent skip ──────────────
+	tmpDir := t.TempDir()
+	store, err := newSQLiteConnectionAtPath(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	// Pre-034 schema (and pre-034 schema_migrations) so the malformed row
+	// can be seeded in its legacy shape. migrateUpTo033 also asserts the
+	// pre-condition that allowed_groups does not exist yet.
+	migrateUpTo033(t, store)
+
+	seedModelRow(t, store, "g1", "group")
+	seedModelRow(t, store, "m1", "chat")
+	// PD-2's exact shape: passes PG's `^\s*\[` row filter, is NOT valid JSON.
+	seedToken(t, store, "malformed-bracket", `[broken`)
+	// A well-formed group-naming row in the SAME run — it must still be
+	// repartitioned, which is what proves the run was live (the malformed row
+	// was skipped, not the whole batch ignored).
+	seedToken(t, store, "group-only", `["g1"]`)
+
+	// The BOOT path: pkg/store/database/init.go:19 calls Store.RunMigrations.
+	// It must return nil — the malformed row must not abort the migration.
+	if err := store.RunMigrations(ctx); err != nil {
+		t.Fatalf("RunMigrations aborted on the malformed row — the skip must SKIP THE ROW, not the migration: %v", err)
+	}
+
+	// (2a) the migration was applied and recorded.
+	versions, err := store.GetAppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	applied034 := false
+	for _, v := range versions {
+		if v == "034" {
+			applied034 = true
+			break
+		}
+	}
+	if !applied034 {
+		t.Fatalf("schema_migrations missing 034 after RunMigrations — applied versions: %v", versions)
+	}
+	if !columnExists(t, store.DB, "auth_tokens", "allowed_groups") {
+		t.Error("allowed_groups column missing after RunMigrations — the 034 migration did not apply")
+	}
+
+	// (2b) the malformed row is BYTE-IDENTICAL (skipped, NOT healed).
+	gotModels, gotGroups := grantColumns(t, store, "malformed-bracket")
+	if gotModels != "[broken" {
+		t.Errorf("malformed row allowed_models = %q, want %q — the malformed row must be left byte-identical (skipped, not healed)", gotModels, "[broken")
+	}
+	if gotGroups != "<NULL>" {
+		t.Errorf("malformed row allowed_groups = %q, want <NULL> — the malformed row must be left byte-identical", gotGroups)
+	}
+
+	// (2c) the well-formed group-naming row IS repartitioned in the same run.
+	gotModels, gotGroups = grantColumns(t, store, "group-only")
+	if gotModels != "<NULL>" {
+		t.Errorf("group-only allowed_models = %q, want <NULL> — the repartition did not run", gotModels)
+	}
+	if gotGroups != `["g1"]` {
+		t.Errorf("group-only allowed_groups = %q, want [\"g1\"] — the repartition did not run", gotGroups)
+	}
+}
+
+// pgQuotedLiterals returns the contents of every single-quoted literal in s
+// (the surrounding quotes stripped). The structural migration pins use it to
+// inspect a ROW FILTER's regex without matching prose (the SQL line comments
+// are stripped before the call) or a string literal elsewhere in the file.
+func pgQuotedLiterals(s string) []string {
+	var out []string
+	rest := s
+	for {
+		start := strings.Index(rest, "'")
+		if start < 0 {
+			return out
+		}
+		rest = rest[start+1:]
+		end := strings.Index(rest, "'")
+		if end < 0 {
+			return out
+		}
+		out = append(out, rest[:end])
+		rest = rest[end+1:]
 	}
 }
 

@@ -2321,3 +2321,322 @@ func TestPackage_ImportGuard_GroupPolicyFiles_NoCacheImports(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PD-11 — the pinned decision-lane precedence (AUTH commission, T2.13)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// accessDeniedEnvelope is the house 403 body written by the SHARED
+// writer (pkg/decision/handler.go sendModelNotAllowedError): a FLAT
+// {type, message, model} object — deliberately NO `code` field and NO
+// OpenAI `error.type`-as-authentication-error shape (plan §9.3: the
+// three existing writers are reused byte-identically, no fourth writer).
+type accessDeniedEnvelope struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Model   string `json:"model"`
+		Code    string `json:"code"`
+	} `json:"error"`
+}
+
+func decodeAccessDenied403(t *testing.T, body []byte) accessDeniedEnvelope {
+	t.Helper()
+	var env accessDeniedEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode the 403 body (%s): %v", string(body), err)
+	}
+	return env
+}
+
+// assertAccessDenied403 asserts the exact 403 envelope (plan §9.3):
+// type=access_denied, no code, and "model" = the CLIENT-REQUESTED id.
+func assertAccessDenied403(t *testing.T, rec *httptest.ResponseRecorder, wantModel string) {
+	t.Helper()
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+	env := decodeAccessDenied403(t, rec.Body.Bytes())
+	if env.Error.Type != "access_denied" {
+		t.Errorf("error.type = %q, want access_denied (body: %s)", env.Error.Type, rec.Body.String())
+	}
+	if env.Error.Model != wantModel {
+		t.Errorf("error.model = %q, want %q (the CLIENT-requested string)", env.Error.Model, wantModel)
+	}
+	if env.Error.Code != "" {
+		t.Errorf("error.code = %q, want empty — the 403 carries no code field (plan §9.3)", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "model not allowed for this token") {
+		t.Errorf("error.message = %q, want the house wording", env.Error.Message)
+	}
+}
+
+// TestDecision_Precedence_401_404_400_403_502 pins the ONE precedence
+// order for the decision lane (phase2-plan.md T2.13, PD-11):
+//
+//	401 (auth) -> 404 (unknown model) -> 400 decision_misroute
+//	(kind/lane) -> 403 (scope) -> 502 (unservable)
+//
+// Each subtest proves not only the row's own status but that NO EARLIER
+// gate can answer for it (the precedence half), and that no excluded
+// request reaches an upstream (the zero-attempt half).
+//
+// The order is asserted on BOTH arms where the arm exists:
+//   - the MODEL arm (a non-group decision model named directly), and
+//   - the GROUP arm (a decision-lane group, pkg/decision/group.go),
+//     whose lane gate is a 400 and whose scope arms are ARM #1 (the
+//     group target) / ARM #3 (the empty-by-scope fork).
+//
+// 401 is FIRST on this lane and FOLLOWS the model resolve on the
+// chat/anthropic lanes — the divergence is PRE-EXISTING and out of
+// scope (T2.13 rationale 1: an unauthenticated caller must not learn
+// whether a model exists).
+func TestDecision_Precedence_401_404_400_403_502(t *testing.T) {
+	newDecisionEnv := func(t *testing.T) *handlerTestEnv {
+		t.Helper()
+		return newEnvOpenAI(t, fakeScript{status: 200, body: openAIDecisionSuccessBody(10, 0)})
+	}
+
+	// ── row 1: 401 ────────────────────────────────────────────────────────
+	t.Run("row1_401_anonymous_is_the_first_gate_on_both_arms", func(t *testing.T) {
+		// Anonymous + an UNKNOWN id: auth answers before the resolve, so
+		// the caller learns nothing about the id-space.
+		env := newDecisionEnv(t)
+		rec := env.sendRequest(http.MethodPost, standardRequestBody("no-such-model"),
+			map[string]string{"Authorization": ""})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("anon + unknown id: status = %d, want 401 (auth precedes the 404 resolve); body=%s",
+				rec.Code, rec.Body.String())
+		}
+		_, errType, code := decodeOpenAIError(t, rec.Body.Bytes())
+		if errType != models.ErrorTypeAuthenticationError {
+			t.Errorf("anon + unknown id: error.type = %q, want %q", errType, models.ErrorTypeAuthenticationError)
+		}
+		if code != "" {
+			t.Errorf("anon + unknown id: code = %q, want empty (the auth envelope carries no code)", code)
+		}
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("anon + unknown id: upstream hits = %d, want 0", got)
+		}
+
+		// Anonymous + a routable but WRONG-LANE model: still 401 — auth
+		// precedes the 400 misroute gate too.
+		env.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+			switch id {
+			case "chat-1":
+				return &models.ModelConfig{ID: "chat-1", Kind: models.KindChat, Enabled: true, Internal: true,
+					InternalModel: "x", Credentials: models.TestRefs("cred-1")}, true
+			case env.modelID:
+				return &models.ModelConfig{ID: env.modelID, Kind: models.KindDecision, Enabled: true, Internal: true,
+					InternalModel: "gpt-6-luna", Credentials: models.TestRefs("cred-1")}, true
+			}
+			return nil, false
+		})
+		rec = env.sendRequest(http.MethodPost, standardRequestBody("chat-1"),
+			map[string]string{"Authorization": ""})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("anon + chat-kind model: status = %d, want 401 (auth precedes the 400 misroute); body=%s",
+				rec.Code, rec.Body.String())
+		}
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("anon + chat-kind model: upstream hits = %d, want 0", got)
+		}
+
+		// Anonymous + a DECISION GROUP: 401 on the group arm as well.
+		genv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		rec = genv.sendRequest(http.MethodPost, standardRequestBody(genv.group.ID),
+			map[string]string{"Authorization": ""})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("anon + decision group: status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+		}
+		if got := genv.totalHits(); got != 0 {
+			t.Errorf("anon + decision group: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── row 2: 404 ────────────────────────────────────────────────────────
+	t.Run("row2_404_unknown_model_precedes_403", func(t *testing.T) {
+		// A RESTRICTED token asking for an unknown id gets 404, never 403:
+		// a 403 would confirm "this token is restricted" while telling the
+		// caller nothing true about the id (T2.13 rationale 2).
+		env := newDecisionEnv(t)
+		env.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		rec := env.sendRequest(http.MethodPost, standardRequestBody("no-such-model"), nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("restricted + unknown id: status = %d, want 404 (the resolve precedes the scope gate); body=%s",
+				rec.Code, rec.Body.String())
+		}
+		msg, errType, code := decodeOpenAIError(t, rec.Body.Bytes())
+		if !strings.Contains(msg, "unknown model") {
+			t.Errorf("restricted + unknown id: message = %q, want the unknown-model wording", msg)
+		}
+		if errType != models.ErrorTypeServerError || code != "" {
+			t.Errorf("restricted + unknown id: (type, code) = (%q, %q), want (%q, \"\")",
+				errType, code, models.ErrorTypeServerError)
+		}
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("restricted + unknown id: upstream hits = %d, want 0", got)
+		}
+
+		// The same id under a WILDCARD token is byte-identically 404 — the
+		// not-found answer is scope-INDEPENDENT.
+		wenv := newDecisionEnv(t)
+		wrec := wenv.sendRequest(http.MethodPost, standardRequestBody("no-such-model"), nil)
+		if wrec.Code != http.StatusNotFound || wrec.Body.String() != rec.Body.String() {
+			t.Fatalf("wildcard + unknown id: status/body = %d/%s, want the same 404 as the restricted token (%d/%s)",
+				wrec.Code, wrec.Body.String(), rec.Code, rec.Body.String())
+		}
+		if got := wenv.fake.hitCount.Load(); got != 0 {
+			t.Errorf("wildcard + unknown id: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── row 3: 400 decision_misroute ──────────────────────────────────────
+	t.Run("row3_400_misroute_precedes_403_and_is_scope_independent", func(t *testing.T) {
+		env := newDecisionEnv(t)
+		env.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+			if id != "chat-1" {
+				return nil, false
+			}
+			return &models.ModelConfig{ID: "chat-1", Kind: models.KindChat, Enabled: true, Internal: true,
+				InternalModel: "x", Credentials: models.TestRefs("cred-1")}, true
+		})
+
+		// A chat-kind model posted to /v1/decisions is a ROUTE-correctness
+		// error, so it must be the SAME 400 whether or not the token could
+		// reach the model: a token-dependent answer would leak the
+		// decision-lane configuration to restricted tokens only.
+		wildcard := env.sendRequest(http.MethodPost, standardRequestBody("chat-1"), nil)
+		if wildcard.Code != http.StatusBadRequest {
+			t.Fatalf("wildcard + chat-kind model: status = %d, want 400; body=%s", wildcard.Code, wildcard.Body.String())
+		}
+		_, _, wcode := decodeOpenAIError(t, wildcard.Body.Bytes())
+		if wcode != "decision_misroute" {
+			t.Fatalf("wildcard + chat-kind model: code = %q, want decision_misroute", wcode)
+		}
+
+		env.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		restricted := env.sendRequest(http.MethodPost, standardRequestBody("chat-1"), nil)
+		if restricted.Code != http.StatusBadRequest {
+			t.Fatalf("restricted + chat-kind model: status = %d, want 400 (the kind gate precedes the scope gate); body=%s",
+				restricted.Code, restricted.Body.String())
+		}
+		if restricted.Body.String() != wildcard.Body.String() {
+			t.Fatalf("the misroute answer is token-DEPENDENT — wildcard=%s restricted=%s (a scope-first order would leak the lane config)",
+				wildcard.Body.String(), restricted.Body.String())
+		}
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("chat-kind model: upstream hits = %d, want 0", got)
+		}
+
+		// GROUP arm: a CHAT-lane group named on /v1/decisions is the same
+		// 400 — the lane gate runs BEFORE ARM #1 (the group scope arm).
+		genv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		genv.modelsSeam.lanes[genv.group.ID] = models.GroupLaneChat
+		gw := genv.send(t)
+		if gw.Code != http.StatusBadRequest {
+			t.Fatalf("wildcard + chat-lane group: status = %d, want 400; body=%s", gw.Code, gw.Body.String())
+		}
+		_, _, gcode := decodeOpenAIError(t, gw.Body.Bytes())
+		if gcode != "decision_misroute" {
+			t.Fatalf("wildcard + chat-lane group: code = %q, want decision_misroute", gcode)
+		}
+		genv.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		gr := genv.send(t)
+		if gr.Code != http.StatusBadRequest || gr.Body.String() != gw.Body.String() {
+			t.Fatalf("chat-lane group answer is token-DEPENDENT: wildcard=%d/%s restricted=%d/%s",
+				gw.Code, gw.Body.String(), gr.Code, gr.Body.String())
+		}
+		if got := genv.totalHits(); got != 0 {
+			t.Errorf("chat-lane group: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── row 4: 403 access_denied ──────────────────────────────────────────
+	t.Run("row4_403_scope_denial_precedes_502_on_both_arms", func(t *testing.T) {
+		// MODEL arm: a resolvable, servable, IN-KIND decision model that
+		// the token simply cannot reach ⇒ 403, zero attempts.
+		env := newDecisionEnv(t)
+		env.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		rec := env.sendRequest(http.MethodPost, standardRequestBody(env.modelID), nil)
+		assertAccessDenied403(t, rec, env.modelID)
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("model arm 403: upstream hits = %d, want 0 — a denied request never reaches an upstream", got)
+		}
+
+		// GROUP arm (ARM #3): the group target IS in reach (the legacy D4
+		// spelling grants ENTRY only) but every member is out of reach ⇒
+		// 403 — NEVER the availability envelope.
+		genv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+			{ID: "dec-b", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		genv.tokenStore.tokens["tok-test"].AllowedModels = []string{genv.group.ID}
+		grec := genv.send(t)
+		assertAccessDenied403(t, grec, genv.group.ID)
+		if strings.Contains(grec.Body.String(), "decision_all_members_failed") {
+			t.Errorf("group arm 403 body carries decision_all_members_failed (%s) — a permission denial must never be reported as an availability failure",
+				grec.Body.String())
+		}
+		if got := genv.totalHits(); got != 0 {
+			t.Errorf("group arm 403: upstream hits = %d, want 0 — the scope fork precedes every attempt", got)
+		}
+
+		// GROUP arm (ARM #1): the group ITSELF out of reach ⇒ 403 before
+		// any member construction.
+		grev := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		grev.tokenStore.tokens["tok-test"].AllowedModels = []string{"some-other-model"}
+		arec := grev.send(t)
+		assertAccessDenied403(t, arec, grev.group.ID)
+		if got := grev.totalHits(); got != 0 {
+			t.Errorf("group target 403: upstream hits = %d, want 0", got)
+		}
+	})
+
+	// ── row 5: 502 — LAST ─────────────────────────────────────────────────
+	t.Run("row5_502_is_last_on_both_arms", func(t *testing.T) {
+		// MODEL arm: in-reach and routable, but no credential ⇒ 502. It is
+		// the LAST row: every earlier gate passed.
+		env := newDecisionEnv(t)
+		env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+			return models.ResolvedCredential{}, false
+		})
+		rec := env.sendRequest(http.MethodPost, standardRequestBody(env.modelID), nil)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("servable-but-broken model: status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+		}
+		msg, _, code := decodeOpenAIError(t, rec.Body.Bytes())
+		if !strings.Contains(msg, "no credentials configured") || code != "" {
+			t.Errorf("servable-but-broken model: (message, code) = (%q, %q), want the no-credentials 502 with no code", msg, code)
+		}
+		if got := env.fake.hitCount.Load(); got != 0 {
+			t.Errorf("servable-but-broken model: upstream hits = %d, want 0 (the failure is pre-attempt)", got)
+		}
+
+		// GROUP arm: every in-reach member was genuinely ATTEMPTED and
+		// failed ⇒ 502 decision_all_members_failed. The hits here are
+		// non-zero BY CONSTRUCTION — this is precisely what makes 502 the
+		// terminal row rather than a shadow of the 403 row.
+		genv := newGroupEnv(t, []groupMemberFixture{
+			{ID: "dec-a", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+			{ID: "dec-b", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+		})
+		grec := genv.send(t)
+		if grec.Code != http.StatusBadGateway {
+			t.Fatalf("all members failed: status = %d, want 502; body=%s", grec.Code, grec.Body.String())
+		}
+		_, _, gcode := decodeOpenAIError(t, grec.Body.Bytes())
+		if gcode != "decision_all_members_failed" {
+			t.Fatalf("all members failed: code = %q, want decision_all_members_failed", gcode)
+		}
+		if got := genv.totalHits(); got != 2 {
+			t.Errorf("all members failed: upstream hits = %d, want 2 — the 502 fires only AFTER genuine attempts", got)
+		}
+	})
+}
