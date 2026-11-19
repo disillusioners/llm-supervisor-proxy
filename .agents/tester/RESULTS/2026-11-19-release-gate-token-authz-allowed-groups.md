@@ -355,3 +355,5 @@ index mtime dates a commit — an mtime alone cannot date an edit.
 3. Re-sweep the grown §13.1a ledger — the 9 new pins must carry **literal PASS evidence in the new logs**, not merely
    source presence; set arithmetic must be re-proven against the new base→tip diff.
 4. The leader then issues the final verdict.
+
+- **⚠️ Tree-cleanliness precondition for the re-run.** The parallel test-only lane leaves UNTRACKED test files in the shared worktree (observed: `pkg/decision/zz_probe_tmp_test.go`, and an in-flight edit to `pkg/store/database/migrations_test.go`). An untracked `*_test.go` compiles INTO its package during `go test`, so it would add test names that are absent from the §13.1a ledger (sweep "unlisted" noise) and pollute the package under test. The gen-9 re-run MUST start from a clean tree — either the parallel lane has finished/committed, or a scratch checkout of the target SHA is used (`git --no-pager archive <sha> | tar -x -C /tmp/gate-gen9/`) — and `git status --porcelain` MUST show no `*_test.go` entries before the run. If the tree cannot be made clean, re-run in the scratch checkout and say so in the report.
