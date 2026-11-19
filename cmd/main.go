@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/decision"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/identity"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/imggen"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/memlimit"
@@ -27,6 +28,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/oauth2"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
@@ -54,6 +56,28 @@ func resolvedVersion() string {
 		return "dev"
 	}
 	return Version
+}
+
+// buildOAuth2FromEnv goes env -> config -> guard and returns (nil, nil) when
+// dormant, (guard, error) when enabled-but-misconfigured, and an error for a
+// real misconfiguration of an ENABLED deployment. This is the single wiring
+// path used by main() and by cmd/oauth2_boot_test.go.
+func buildOAuth2FromEnv() (*oauth2.Guard, error) {
+	cfg, err := oauth2.ConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		log.Printf("[oauth2] internal OAuth2 DISABLED (set OAUTH2_ENABLED=true to enable)")
+		return nil, nil
+	}
+	guard, err := oauth2.NewGuard(cfg)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[oauth2] internal OAuth2 ENABLED mode=internal issuer=%s client_id=%s cookie=%s ttl=%s secret_mode=%s",
+		cfg.IssuerURL, cfg.ClientID, cfg.CookieName, cfg.SessionTTL, cfg.SecretMode)
+	return guard, nil
 }
 
 func main() {
@@ -293,6 +317,11 @@ func main() {
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore, dbStore)
 	ui.SetVersion(resolvedVersion())
 
+	oauth2Guard, err := buildOAuth2FromEnv()
+	if err != nil {
+		log.Fatalf("[oauth2] configuration error: %v", err)
+	}
+
 	// Initialize Proxy Handler (Phase 3 / Task 12) — the engine is the 7th
 	// positional arg. Pass nil for legacy / test paths; the seam is
 	// nil-safe and degrades to single-credential resolution via
@@ -405,6 +434,16 @@ func main() {
 		log.Printf("[MCP] MCP proxy disabled (set MCP_ENABLED=true to enable)")
 	}
 
+	// Internal OAuth2 identity wiring (dormant by default).
+	var identityProvider identity.Provider
+	if oauth2Guard != nil {
+		identityProvider = oauth2Guard
+	}
+	uiServer.SetIdentityProvider(identityProvider)
+	if oauth2Guard != nil {
+		oauth2Guard.RegisterRoutes(mux)
+	}
+
 	// Register UI handlers (root /, /api/...)
 	uiServer.RegisterHandlers(mux)
 
@@ -510,8 +549,14 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:           ":" + strconv.Itoa(cfg.Port),
-		Handler:        recoveryMiddleware(gzipmw.DecompressRequest(gzipmw.CompressResponse(mux))),
+		Addr: ":" + strconv.Itoa(cfg.Port),
+		Handler: func() http.Handler {
+			base := recoveryMiddleware(gzipmw.DecompressRequest(gzipmw.CompressResponse(mux)))
+			if oauth2Guard == nil {
+				return base
+			}
+			return recoveryMiddleware(oauth2Guard.Wrap(gzipmw.DecompressRequest(gzipmw.CompressResponse(mux))))
+		}(),
 		ReadTimeout:    readTimeout,
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,

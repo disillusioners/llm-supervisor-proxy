@@ -65,6 +65,16 @@ test:
 		echo "FAIL: pkg/decision must not import pkg/imggen (import guard, Decision Models §3.5 transitive closure)"; \
 		exit 1; \
 	fi
+	@echo ">> import guard: pkg/oauth2 must not import pkg/proxy / pkg/ui / pkg/store (internal-oauth2)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/(proxy|ui|store)(/|")' pkg/oauth2/; then \
+		echo "FAIL: pkg/oauth2 must not import pkg/proxy / pkg/ui / pkg/store (import guard, internal-oauth2)"; \
+		exit 1; \
+	fi
+	@echo ">> import guard: pkg/ui must not import pkg/oauth2 (internal-oauth2 seam B1)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/oauth2(/|")' pkg/ui/; then \
+		echo "FAIL: pkg/ui must not import pkg/oauth2 (import guard, internal-oauth2 seam B1)"; \
+		exit 1; \
+	fi
 	@go test ./...
 
 clean:

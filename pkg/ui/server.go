@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/identity"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -131,6 +132,7 @@ type Server struct {
 	bufferStore  *bufferstore.BufferStore
 	tokenStore   auth.TokenStoreInterface
 	dbStore      *database.Store
+	idProvider   identity.Provider
 	mu           sync.Mutex
 }
 
@@ -145,6 +147,21 @@ func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *
 		tokenStore:   tokenStore,
 		dbStore:      dbStore,
 	}
+}
+
+// SetIdentityProvider installs the internal OAuth2 identity provider.
+// A nil provider means internal OAuth2 is dormant. Nil-safe.
+func (s *Server) SetIdentityProvider(p identity.Provider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idProvider = p
+}
+
+// identityProvider returns the installed provider (nil when dormant).
+func (s *Server) identityProvider() identity.Provider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idProvider
 }
 
 // version is set at build time via -ldflags (passed from main package)
@@ -191,6 +208,9 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 	// API at /fe/api
 	mux.HandleFunc("/fe/api/version", s.handleVersion)
+	// Internal OAuth2 identity probe (registered ALWAYS so the SPA can
+	// distinguish "dormant" from "enabled but signed out" in one call).
+	mux.HandleFunc("/fe/api/auth/me", s.handleAuthMe)
 	mux.HandleFunc("/fe/api/ram", s.handleRam)
 	mux.HandleFunc("/fe/api/config", s.handleConfig)
 	mux.HandleFunc("/fe/api/models", s.handleModels)
@@ -249,6 +269,28 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
+}
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	p := s.identityProvider()
+	if p == nil || !p.Enabled() {
+		json.NewEncoder(w).Encode(map[string]any{"enabled": false, "authenticated": false, "user": nil, "state_store_count": 0})
+		return
+	}
+	count := p.StateStoreCount()
+	id, err := p.Current(r)
+	if err != nil || id == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{"error": "unauthenticated", "enabled": true, "authenticated": false, "user": nil, "state_store_count": count})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"enabled": true, "authenticated": true, "user": id, "state_store_count": count})
 }
 
 func (s *Server) handleRam(w http.ResponseWriter, r *http.Request) {
