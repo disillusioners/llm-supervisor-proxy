@@ -1,10 +1,13 @@
+{{- include "llm-supervisor-proxy.oauth2ModeGuard" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: oauth2-proxy
   namespace: llmproxy
 spec:
-  replicas: 1
+{{- if ne (toString .Values.oauth2Proxy.replicas) "<nil>" }}
+  replicas: {{ .Values.oauth2Proxy.replicas }}
+{{- end }}
   selector:
     matchLabels:
       app: oauth2-proxy
@@ -15,22 +18,22 @@ spec:
     spec:
       containers:
       - name: oauth2-proxy
-        image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+        image: {{ .Values.oauth2Proxy.image.registry }}/{{ .Values.oauth2Proxy.image.repository }}:{{ .Values.oauth2Proxy.image.tag }}
         args:
         - --provider=oidc
-        - --oidc-issuer-url=https://door.daoduc.org
+        - --oidc-issuer-url={{ .Values.oauth2Proxy.issuerURL }}
         - --client-id=$(CLIENT_ID)
         - --client-secret=$(CLIENT_SECRET)
         - --cookie-secret=$(COOKIE_SECRET)
         - --upstream=file:///dev/null
-        - --email-domain=*
-        - --cookie-expire=24h
+        - --email-domain={{ .Values.oauth2Proxy.emailDomain }}
+        - --cookie-expire={{ .Values.oauth2Proxy.cookieExpire }}
         - --skip-provider-button=true
         - --http-address=0.0.0.0:4180
         - --session-cookie-minimal=true
         envFrom:
         - secretRef:
-            name: oauth2-proxy-secret
+            name: {{ .Values.oauth2Proxy.existingSecret }}
         ports:
         - containerPort: 4180
 ---

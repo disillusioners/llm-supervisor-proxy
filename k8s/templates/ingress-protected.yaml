@@ -1,3 +1,4 @@
+{{- include "llm-supervisor-proxy.oauth2ModeGuard" . -}}
 {{- if .Values.ingress.enabled -}}
 {{- $fullName := include "llm-supervisor-proxy.fullname" . -}}
 {{- $svcPort := .Values.service.port -}}
@@ -11,9 +12,17 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{{- /*
+Edge-in-path test (AR-22 / ADR-001 I-2): the edge gates the request path when
+oauth2Proxy.enabled=true AND (the app is not enforcing OR the designed
+overlap state is held). In overlap the annotations STAY; in internal-only
+they drop.
+*/}}
+{{- if and .Values.oauth2Proxy.enabled (or (not .Values.internalOAuth2.enabled) .Values.internalOAuth2.overlap) }}
     nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.llmproxy.svc.cluster.local:4180/oauth2/auth"
     nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email"
+{{- end }}
     nginx.ingress.kubernetes.io/app-root: "/ui/"
     # Long-running request support for streaming LLM responses
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
