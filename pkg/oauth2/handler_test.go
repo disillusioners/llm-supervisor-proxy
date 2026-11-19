@@ -123,6 +123,20 @@ func newThrottleHandler(t *testing.T, idp *throttleIdP) *Handler {
 	return NewHandler(cfg, provider, verifier, cookie, txn)
 }
 
+// newEmptyKeySetHandler builds a handler whose JWKS windows are short enough
+// to be testable: the cache TTL expires quickly (so a refresh is triggered),
+// the min-refresh window is short (so a retry is not throttled) and the
+// stale-grace window is long enough to cover the test.
+func newEmptyKeySetHandler(t *testing.T, idp *throttleIdP) *Handler {
+	t.Helper()
+	h := newThrottleHandler(t, idp)
+	h.cfg.JWKSMinRefresh = 50 * time.Millisecond
+	h.verifier.cache.ttl = 50 * time.Millisecond
+	h.verifier.cache.minRefresh = 50 * time.Millisecond
+	h.verifier.cache.grace = time.Hour
+	return h
+}
+
 // txnStateFor mints a state record bound to a fresh txn cookie and returns
 // both the record and the cookie value.
 func txnStateFor(t *testing.T, h *Handler, state, nonce, verifier string) (*stateRecord, string) {
@@ -153,15 +167,19 @@ func TestCallback_JWKSRateLimitAnswers503AndPreservesState(t *testing.T) {
 	verifier := "verifier-throttle"
 	stubRegisterCode("code-throttle", "nonce-throttle", verifier, "user@example.com", true)
 
-	// attempt 1: the key set does not carry the kid yet => unknown kid (400).
-	// The refresh is recorded, so the NEXT miss inside the window is throttled.
+	// attempt 1: the key set carries NO usable key => a FETCH error under
+	// the stale-grace policy => a retryable 503 (jwks_unavailable). The
+	// refresh is recorded, so the NEXT miss inside the window is throttled.
 	_, tv1 := txnStateFor(t, h, "st1", "nonce-throttle", verifier)
 	req1 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st1&code=code-throttle", nil)
 	req1.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv1})
 	w1 := httptest.NewRecorder()
 	h.HandleCallback(w1, req1)
-	if w1.Code != http.StatusBadRequest {
+	if w1.Code != http.StatusServiceUnavailable {
 		t.Fatalf("attempt 1 code: %d body: %s", w1.Code, w1.Body.String())
+	}
+	if body := strings.TrimSpace(w1.Body.String()); body != `{"error":"jwks_unavailable"}` {
+		t.Fatalf("attempt 1 body: %s", body)
 	}
 
 	// attempt 2: the miss lands inside the min-refresh window => throttled.
@@ -216,6 +234,253 @@ func TestCallback_JWKSRateLimitAnswers503AndPreservesState(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the retry did not set a session cookie")
+	}
+}
+
+// Item 2: a JWKS document that yields NO usable key is a FETCH failure under
+// the stale-grace policy. It answers a retryable 503 (jwks_unavailable) WITH
+// a Retry-After header, and the one-time state is RESTORED so the same
+// callback can be retried once the IdP publishes a key again.
+func TestCallback_EmptyKeySetAnswers503RetryableAndRestoresState(t *testing.T) {
+	idp := newThrottleIdP(t, "empty-kid")
+	h := newEmptyKeySetHandler(t, idp)
+	verifier := "verifier-unavail"
+	stubRegisterCode("code-unavail", "nonce-unavail", verifier, "user@example.com", true)
+
+	// the IdP publishes NO usable key
+	idp.setPublish(false)
+
+	_, tv := txnStateFor(t, h, "st-unavail", "nonce-unavail", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-unavail&code=code-unavail", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"error":"jwks_unavailable"}` {
+		t.Fatalf("body: %s", body)
+	}
+	// the operator must know when the callback may be retried
+	retryAfter := w.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("the 503 response carries no Retry-After header")
+	}
+	secs, err := strconv.Atoi(retryAfter)
+	if err != nil || secs < 1 {
+		t.Fatalf("Retry-After = %q, want a positive number of seconds", retryAfter)
+	}
+	// the one-time state must survive so the same callback can be retried
+	if _, ok := h.states.get("st-unavail"); !ok {
+		t.Fatal("the 503 consumed the one-time state")
+	}
+	// the txn cookie must NOT be cleared — the browser keeps the binding
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.cfg.TxnCookieName && c.MaxAge < 0 {
+			t.Fatal("the 503 cleared the txn cookie")
+		}
+	}
+
+	// the IdP publishes the key again: the SAME state retries successfully
+	idp.setPublish(true)
+	time.Sleep(2 * (h.verifier.cache.ttl + h.verifier.cache.minRefresh))
+	req2 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-unavail&code=code-unavail", nil)
+	req2.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w2 := httptest.NewRecorder()
+	h.HandleCallback(w2, req2)
+	if w2.Code != http.StatusFound {
+		t.Fatalf("the retry: code %d body: %s", w2.Code, w2.Body.String())
+	}
+	found := false
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == h.cfg.CookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the retry did not set a session cookie")
+	}
+}
+
+// Item 2 (AR-26 amendment): a JWKS document that yields NO usable key must
+// NOT wipe the cache. Inside the stale-grace window the PREVIOUS key set
+// keeps serving (the login still completes) and the flow RECOVERS when the
+// keys come back.
+func TestCallback_EmptyKeySetServesStaleKeysInsideGraceAndRecovers(t *testing.T) {
+	idp := newThrottleIdP(t, "empty-kid")
+	h := newEmptyKeySetHandler(t, idp)
+	verifier := "verifier-stale"
+	stubRegisterCode("code-stale", "nonce-stale", verifier, "user@example.com", true)
+
+	// 1. the IdP publishes the key: the login succeeds and the cache warms.
+	idp.setPublish(true)
+	_, tv := txnStateFor(t, h, "st-stale-1", "nonce-stale", verifier)
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-stale-1&code=code-stale", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("the first callback: code %d body: %s", w.Code, w.Body.String())
+	}
+	if len(h.verifier.cache.keys) != 1 {
+		t.Fatalf("the cache holds %d keys, want 1", len(h.verifier.cache.keys))
+	}
+
+	// 2. the IdP stops publishing the key: the refresh fails with an empty
+	//    key set. Inside the grace window the PREVIOUS key must keep
+	//    serving and the cache must NOT be wiped.
+	idp.setPublish(false)
+	time.Sleep(4 * (h.verifier.cache.ttl + h.verifier.cache.minRefresh))
+	_, tv2 := txnStateFor(t, h, "st-stale-2", "nonce-stale", verifier)
+	req2 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-stale-2&code=code-stale", nil)
+	req2.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv2})
+	w2 := httptest.NewRecorder()
+	h.HandleCallback(w2, req2)
+	if w2.Code != http.StatusFound {
+		t.Fatalf("the stale-grace window must serve the previous key: code %d body: %s", w2.Code, w2.Body.String())
+	}
+	if len(h.verifier.cache.keys) != 1 {
+		t.Fatalf("the empty key set wiped the cache (%d keys left)", len(h.verifier.cache.keys))
+	}
+
+	// 3. the keys come back: the flow recovers.
+	idp.setPublish(true)
+	time.Sleep(2 * (h.verifier.cache.ttl + h.verifier.cache.minRefresh))
+	_, tv3 := txnStateFor(t, h, "st-stale-3", "nonce-stale", verifier)
+	req3 := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-stale-3&code=code-stale", nil)
+	req3.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv3})
+	w3 := httptest.NewRecorder()
+	h.HandleCallback(w3, req3)
+	if w3.Code != http.StatusFound {
+		t.Fatalf("the recovery: code %d body: %s", w3.Code, w3.Body.String())
+	}
+}
+
+// Item 4(a): the IdP-error branch is TERMINAL — the authorization code is
+// gone, so the one-time state is consumed and the txn cookie is cleared.
+func TestCallback_IdPErrorConsumesStateAndClearsTxnCookie(t *testing.T) {
+	h := newTestHandler(t)
+	_, tv := txnStateFor(t, h, "st-idperr", "nonce-idperr", "verifier-idperr")
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?error=access_denied&error_description=user+denied&state=st-idperr", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("code: %d body: %s", w.Code, w.Body.String())
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"error":"oauth2_callback_error"}` {
+		t.Fatalf("body: %s", body)
+	}
+	// the one-time state is consumed: the transaction can never complete
+	if _, ok := h.states.get("st-idperr"); ok {
+		t.Fatal("the IdP-error path left the one-time state behind")
+	}
+	// the txn cookie is cleared: the browser carries no stale binding
+	cleared := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.cfg.TxnCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("the IdP-error path left the txn cookie behind")
+	}
+}
+
+// Item 4(b): every bind failure clears the txn cookie — the browser must not
+// carry a stale binding into a later attempt.
+func TestCallback_BindFailureClearsTxnCookie(t *testing.T) {
+	h := newTestHandler(t)
+	// a txn cookie that opens under the txn subkey
+	tv, err := h.txn.Seal(&Session{IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a cookie sealed under the SESSION subkey: it does not open under the
+	// txn one, so the binding must fail at the OPEN check (its digest is
+	// stored, so the digest check is not what fails)
+	sessionVal, err := h.cookie.Seal(&Session{Sub: "u", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionSum := sha256.Sum256([]byte(sessionVal))
+	h.states.add(&stateRecord{State: "st-wrongkey", Nonce: "n", CodeVerifier: "v", RedirectTo: "/ui/", TxnDigest: hexEncode(sessionSum[:]), CreatedAt: time.Now()})
+	// a state record whose txn cookie is missing from the browser
+	h.states.add(&stateRecord{State: "st-nocookie", Nonce: "n", CodeVerifier: "v", RedirectTo: "/ui/", TxnDigest: "deadbeef", CreatedAt: time.Now()})
+	// a state record bound to a DIFFERENT txn cookie (the digest mismatches)
+	other, err := h.txn.Seal(&Session{IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSum := sha256.Sum256([]byte(other))
+	h.states.add(&stateRecord{State: "st-digest", Nonce: "n", CodeVerifier: "v", RedirectTo: "/ui/", TxnDigest: hexEncode(otherSum[:]), CreatedAt: time.Now()})
+
+	cases := []struct {
+		name   string
+		query  string
+		cookie string
+	}{
+		{"no state at all", "code=abc", tv},
+		{"unknown state", "state=st-unknown&code=abc", tv},
+		{"missing txn cookie", "state=st-nocookie&code=abc", ""},
+		{"txn cookie under the wrong subkey", "state=st-wrongkey&code=abc", sessionVal},
+		{"mismatched txn digest", "state=st-digest&code=abc", tv},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?"+c.query, nil)
+		if c.cookie != "" {
+			req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: c.cookie})
+		}
+		w := httptest.NewRecorder()
+		h.HandleCallback(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: code %d body: %s", c.name, w.Code, w.Body.String())
+		}
+		cleared := false
+		for _, ck := range w.Result().Cookies() {
+			if ck.Name == h.cfg.TxnCookieName && ck.MaxAge < 0 {
+				cleared = true
+			}
+		}
+		if !cleared {
+			t.Fatalf("%s: the txn cookie was not cleared", c.name)
+		}
+	}
+}
+
+// Item 4(c): a 503 that promises a retry may only be emitted when the
+// one-time state could be put back into the store. When the restore FAILS
+// the callback answers the terminal 400 instead of a retry it cannot honour.
+func TestCallback_RestoreFailureAnswers400Not503(t *testing.T) {
+	idp := newThrottleIdP(t, "throttle-kid")
+	h := newThrottleHandler(t, idp)
+	verifier := "verifier-restore"
+	stubRegisterCode("code-restore", "nonce-restore", verifier, "user@example.com", true)
+	// the IdP withholds the key: the verify fails with the JWKS failure
+	idp.setPublish(false)
+	_, tv := txnStateFor(t, h, "st-restore", "nonce-restore", verifier)
+	// the store can no longer hold the record back (its cap is reached):
+	// the restore fails
+	h.states.max = 0
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=st-restore&code=code-restore", nil)
+	req.AddCookie(&http.Cookie{Name: h.cfg.TxnCookieName, Value: tv})
+	w := httptest.NewRecorder()
+	h.HandleCallback(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("the restore failed: the callback must not promise a retryable 503, got %d body: %s", w.Code, w.Body.String())
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"error":"invalid_state"}` {
+		t.Fatalf("body: %s", body)
+	}
+	// the transaction is abandoned: the txn cookie is cleared
+	cleared := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.cfg.TxnCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("the abandoned transaction kept the txn cookie")
 	}
 }
 

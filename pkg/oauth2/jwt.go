@@ -310,6 +310,12 @@ func normalizeIssuer(s string) string {
 	s = strings.TrimRight(s, "/")
 	u, err := url.Parse(s)
 	if err != nil {
+		// The issuer is malformed. The fallback can only REJECT, never
+		// accept: the configured issuer is validated at load (config.go:216
+		// applyIssuer — an absolute https URL with no query or fragment), so
+		// the normalized config issuer always parses; a match would need the
+		// raw string to be a case variant of a parseable URL, and every case
+		// variant parses. The comparison therefore fails closed.
 		return strings.ToLower(s)
 	}
 	u.Scheme = strings.ToLower(u.Scheme)

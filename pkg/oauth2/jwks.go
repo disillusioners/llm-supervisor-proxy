@@ -173,6 +173,13 @@ func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.Pub
 			if err != nil {
 				return err
 			}
+			// AR-26 amendment: an EMPTY (or wholly unusable) key set is a
+			// FETCH ERROR under the stale-grace policy, never a successful
+			// rotation: the previous key set must keep serving inside the
+			// grace window and the cache is NEVER replaced with an empty set.
+			if !usableKeySet(keys) {
+				return ErrJWKSEmptyKeySet
+			}
 			if algs == nil {
 				algs = map[string]string{}
 			}
@@ -205,6 +212,22 @@ func (c *JWKSCache) Key(ctx context.Context, kid string, alg string) (crypto.Pub
 		return nil, ErrJWKSUnknownKid
 	}
 	return checkKeyAlg(kid, alg, declared, pub)
+}
+
+// usableKeySet reports whether a fetched key set carries at least one key
+// this proxy can actually use. An EMPTY set — or a set whose every entry is
+// unusable — is a FETCH ERROR (the stale-grace policy keeps the previous key
+// set serving), not a successful rotation that wipes the cache.
+func usableKeySet(keys map[string]crypto.PublicKey) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	for _, k := range keys {
+		if k != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchJWKSSet downloads and parses a JWKS document. The body read is bounded

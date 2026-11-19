@@ -253,6 +253,35 @@ func TestJWT_RejectsWrongIssuer(t *testing.T) {
 	}
 }
 
+// Item 5: a MALFORMED issuer (one net/url cannot parse) must be rejected.
+// The parse-error fallback of normalizeIssuer may only ever fail CLOSED: it
+// must never accept a token whose issuer only loosely matches the configured
+// one.
+func TestJWT_RejectsMalformedIssuer(t *testing.T) {
+	cfg := testCfg()
+	priv := rsaKey(t)
+	malformed := []string{
+		"https://issuer.example.com/%zz",  // invalid URL escape
+		"https://issuer.example.com:80x",  // invalid port
+		"https://issuer.example.com/\x7f", // control character
+		"https://[issuer.example.com",     // malformed host
+	}
+	for _, iss := range malformed {
+		claims := validClaims()
+		claims.Issuer = iss
+		tok := makeRSAJWT(t, "RS256", claims, priv, "k1")
+		cache := newCache("k1", &priv.PublicKey)
+		v := NewVerifier(cfg, cache)
+		_, err := v.Verify(context.Background(), tok)
+		if err == nil {
+			t.Fatalf("the malformed issuer %q was accepted", iss)
+		}
+		if !strings.Contains(err.Error(), "issuer") {
+			t.Fatalf("the malformed issuer %q was rejected for the wrong reason: %v", iss, err)
+		}
+	}
+}
+
 func TestJWT_AudienceArrayAndString(t *testing.T) {
 	cfg := testCfg()
 	priv := rsaKey(t)

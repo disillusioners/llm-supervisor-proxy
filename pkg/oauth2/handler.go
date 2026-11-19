@@ -38,6 +38,24 @@ type Handler struct {
 // transaction cookie would be unusable, and vice versa).
 const stateTTL = 10 * time.Minute
 
+// The stable error codes answered and logged by the callback. The IdP-
+// controlled values (the "error" and "error_description" query parameters)
+// are NEVER echoed: they are attacker-controlled strings and echoing them
+// is a log-injection surface.
+const (
+	// ErrCodeJWKSUnavailable is answered when the IdP published no usable
+	// signing key. The callback is retryable: 503 + Retry-After, and the
+	// one-time state is restored so the same callback can be retried.
+	ErrCodeJWKSUnavailable = "jwks_unavailable"
+	// ErrCodeIDPAuthorizationError is logged when the IdP answered the
+	// callback with an error. Only the code is logged.
+	ErrCodeIDPAuthorizationError = "idp_authorization_error"
+	// ErrCodeStateRestoreFailed is logged when the one-time state could not
+	// be put back into the store. The callback then answers the terminal
+	// 400 instead of a retryable 503 the store cannot honour.
+	ErrCodeStateRestoreFailed = "state_restore_failed"
+)
+
 type stateRecord struct {
 	State        string
 	Nonce        string
@@ -433,6 +451,17 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		// The authorization code is GONE: the transaction is TERMINAL. The
+		// one-time state is consumed (it can never be completed) and the txn
+		// cookie is cleared, so the browser carries no stale binding into a
+		// later attempt.
+		if state := r.URL.Query().Get("state"); state != "" {
+			h.states.consume(state)
+		}
+		h.txn.ClearCookie(w)
+		// Only the constant code is logged: the IdP-controlled "error" and
+		// "error_description" values are never echoed.
+		log.Printf("[oauth2] %s: the IdP answered the callback with an error", ErrCodeIDPAuthorizationError)
 		writeJSONError(w, http.StatusBadGateway, "oauth2_callback_error")
 		return
 	}
@@ -465,9 +494,36 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			// login: answer 503 and put the one-time state back so the
 			// operator can retry the same callback once the throttle window
 			// passes. The txn cookie is deliberately NOT cleared.
-			h.states.restore(rec)
+			if !h.states.restore(rec) {
+				// The store cannot hold the record back, so a 503 would
+				// promise a retry the store cannot honour: fall through to
+				// the terminal 400 instead.
+				log.Printf("[oauth2] %s: the one-time state could not be restored", ErrCodeStateRestoreFailed)
+				h.txn.ClearCookie(w)
+				writeJSONError(w, http.StatusBadRequest, "invalid_state")
+				return
+			}
 			w.Header().Set("Retry-After", strconv.Itoa(h.jwksRetryAfterSeconds()))
 			writeJSONError(w, http.StatusServiceUnavailable, "jwks_rate_limited")
+			return
+		}
+		if errors.Is(err, ErrJWKSEmptyKeySet) {
+			// The IdP answered 200 with a document this proxy can use NO key
+			// from (an empty "keys" array, or only keys it rejects). That is
+			// a FETCH failure under the stale-grace policy, not a failed
+			// login: answer a retryable 503 and put the one-time state back
+			// so the operator can retry once the IdP publishes a key again.
+			// The txn cookie is deliberately NOT cleared.
+			if !h.states.restore(rec) {
+				log.Printf("[oauth2] %s: the one-time state could not be restored", ErrCodeStateRestoreFailed)
+				h.txn.ClearCookie(w)
+				writeJSONError(w, http.StatusBadRequest, "invalid_state")
+				return
+			}
+			// Only the stable code is logged: no key, token or secret value.
+			log.Printf("[oauth2] %s: the IdP published no usable signing key", ErrCodeJWKSUnavailable)
+			w.Header().Set("Retry-After", strconv.Itoa(h.jwksRetryAfterSeconds()))
+			writeJSONError(w, http.StatusServiceUnavailable, ErrCodeJWKSUnavailable)
 			return
 		}
 		h.txn.ClearCookie(w)
@@ -505,25 +561,32 @@ func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 // belongs to the browser that started the transaction: the txn cookie must
 // open under the txn subkey AND its SHA-256 must equal the stored digest.
 // It writes the 400 itself and returns false when the binding fails.
+//
+// Every failure clears the txn cookie: the browser must not carry a stale
+// binding into a later attempt.
 func (h *Handler) bindCallbackTransaction(w http.ResponseWriter, r *http.Request) (*stateRecord, bool) {
 	state := r.URL.Query().Get("state")
 	if state == "" {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return nil, false
 	}
 	rec, ok := h.states.consume(state)
 	if !ok {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return nil, false
 	}
 	// txn cookie binding
 	txnCookie, err := r.Cookie(h.cfg.TxnCookieName)
 	if err != nil || txnCookie == nil || txnCookie.Value == "" {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return nil, false
 	}
 	// open under txn subkey
 	if _, err := h.txn.Open(txnCookie.Value); err != nil {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return nil, false
 	}
@@ -531,6 +594,7 @@ func (h *Handler) bindCallbackTransaction(w http.ResponseWriter, r *http.Request
 	actual := sha256.Sum256([]byte(txnCookie.Value))
 	actualHex := hex.EncodeToString(actual[:])
 	if subtle.ConstantTimeCompare([]byte(actualHex), []byte(rec.TxnDigest)) != 1 {
+		h.txn.ClearCookie(w)
 		writeJSONError(w, http.StatusBadRequest, "invalid_state")
 		return nil, false
 	}

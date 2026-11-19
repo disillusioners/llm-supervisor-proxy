@@ -430,3 +430,65 @@ func TestJWKS_EmptyKeySetSentinelIsDistinct(t *testing.T) {
 		t.Fatal("the empty-keyset sentinel must be a non-nil, stable error")
 	}
 }
+
+// AR-26 amendment: an EMPTY (or wholly unusable) key set is a FETCH ERROR
+// under the stale-grace policy — the cache must KEEP the previous key set
+// inside the grace window (serve stale), never replace it with an empty set.
+// A SUCCESSFUL rotation that yields >= 1 usable key KEEPS the wipe semantics.
+func TestJWKS_EmptyKeySetFetchKeepsPreviousKeysInsideGrace(t *testing.T) {
+	empty := true
+	cache := NewJWKSCache(time.Hour, time.Minute, 4*time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
+		if empty {
+			// a fetch that SUCCEEDED but yielded no usable key
+			return map[string]crypto.PublicKey{}, map[string]string{}, nil
+		}
+		return map[string]crypto.PublicKey{"k2": &rsa.PublicKey{E: 65537}}, nil, nil
+	})
+	cache.keys = map[string]crypto.PublicKey{"k1": &rsa.PublicKey{E: 65537}}
+	cache.keyAlg = map[string]string{}
+	cache.fetchedAt = time.Now().Add(-2 * time.Hour)
+	cache.lastRefresh = time.Now().Add(-2 * time.Hour)
+
+	// the empty key set is a fetch error: inside the grace window the
+	// PREVIOUS key keeps serving
+	pub, err := cache.Key(context.Background(), "k1", "RS256")
+	if err != nil {
+		t.Fatalf("the stale-grace window must serve the previous key, got: %v", err)
+	}
+	if pub == nil {
+		t.Fatal("nil key")
+	}
+	// the cache was NOT replaced with the empty set
+	if len(cache.keys) != 1 {
+		t.Fatalf("the cache holds %d keys, want 1: the empty key set wiped it", len(cache.keys))
+	}
+	if _, ok := cache.keys["k1"]; !ok {
+		t.Fatal("the empty key set dropped the previous key")
+	}
+
+	// an empty key set is reported as the DISTINCT fetch failure (never as
+	// an unknown kid)
+	emptyCache := NewJWKSCache(time.Hour, time.Minute, time.Hour, func(ctx context.Context) (map[string]crypto.PublicKey, map[string]string, error) {
+		return map[string]crypto.PublicKey{}, map[string]string{}, nil
+	})
+	if _, err := emptyCache.Key(context.Background(), "kx", "RS256"); !errors.Is(err, ErrJWKSEmptyKeySet) {
+		t.Fatalf("expected ErrJWKSEmptyKeySet, got: %v", err)
+	}
+
+	// a SUCCESSFUL rotation that yields >= 1 usable key KEEPS the wipe
+	// semantics: the rotated-away kid is dropped.
+	empty = false
+	cache.mu.Lock()
+	cache.fetchedAt = time.Now().Add(-2 * time.Hour)
+	cache.lastRefresh = time.Now().Add(-2 * time.Hour)
+	cache.mu.Unlock()
+	if _, err := cache.Key(context.Background(), "k1", "RS256"); err == nil {
+		t.Fatal("the rotated-away kid must be invalidated")
+	}
+	if _, ok := cache.keys["k2"]; !ok {
+		t.Fatalf("the rotation did not install the new key: %v", cache.keys)
+	}
+	if _, ok := cache.keys["k1"]; ok {
+		t.Fatal("the rotation did not drop the rotated-away kid")
+	}
+}
