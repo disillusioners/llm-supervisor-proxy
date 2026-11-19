@@ -315,3 +315,43 @@ files — **comment-only**, no semantic drift.
    the grown ledger (121 pins) so the new pins carry literal PASS evidence, not just source presence.
 3. Then the leader issues the final gate verdict. **No production code, corpus, or frozen 034 SQL was edited by this
    gate** — the single code-tree change is the test-only assertion correction `eb137a1`.
+
+## Post-gate provenance check — shared-worktree contamination audit
+
+After the artifact commit, a read-only audit was run because the worktree showed
+`pkg/store/database/migrations_test.go` as **MODIFIED** — a file belonging to the PARALLEL test-only lane that is
+landing the 9 obligation pins (the 9th pin, `TestMigration034_PGMalformedRowSkippedNotAbort`, lives in exactly that
+file). It was **never staged** in `eb137a1` or `135e1e8` (that file's committed history ends at `391f181`), and the
+frozen migration SQL was untouched. The audit changed nothing (the parallel lane's work was left undisturbed).
+
+**Result: SAFE — no gate evidence was contaminated.** Three independent proofs:
+
+1. **Log name-set (mtime-independent, decisive).** `packA_final.log` contains exactly **8** `TestMigration034_*`
+   RUN/PASS names — byte-for-byte the `eb137a1` set (ForwardFreshDB, SQLiteJSON1Available, Repartition,
+   RepartitionIdempotent, NullNotEmptyArray, PGGuardShape, PGuardShape_DownTwinAndGlobalScan, SQLiteDialectParity).
+   The 9th name is absent and `grep -c 'pgQuotedLiterals' packA_final.log` = **0** ⇒ the `pkg/store/database` binary
+   that printed `ok … 54.876s` (log line 10917) compiled a tree **without** the new pin.
+2. **Filesystem sweep.** `find . -path ./.git -prune -o -type f -newermt '2026-11-19 03:02:39' ! -newermt '2026-11-19 03:05:07' -print`
+   → **EMPTY**. No worktree file of any kind has an mtime inside the Pack A window.
+3. **Timeline.** The dirty file's write = **03:21:14.261** (new inode — a *replace*, not an in-place edit), i.e.
+   16m 08s after Pack A closed, 11m 20s after Pack B closed, 5m 03s after the pin sweep. The git index write at
+   03:21:23.236 is the `135e1e8` commit's own staging.
+
+Pack B was audited on the same basis: the `eb137a1` fix files carry mtimes 03:06:49 / 03:06:55 (inside the Pack B
+window by mtime) but are **byte-identical to HEAD** (`git diff HEAD` clean, `git status -- test/` empty) ⇒ Pack B
+compiled exactly the committed `eb137a1` content.
+
+Integrity spot-check: `grep -c '^--- PASS:' packA_final.log` = **1457**, matching the canonical top-level PASS count
+exactly — the canonical artifact is self-consistent.
+
+Method note (POK `gate-evidence-provenance-by-test-name-set`): a past `go test` run's source version is proven by the
+**set of test names in its log** against the file's `func Test` list; an inode `Birth` dates a replace and the git
+index mtime dates a commit — an mtime alone cannot date an edit.
+
+## Re-verification recipe for the gen-9 landing (≈4 min)
+1. Re-verify the corpus manifest with the **same pinned recipe** at the new generation.
+2. Re-run **Pack A** (9 pkgs, ~147 s) + **Pack B** (35 pkgs, ~50 s) + **FE vitest/tsc** (~25 s) at the new tree with
+   `-count=1` and the dual-layer timeout; write to NEW log files (keep this gate's logs as the `81e8788`/`eb137a1` record).
+3. Re-sweep the grown §13.1a ledger — the 9 new pins must carry **literal PASS evidence in the new logs**, not merely
+   source presence; set arithmetic must be re-proven against the new base→tip diff.
+4. The leader then issues the final verdict.
