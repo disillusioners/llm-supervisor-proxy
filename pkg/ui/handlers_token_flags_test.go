@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
 func TestTokenAPI_InvalidFlagsExposed(t *testing.T) {
@@ -110,5 +111,58 @@ func TestTokenAPI_InvalidFlagsExposed(t *testing.T) {
 	}
 	if created.AllowedGroupsInvalid {
 		t.Errorf("created token allowed_groups_invalid = %v, want false", created.AllowedGroupsInvalid)
+	}
+}
+
+// staleClaimModelsConfig simulates a backend whose claim-aware GetModel
+// REDIRECTS a stale alias to a different row, while the claim-blind
+// GetModelNative lookup misses (the alias no longer exists as a row id).
+type staleClaimModelsConfig struct {
+	*mockModelsConfig
+	alias   string
+	realRow models.ModelConfig
+}
+
+func (s *staleClaimModelsConfig) GetModelNative(modelID string) *models.ModelConfig {
+	return nil
+}
+
+func (s *staleClaimModelsConfig) GetModel(modelID string) *models.ModelConfig {
+	if modelID == s.alias {
+		row := s.realRow
+		return &row
+	}
+	return s.mockModelsConfig.GetModel(modelID)
+}
+
+func TestTokenAPI_StaleClaimAlias_Rejected(t *testing.T) {
+	ts := newTokenTestServer()
+	stale := &staleClaimModelsConfig{
+		mockModelsConfig: newMockModelsConfigForHandlers(),
+		alias:            "stale-alias",
+		realRow:          models.ModelConfig{ID: "real-group", Name: "real-group", Kind: "group", Enabled: true},
+	}
+	ts.Server.modelsConfig = stale
+
+	// POST: a stale claim in allowed_groups must NOT satisfy existence
+	// validation (the redirect row's ID differs from the requested id).
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/tokens", strings.NewReader(`{"name":"x","allowed_groups":["stale-alias"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.Background())
+	w := httptest.NewRecorder()
+	ts.handleTokens(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("POST stale-claim alias: status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+
+	// PATCH: same rule on the update path.
+	ts.mockStore.AddToken(&auth.AuthToken{ID: "tok-stale", Name: "n", AllowedGroups: []string{}})
+	preq := httptest.NewRequest(http.MethodPatch, "/fe/api/tokens/tok-stale", strings.NewReader(`{"allowed_groups":["stale-alias"]}`))
+	preq.Header.Set("Content-Type", "application/json")
+	preq = preq.WithContext(context.Background())
+	pw := httptest.NewRecorder()
+	ts.handleTokenDetail(pw, preq)
+	if pw.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH stale-claim alias: status = %d, want 400: %s", pw.Code, pw.Body.String())
 	}
 }

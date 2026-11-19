@@ -2799,7 +2799,17 @@ func (s *Server) tokenGrantRow(id string) *models.ModelConfig {
 			return row
 		}
 	}
-	return s.modelsConfig.GetModel(id)
+	// FALLBACK (claim-aware GetModel): accept the row ONLY when it IS the
+	// requested id. A stale claim (a row's ShadowModelID naming a deleted
+	// row) makes GetModel redirect to a different id; treating that redirect
+	// as "exists" would let validation accept a nonexistent group id. The
+	// runtime resolver is claims-first and would 403 anyway — this is an
+	// admin-side validation-integrity gap.
+	row := s.modelsConfig.GetModel(id)
+	if row == nil || row.ID != id {
+		return nil
+	}
+	return row
 }
 
 // validateTokenGrants checks the INBOUND grant axes of a token write
