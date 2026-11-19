@@ -284,3 +284,22 @@ Worktree `/home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-sticky-bind
 | gate_ttl_sabotage | baseline capture → (c)-probe → sabotage 1 (reintroduce `b.createdAt = now` hit refresh) → sabotage 2 (ignore-only expiry) → byte-identity proof | non-vacuity proofs + FE/gofmt statics | 300s each | 2026-11-17 | PASS (sabotage 1: BOTH no-refresh + expiry-despite-hits tests `--- FAIL` as required; sabotage 2 faithful variant: `--- FAIL` on bindingsCount; FE = NO FE change; gofmt 0/22 drift; feature-scope diff sha `595c6370…30f0c` byte-identical pre/post; external tidier note shifted full-diff sha only) |
 
 ⚠️ **Race-pack headroom warning**: pkg/store/database under -race = **176.4s vs the 240s internal cap (~27% headroom**, ~4.9× amplification of 36.4s plain). Split the store race pack (group/credential vs models/config) BEFORE adding tests there — same posture as the 2026-11-08 pkg/proxy 110s note. Sabotage variant-A observation (count-mirror evasion of the deletion proof) + grouplb determinism gotcha (weight ≤ 0 → `newWeightedSelector` nil → `ErrNoMembers`; use single-default-member pool + `BackupOnly` B + `InjectPreconditionStateForTest`) recorded in `LESSONS/2026-11-17-sticky-binding-ttl-gate-lessons.md`. Findings: 🟠 GAP-1 (add permanent (c) test), 🟢 deletion-proof len(map) hardening, 🟢 cmd wiring untested, 🟢 race-pack split. Full report: `RESULTS/2026-11-17-sticky-binding-ttl-1h-verification.md`. No commits; worktree feature diff byte-identical.
+
+## 2026-11-19 Live Probe Note — Probe C acceptance of AUTH COMMISSION v203 (both hosts)
+
+Not a Go pack: a **live acceptance probe** against the already-deployed service (master `df12c62`, image `:df12c62`, migration 034 live both hosts). Executed by 2 parallel workers (primary / daoduc), each running exactly one probe set; no source changes, no test-code changes. Recipe: skill `live-deploy-acceptance-probe` (`55e48bb9-8083-49ff-8cb5-de1880856fd9`). Full report: `RESULTS/2026-11-19-probe-c-live-acceptance-v203.md`; lessons: `LESSONS/2026-11-19-probe-c-live-acceptance-lessons.md`.
+
+| Probe | Target | Expected | Actual | Status |
+|---|---|---|---|---|
+| P1 | primary `/v1/decisions` `dg-e2e-decision-group` + narrow token | 403 `access_denied`, exact envelope, no `code` key | 403, `error` keys = message/model/type only | **PASS** — decision-GROUP bypass CLOSED |
+| P2 | primary `/v1/decisions` `decision` + narrow token | 403 `access_denied` | 403 | **PASS** |
+| P3 | primary `/v1/decisions` `coding-group` + narrow token | 400 `decision_misroute` (≻ 403) | 400 | **PASS** — precedence preserved |
+| P4a/P4b | primary `/v1/chat/completions` `quick-group` / `coding-group` + `token-primary` | 200 | 200 / 200, `finish_reason=stop` | **PASS** — 034 repartition live reach intact |
+| P5 | primary `/v1/decisions` `dg-e2e-decision-group` + WILDCARD | 200 real decision body | 200 (`model=gpt-6-luna`, predicate answer) | **PASS** — transient wildcard minted (both axes omitted ⇒ NULL), used ONCE, revoked 204, row verified gone |
+| P6a/P6b | both hosts, anon `/v1/decisions` + `/v1/messages` | 401 | 401 ×4 | **PASS** |
+| P8a/P8b | both hosts, pod-direct `/fe/api/version` | 203 | 203 / 203 | **PASS** |
+| P1 (daoduc) | daoduc `/v1/decisions` `dg-e2e-decision-group` | 403 | **404 unknown model** | **UNTESTABLE** — row absent on daoduc (admin rows 37 vs 36; sole diff). NOT a bypass failure. Positive controls P1b (daoduc group-target scope gate live, 403) + P1d (exact P1 shape re-run on primary, 403) pin the expected gate shape. |
+| PARITY | `/v1/models` both hosts | 27 == 27 identical | 27 == 27, diff empty | **PASS** |
+| EDGE | `/` both hosts | 302 | 302 / 302 | **PASS** (primary → OAuth door; backup → `/ui/`) |
+
+**Upstream budget: 3 real provider calls total** (primary P4a, P4b, P5; daoduc 0 — every daoduc probe rejects pre-upstream). **Live-store writes: 1** transient token (created → used once → revoked 204 → re-list verified). Verdict: **PASS** with one gap — daoduc↔primary model-row drift (decision group primary-only); a DB resync + unchanged P1 re-run is required before the backup host's decision-GROUP arm can be marked verified.
