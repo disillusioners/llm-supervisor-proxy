@@ -56,7 +56,8 @@ func setupIntegrationDB(t *testing.T) *sql.DB {
 		expires_at TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_by TEXT NOT NULL,
-		allowed_models TEXT DEFAULT NULL
+		allowed_models TEXT DEFAULT NULL,
+		allowed_groups TEXT DEFAULT NULL
 	)`)
 	if err != nil {
 		db.Close()
@@ -106,7 +107,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 	// Setup: Create token store and generate a valid API token
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	// CreateToken returns the plaintext token (show once), so we use that
-	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", nil)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", auth.FullPermission(nil, nil))
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"), // Reference the credential
+		Credentials:   models.TestRefs("test-credential"), // Reference the credential
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -270,7 +271,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	// CreateToken returns the plaintext token (show once), so we use that
-	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", nil)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", auth.FullPermission(nil, nil))
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -397,4 +398,3 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		t.Errorf("total_tokens = %d, want 450", totalTok)
 	}
 }
-

@@ -23,6 +23,7 @@ package database
 import (
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
@@ -31,6 +32,10 @@ import (
 
 // RewriteGroupEntries implements models.GroupRewriter (Am21). See
 // that interface's doc comment for the contract.
+//
+// It is the UNSCOPED wrapper: the reach set is nil, so every candidate
+// is reachable and the rewrite is byte-identical to the pre-scope
+// behaviour. The scoped twin is RewriteGroupEntriesScoped.
 //
 // Lazy seeding (Am15): a group with no engine state yet (first
 // request after boot) is seeded from its CURRENT row members before
@@ -53,6 +58,45 @@ import (
 // trio; the FE side is pinned by its own vitest battery.
 
 func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey string) models.GroupRewriteResult {
+	return m.rewriteGroupEntries(modelList, conversationKey, nil)
+}
+
+// RewriteGroupEntriesScoped implements models.GroupRewriterScoped: the
+// SAME rewrite with the caller's REACH set applied to the member
+// candidates and to the picked member's own fallback chain.
+//
+// The reach set is the AUTHORIZATION axis (ADR D6): a member outside it
+// is never picked, never attempted, and never cooled (a permission
+// denial is not a health fact). A nil reach means "no permission
+// backend / wildcard token" and is byte-identical to the unscoped
+// rewrite.
+func (m *ModelsManager) RewriteGroupEntriesScoped(modelList []string, conversationKey string, reach models.ReachFilter) models.GroupRewriteResult {
+	return m.rewriteGroupEntries(modelList, conversationKey, reach)
+}
+
+// groupPickStats carries the two counts the caller needs to tell
+// "empty by SCOPE" from "empty by UNSERVABILITY" (ADR D14 / I9 — the two
+// have different owners and different operator actions: 403 vs 502).
+type groupPickStats struct {
+	// baseServable counts the candidates that pass the SHAPE gate
+	// (exists / enabled / lane-correct) — the ones the ordering sweep
+	// would have admitted without any reach filter.
+	baseServable int
+	// scopeFiltered counts the base-servable candidates that were
+	// skipped because they are outside the caller's reach.
+	scopeFiltered int
+}
+
+// rewriteGroupEntries is the ONE rewrite implementation (the unscoped
+// and the scoped entry points are both thin wrappers over it).
+//
+// T2.6 (index-0 vs fallback-position): a group entry that yields no
+// servable member fails the request ONLY when it is the REQUESTED group
+// (idx == 0). A fallback-position group that cannot serve this token is
+// DROPPED with a loud log — a fallback the token cannot use is not the
+// request's failure, and failing the request would let a permission
+// setting convert a healthy primary into a 502.
+func (m *ModelsManager) rewriteGroupEntries(modelList []string, conversationKey string, reach models.ReachFilter) models.GroupRewriteResult {
 	var res models.GroupRewriteResult
 	out := make([]string, 0, len(modelList)+2)
 	for idx, entry := range modelList {
@@ -86,20 +130,41 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			}
 			continue
 		}
-		memberID, newlyBound, pool, staleRepaired, ok := m.pickServableGroupMember(row, conversationKey)
+		var stats groupPickStats
+		memberID, newlyBound, pool, staleRepaired, ok := m.pickServableGroupMember(row, conversationKey, reach, &stats)
 		if !ok {
-			res.FailedGroupID = row.ID
+			// T2.6 — the index-0 vs fallback-position rule.
+			if idx == 0 {
+				res.FailedGroupID = row.ID
+				// ScopeExcluded ONLY when the emptiness was CAUSED by
+				// reach (base-servable members existed and every one of
+				// them was out of reach). An all-disabled/all-stale group
+				// stays an AVAILABILITY failure (502), never a 403.
+				if stats.baseServable > 0 && stats.scopeFiltered > 0 {
+					res.ScopeExcluded = true
+				}
+			} else {
+				log.Printf("[authz] group=%s entry=%d — fallback-position group has no reachable member for this token; entry dropped", row.ID, idx)
+			}
 			continue // unservable group entry is dropped; caller fails clean
 		}
 		memberRow := m.GetModelNative(memberID)
 		if memberRow == nil { // defensive: pickServableGroupMember re-validated
-			res.FailedGroupID = row.ID
+			if idx == 0 {
+				res.FailedGroupID = row.ID
+			} else {
+				log.Printf("[authz] group=%s entry=%d — fallback-position group member vanished mid-rewrite; entry dropped", row.ID, idx)
+			}
 			continue
 		}
 		// Execution list = [member.ID] + member.FallbackChain — the
 		// member's own chain follows it natively.
+		//
+		// D5: a chain target is NOT inherited from the member — it must
+		// be granted explicitly (or reached through a group grant), so
+		// the chain is filtered by the SAME reach set.
 		out = append(out, memberRow.ID)
-		out = append(out, memberRow.FallbackChain...)
+		out = append(out, filterChainByReach(memberRow.FallbackChain, reach, row.ID)...)
 		if res.GroupID == "" {
 			res.GroupID = row.ID
 			res.MemberID = memberRow.ID
@@ -110,6 +175,46 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 	}
 	res.ModelList = out
 	return res
+}
+
+// filterChainByReach returns the member's chain entries that are inside
+// the caller's reach. A nil reach (no permission backend / wildcard
+// token) returns the chain UNTOUCHED.
+//
+// D5 (no implicit reach): the chain targets of a granted member are not
+// granted — they must be listed explicitly or reached through a group
+// grant. The dropped targets are named ONCE per group entry (ids only,
+// never in an HTTP response body).
+func filterChainByReach(chain []string, reach models.ReachFilter, groupID string) []string {
+	if len(chain) == 0 || reach == nil {
+		return chain
+	}
+	kept := make([]string, 0, len(chain))
+	dropped := make([]string, 0, len(chain))
+	for _, chained := range chain {
+		if isReachableMember(chained, reach) {
+			kept = append(kept, chained)
+			continue
+		}
+		dropped = append(dropped, chained)
+	}
+	if len(dropped) > 0 {
+		log.Printf("[authz] group=%s — dropped %d chain target(s) outside the caller's reach: %s", groupID, len(dropped), strings.Join(dropped, ","))
+	}
+	return kept
+}
+
+// isReachableMember is the AUTHORIZATION axis of candidacy. It is kept
+// SEPARATE from isServableGroupMemberBase (the SHAPE axis) so the
+// health/shape doctrine and the permission rule stay separable and
+// reviewable (plan §17.2).
+//
+// A nil reach means "no permission backend / wildcard token" ⇒ every
+// member is reachable (the unscoped rewrite is unchanged). A non-nil
+// reach that denies the id ⇒ the member is OUT of reach: it is never
+// picked, never attempted, and never cooled.
+func isReachableMember(id string, reach models.ReachFilter) bool {
+	return reach == nil || reach.Allows(id)
 }
 
 // pickServableGroupMember picks the sticky member for the group and
@@ -133,6 +238,8 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 //	            Am28 exclusion — engine skip-and-reselect KEPT
 //	            (cooldown write is honest bookkeeping for a row that
 //	            cannot serve at all);
+//	          • OUT OF REACH → SKIPPED, never cooled (a permission
+//	            denial is not a health fact — ADR D6 / P6);
 //	          • engine-cooling → DEMOTED into the bucket (group-owned
 //	            rotation state — NEVER a skip/model health mark);
 //	          • otherwise → SERVED (head of the order).
@@ -157,7 +264,13 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 // the ordering above preserves their intent (healthy backups are
 // served before benched defaults because benched defaults sit in the
 // bucket behind every unbenched candidate).
-func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, pool string, staleRepaired bool, ok bool) {
+//
+// THE REACH AXIS (scoped rewrite): the reach set is consulted at ALL
+// FOUR phases — after the SHAPE check, before the member is offered,
+// demoted, or returned. An out-of-reach member is SKIPPED: it is never
+// cooled (no ExcludeAndReselect, no cooldown write, no skip-cache
+// mark), so a permission denial never creates cross-request state.
+func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string, reach models.ReachFilter, stats *groupPickStats) (memberID string, newlyBound bool, pool string, staleRepaired bool, ok bool) {
 	if m.groupEngine == nil {
 		return "", false, "", false, false
 	}
@@ -206,6 +319,26 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 			m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
 			continue
 		}
+		// THE AUTHORIZATION AXIS: a base-servable member outside the
+		// caller's reach is SKIPPED — never offered, never attempted and
+		// NEVER cooled (LEADER RULING 1: a scope exclusion is not a
+		// health fact; it must not create cross-request state).
+		//
+		// THE BINDING WRITE (approver blocker 1): the refusal must
+		// ADVANCE the sweep. The engine's getOrSelect returns the LIVE
+		// conversation binding on every call, so without an advance the
+		// SAME member is re-offered, the sweep's `seen[pick]` guard
+		// BREAKS the phase, and the member is never repaired (a dead
+		// binding, a false health log, newlyBound=false). RebindPast
+		// moves the binding past the refused member — it is a BINDING
+		// write, NOT a cooldown write: no cooldown, no skip-cache mark,
+		// no st.cooldowns entry (Ruling 1 untouched).
+		countBaseServable(stats)
+		if !isReachableMember(pick, reach) {
+			countScopeFiltered(stats)
+			m.groupEngine.RebindPast(group.ID, conversationKey, seenKeys(seen))
+			continue
+		}
 		expiry, benched := m.memberDemotionExpiry(group.ID, row)
 		if !benched {
 			return pick, newly, models.PoolDefault, repaired, true
@@ -230,6 +363,16 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 			m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
 			continue
 		}
+		// THE AUTHORIZATION AXIS (backup pool) — same rule as Phase 1:
+		// skip, never cool; and ADVANCE the binding (the backup-pool
+		// twin of RebindPast) so the sweep reaches the next candidate
+		// instead of re-offering the refused one.
+		countBaseServable(stats)
+		if !isReachableMember(pick, reach) {
+			countScopeFiltered(stats)
+			m.groupEngine.RebindBackupPast(group.ID, conversationKey, seenKeys(seen))
+			continue
+		}
 		expiry, benched := m.memberDemotionExpiry(group.ID, row)
 		if !benched {
 			if m.groupEngine.HasBackupPool(group.ID) {
@@ -251,6 +394,14 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 		}
 		row := m.GetModelNative(r.ModelID)
 		if !isServableGroupMemberBase(row, lane) {
+			continue
+		}
+		// THE AUTHORIZATION AXIS (completeness sweep): an out-of-reach
+		// member never reaches the bucket, so it can never become the
+		// Phase-4 head.
+		countBaseServable(stats)
+		if !isReachableMember(r.ModelID, reach) {
+			countScopeFiltered(stats)
 			continue
 		}
 		expiry, benched := m.memberDemotionExpiry(group.ID, row)
@@ -277,12 +428,39 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 			}
 			return bucket[i].idx < bucket[j].idx
 		})
-		head := bucket[0]
-		log.Printf("[grouplb] group=%s pool=%s member=%s — no unbenched candidate; serving soonest-expiring demoted head (ordering-not-filtering; expiry in %s)",
-			group.ID, head.pool, head.memberID, time.Until(head.expiry).Round(time.Second))
-		return head.memberID, false, head.pool, false, true
+		// THE AUTHORIZATION AXIS (Phase-4 head): the head is re-checked
+		// before it is returned — defence in depth, so an out-of-reach
+		// member can NEVER be executed even if it reached the bucket.
+		// Skipping forward (instead of failing) keeps a reachable
+		// demoted member of a LATER pool servable.
+		for len(bucket) > 0 {
+			head := bucket[0]
+			if isReachableMember(head.memberID, reach) {
+				log.Printf("[grouplb] group=%s pool=%s member=%s — no unbenched candidate; serving soonest-expiring demoted head (ordering-not-filtering; expiry in %s)",
+					group.ID, head.pool, head.memberID, time.Until(head.expiry).Round(time.Second))
+				return head.memberID, false, head.pool, false, true
+			}
+			bucket = bucket[1:]
+		}
 	}
 	return "", false, "", false, false
+}
+
+// countBaseServable / countScopeFiltered bump the two counts that
+// separate "empty by scope" from "empty by unservability" (ADR D14 / I9).
+// A nil stats pointer is legal (the caller does not care).
+func countBaseServable(stats *groupPickStats) {
+	if stats == nil {
+		return
+	}
+	stats.baseServable++
+}
+
+func countScopeFiltered(stats *groupPickStats) {
+	if stats == nil {
+		return
+	}
+	stats.scopeFiltered++
 }
 
 // demotedMember is one base-servable member the ordering sweep
@@ -487,8 +665,31 @@ func backupRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
 // failed THIS request by excluding them through this same call, which
 // cools them and strictly advances the ordering head.
 func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (string, string, bool) {
+	out := m.ExcludeGroupMemberScoped(groupID, conversationKey, memberID, cooldown, nil)
+	return out.Replacement, out.Pool, out.OK
+}
+
+// ExcludeGroupMemberScoped implements models.GroupRewriterScoped: the
+// offer walk with the caller's REACH set applied.
+//
+// The scoped twin differs from the legacy one in exactly one way that
+// matters: the offer walk SKIPS out-of-reach candidates (they are not
+// offered and NOT cooled — the exclusion of the member that genuinely
+// FAILED is the only cooldown write), and the outcome says WHY the walk
+// produced nothing:
+//
+//   - OK == true              → a usable, in-reach replacement exists.
+//   - OK == false, ScopeOnly  → alternatives EXIST but every one of them
+//     is out of reach: a SCOPE exhaustion, NOT an availability failure
+//     (the caller keeps its terminal availability path — it never
+//     reports a permission problem as a 502).
+//   - OK == false, !ScopeOnly → no servable candidate at all: a genuine
+//     AVAILABILITY failure.
+//
+// A nil reach (the legacy path) can never produce ScopeOnly=true.
+func (m *ModelsManager) ExcludeGroupMemberScoped(groupID, conversationKey, memberID string, cooldown time.Duration, reach models.ReachFilter) models.GroupExcludeOutcome {
 	if m.groupEngine == nil {
-		return "", "", false
+		return models.GroupExcludeOutcome{}
 	}
 	// (1) Honest exclusion of the failed member (genuine-failure
 	// bookkeeping — this write is DESIRED; the write the doctrine bans
@@ -498,19 +699,25 @@ func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID st
 	// the handler's rebuild.
 	group := m.GetModelNative(groupID)
 	if group == nil || !group.IsGroup() {
-		return "", "", false
+		return models.GroupExcludeOutcome{}
 	}
-	pick, _, pool, _, ok := m.pickServableGroupMember(group, conversationKey)
+	var stats groupPickStats
+	pick, _, pool, _, ok := m.pickServableGroupMember(group, conversationKey, reach, &stats)
 	if !ok || pick == "" {
-		return "", "", false
+		// WHY did the walk produce nothing? The two facts must stay
+		// distinguishable AT THE SEAM (ADR D14 / I9).
+		if stats.baseServable > 0 && stats.scopeFiltered > 0 {
+			return models.GroupExcludeOutcome{ScopeOnly: true}
+		}
+		return models.GroupExcludeOutcome{}
 	}
 	if pick == memberID {
 		// The ordering head IS the member that just failed terminally
 		// (single-servable-member groups, or every alternative base-
 		// stale) — no alternative exists; the failure is real (Am24).
-		return "", "", false
+		return models.GroupExcludeOutcome{}
 	}
-	return pick, pool, true
+	return models.GroupExcludeOutcome{Replacement: pick, Pool: pool, OK: true}
 }
 
 // ClearGroupMemberCooldown is the manager-side WIN-CLEAR seam: a

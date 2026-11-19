@@ -376,7 +376,10 @@ func TestCoordinator_FiveXX_AdvancesTheChain(t *testing.T) {
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "5xx-advance-req", false, engine, "conv-5xx-advance", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "5xx-advance-req", false, engine, "conv-5xx-advance", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.groupPick = &groupPickInfo{GroupID: "g-5xx", MemberID: "m1", Pool: models.PoolDefault}
 
 	coord.Start()

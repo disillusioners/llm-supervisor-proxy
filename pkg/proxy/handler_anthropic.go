@@ -60,6 +60,7 @@ import (
 	"errors"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -419,6 +420,8 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			return
 		}
 		arcTokenID = authToken.ID
+		arc.tokenID = authToken.ID
+		arc.tokenName = authToken.Name
 	}
 	// remove-external-upstream P1 (A11 anthropic twin, R11): the
 	// `.Internal` conjunct is GONE — the boundary 404 gate above already
@@ -460,6 +463,50 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// THE AUTHORIZATION SCOPE (ADR D2/D7) — resolved ONCE per request,
+	// AFTER auth and BEFORE any candidate construction (D13). The chat
+	// lane's mirror (parity by construction).
+	//
+	// The membersOf adapter reads the IN-MEMORY models snapshot
+	// (models.GroupMembershipReader — the modelscache decorator's
+	// non-copying accessor): NO DB read on the request path (Ruling 5).
+	arc.scope = authz.Resolve(authToken, h.membersOf(&arc.conf))
+
+	// === MODEL ACCESS CHECK (THE SCOPE PREDICATE — Anthropic lane) ===
+	//
+	// D13 (THE SCOPE DECISION PRECEDES CANDIDATE CONSTRUCTION): this
+	// gate runs BEFORE the group rewrite below, so an out-of-scope
+	// request creates NO group binding, NO sticky write, NO member
+	// expansion and NO upstream attempt — it is denied at the entry.
+	//
+	// PD-9 (T2.16): the gate authorizes the RESOLVED row, never the
+	// client-requested string. A claim is an ID-space alias (only
+	// groups claim), so a request naming the claimed model id resolves
+	// to the claiming GROUP row — and that group is what would be
+	// contacted. The unit of authorization is the model that will
+	// actually be contacted (ADR D1).
+	//
+	// AUDIT BRIDGE: for every NON-claimed request resolvedModel.ID ==
+	// reqLog.Model (the client string), so this strict check is
+	// behaviourally IDENTICAL to today's single check. Only the
+	// claimed path differs — and there the difference IS the ruling.
+	//
+	// resolvedModel is non-nil on this lane by construction (the
+	// boundary 404 gate above rejected unknown/non-internal rows), so
+	// the chat lane's unknown-model fail-closed arm is unreachable
+	// here.
+	//
+	// The 403 reuses the CHAT writer (h.sendModelNotAllowedError) — the
+	// envelope is byte-identical across lanes (PD-14). The Anthropic
+	// 502 writer below is for AVAILABILITY only.
+	if arc.scope != nil {
+		if !arc.scope.Allows(resolvedModel.ID) {
+			h.denyAnthropicModelNotAllowed(w, arc, resolvedModel.ID)
+			return
+		}
+	}
+	// === END MODEL ACCESS CHECK ===
+
 	// load-balance-groups §3.6.1 (Am21) — THE modelList rewrite,
 	// Anthropic mirror. Calls the SAME shared helper as the OpenAI
 	// site (parity by construction). Runs AFTER the conversation-
@@ -469,12 +516,27 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// `headersSent` guard at :332-334 already enforces pre-first-
 	// byte — the Am24 re-entry below respects it (no re-entry once
 	// any byte has been emitted).
-	if newList, pick, failGroup := h.applyGroupRewrite(&arc.conf, arc.modelList, arc.conversationKey); failGroup != "" {
+	//
+	// The rewrite is SCOPED (ADR D6): the member pick consults the
+	// token's reach, so an out-of-reach member is never picked and
+	// never cooled.
+	outcome := h.applyGroupRewrite(&arc.conf, arc.modelList, arc.conversationKey, arc.scope)
+	if outcome.failGroupID != "" {
+		if outcome.scopeExcluded {
+			// PD-14: a group that is empty BECAUSE OF SCOPE is a
+			// PERMISSION failure — 403 access_denied (the chat-shaped
+			// envelope), NEVER the Anthropic 502 group_unservable
+			// envelope. ZERO upstream attempts occurred here (the
+			// rewrite is the FIRST candidate construction), so the
+			// attempt-count-keyed rule agrees.
+			h.denyAnthropicModelNotAllowed(w, arc, "")
+			return
+		}
 		// Am28 / §3.8: empty-at-runtime group ⇒ the Anthropic
 		// resolve-failure envelope, never a panic.
-		log.Printf("[grouplb] anthropic request %s: %s", arc.reqID, groupFailMessage(failGroup))
+		log.Printf("[grouplb] anthropic request %s: %s", arc.reqID, groupFailMessage(outcome.failGroupID))
 		arc.reqLog.Status = "failed"
-		arc.reqLog.Error = groupFailMessage(failGroup)
+		arc.reqLog.Error = groupFailMessage(outcome.failGroupID)
 		arc.reqLog.EndTime = time.Now()
 		arc.reqLog.Duration = time.Since(arc.startTime).String()
 		h.store.Add(arc.reqLog)
@@ -485,11 +547,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
-			"api_error", "group_unservable", groupFailMessage(failGroup)))
+			"api_error", "group_unservable", groupFailMessage(outcome.failGroupID)))
 		return
-	} else if pick != nil {
+	} else if outcome.pick != nil {
+		pick := outcome.pick
 		arc.modelListOriginal = arc.modelList
-		arc.modelList = newList
+		arc.modelList = outcome.list
 		arc.groupPick = pick
 		// wi-7769a812 part 2 — exhaustive member iteration: the sticky
 		// pick is this request's FIRST tried member.
@@ -501,42 +564,62 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 		log.Printf("[grouplb] anthropic request %s: group=%s → sticky member=%s (newlyBound=%v)",
 			arc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
+	} else if outcome.list != nil {
+		// The rewrite ran but produced NO group pick (a dropped
+		// fallback-position group — PD-12/arch PD-7). The list is still
+		// swapped: the dropped entry must not survive into the
+		// execution list.
+		arc.modelListOriginal = arc.modelList
+		arc.modelList = outcome.list
 	}
 
-	// === MODEL ACCESS CHECK (Anthropic lane) ===
-	// Chat-lane parity with handler.go:704-765: the token allow-list
-	// evaluates the CLIENT-REQUESTED ID STRING (§3.4 Q1 tail — a token
-	// listing a claimed/shadowed ID reaches the group through that
-	// alias exactly as on the OpenAI lane). resolvedModel is non-nil
-	// here (the boundary 404 gate above rejected unknown/non-internal
-	// models), so the chat lane's unknown-model fail-closed arm is
-	// unreachable on this lane by construction.
-	if authToken != nil && !authToken.IsModelAllowed(reqLog.Model) {
-		log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)",
-			reqLog.Model, resolvedModel.ID, arcTokenID, authToken.Name)
-
-		reqLog.Status = "failed"
-		reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", reqLog.Model)
-		reqLog.EndTime = time.Now()
-		reqLog.Duration = time.Since(startTime).String()
-		h.store.Add(reqLog)
-
-		h.publishEvent("model_not_allowed", map[string]interface{}{
-			"id":    reqID,
-			"model": reqLog.Model,
-			"token": arcTokenID,
-		})
-
-		h.sendModelNotAllowedError(w, reqLog.Model)
-		return
-	}
-	// === END MODEL ACCESS CHECK ===
+	// C2 — THE REACH FILTER (ADR D6/D7): every candidate outside the
+	// token's reach is removed from the execution list BEFORE the
+	// sticky ordering runs (sticky promotion must never promote an
+	// entry the filter would remove).
+	arc.modelList = h.applyReachFilter(arc.scope, arc.modelList)
 
 	// Sticky last-success race ORDER (design site (b)): post-group-
 	// rewrite, pre-walk. The Anthropic lane has no race coordinator —
 	// reordering changes walk ATTEMPT order only (index 0 = first
 	// attempt), preserving sequential-fallback semantics.
 	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
+
+	// PD-10 (T2.12): an empty execution list is a CONTRACT VIOLATION —
+	// the caller must decide 403 (scope) or 502 (unservability) BEFORE
+	// the walk. The Anthropic lane has no coordinator to refuse it, so
+	// the guard lives here.
+	if len(arc.modelList) == 0 {
+		// Defensive conjunct (Phase-2 sec review W2): a 403 is only
+		// ever correct when NO upstream attempt ran and the response
+		// headers are not committed. Unreachable today (the empty list
+		// ⇒ the walk never ran ⇒ attempts == 0 and no byte was written),
+		// but the terminal branches carry the same conjunct; with >= 1
+		// attempt this falls through to the 502 all_models_failed path
+		// below.
+		if arc.groupPick != nil && arc.upstreamAttempts == 0 && !arc.headersSent {
+			// The group was in reach but NO member was → a scope
+			// exclusion. ZERO upstream attempts ran ⇒ a permission
+			// failure, never an availability failure.
+			h.denyAnthropicModelNotAllowed(w, arc, "")
+			return
+		}
+		log.Printf("[authz] anthropic request %s: EMPTY execution list with no group pick — refusing to walk", arc.reqID)
+		arc.reqLog.Status = "failed"
+		arc.reqLog.Error = "no executable models for this request"
+		arc.reqLog.EndTime = time.Now()
+		arc.reqLog.Duration = time.Since(arc.startTime).String()
+		h.store.Add(arc.reqLog)
+		h.publishEvent("request_failed", map[string]interface{}{
+			"id":    arc.reqID,
+			"error": arc.reqLog.Error,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"api_error", "all_models_failed", arc.reqLog.Error))
+		return
+	}
 
 	// Outer loop: iterate through models (original + fallbacks).
 	// load-balance-groups / Am24 re-entry: a terminal member-pipeline
@@ -644,6 +727,13 @@ loop:
 			arc.servedModel = currentModel
 			arc.clientWriteErr = nil
 			arc.deliveryTruncated = false
+
+			// THE ATTEMPT SEAM (the Anthropic lane): the walk's attempt
+			// call IS the upstream-attempt record — the counter is bumped
+			// here, at the real attempt site (the model-layer suppression
+			// branch above `continue`s WITHOUT reaching this line, so a
+			// suppressed iteration never counts as an attempt).
+			arc.upstreamAttempts++
 
 			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 			if success {
@@ -770,6 +860,15 @@ loop:
 	log.Printf("All models failed for Anthropic request")
 	h.publishEvent("all_models_failed", map[string]interface{}{"id": arc.reqID})
 
+	// ATTEMPT-COUNT-KEYED TERMINAL VERDICT (leader ruling): a re-entry
+	// that exhausted ON SCOPE is a PERMISSION failure only when no
+	// upstream attempt ran at all. With >= 1 attempt the terminal
+	// availability envelope is UNCHANGED.
+	if arc.scopeExhausted && arc.upstreamAttempts == 0 && !arc.headersSent {
+		h.denyAnthropicModelNotAllowed(w, arc, "")
+		return
+	}
+
 	if !arc.headersSent {
 		// Use stored error if available, otherwise send generic error
 		if arc.lastError != nil && arc.lastStatusCode > 0 {
@@ -784,6 +883,37 @@ loop:
 		// Headers already sent (streaming) - send SSE error event
 		_ = h.sendAnthropicSSEError(w, "api_error", "All models failed after retries")
 	}
+}
+
+// denyAnthropicModelNotAllowed is THE 403 writer of the Anthropic
+// lane. It reuses the CHAT writer (h.sendModelNotAllowedError), so the
+// envelope is byte-identical across the two lanes (PD-14): the
+// Anthropic-specific 502 writer (api_error / group_unservable) is for
+// AVAILABILITY only and must never be used for a scope denial.
+//
+// The envelope quotes the CLIENT-REQUESTED string (arc.reqLog.Model) —
+// never the canonical id of the resolved row (PD-9): for a claimed
+// (shadow) id the canonical group id must not leak.
+//
+// resolvedID is the resolved row's id for the log line only ("" when
+// the caller has no resolved row).
+func (h *Handler) denyAnthropicModelNotAllowed(w http.ResponseWriter, arc *anthropicRequestContext, resolvedID string) {
+	log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)",
+		arc.reqLog.Model, resolvedID, arc.tokenID, arc.tokenName)
+
+	arc.reqLog.Status = "failed"
+	arc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", arc.reqLog.Model)
+	arc.reqLog.EndTime = time.Now()
+	arc.reqLog.Duration = time.Since(arc.startTime).String()
+	h.store.Add(arc.reqLog)
+
+	h.publishEvent("model_not_allowed", map[string]interface{}{
+		"id":    arc.reqID,
+		"model": arc.reqLog.Model,
+		"token": arc.tokenID,
+	})
+
+	h.sendModelNotAllowedError(w, arc.reqLog.Model)
 }
 
 // attemptAnthropicModel attempts a single model request
@@ -1977,6 +2107,14 @@ type anthropicRequestContext struct {
 	isAnthropicUpstream bool   // true when upstream speaks Anthropic protocol
 	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
 
+	// tokenID / tokenName identify the AUTHENTICATED token of this
+	// request ("" when the token store is absent — the auth-disabled
+	// degradation). The chat lane carries the same pair on its request
+	// context; the Anthropic lane kept the token in a local until the
+	// scope work needed it on the denial path.
+	tokenID   string
+	tokenName string
+
 	// payloadCommitted (wi-7769a812 part 2) — the Anthropic route's
 	// OWN commit flag: true once the FIRST NON-HEARTBEAT upstream
 	// payload frame has been forwarded to the client. The lazy
@@ -1998,6 +2136,25 @@ type anthropicRequestContext struct {
 	lastAttemptCredentialID string
 	lastAttemptProvider     string
 	lastAttemptModel        string
+
+	// scope is THE authorization scope of this request (ADR D2/D7) — the
+	// chat lane's mirror. nil => UNRESTRICTED (anonymous or a wildcard
+	// token); denyAll => DENY-ALL; otherwise a restricted reach set.
+	scope *authz.Scope
+
+	// upstreamAttempts counts the upstream attempts this request made
+	// (the Anthropic lane is a SEQUENTIAL walk: the counter is bumped
+	// at the attempt site — the h.attemptAnthropicModel call).
+	//
+	// It is the seam for the attempt-count-keyed terminal verdict
+	// (leader ruling): ZERO attempts + every remaining candidate
+	// scope-excluded => 403 access_denied; >= 1 attempt => the terminal
+	// availability envelope is UNCHANGED.
+	upstreamAttempts int
+
+	// scopeExhausted records that the group re-entry exhausted ON
+	// SCOPE (every remaining member was outside this token's reach).
+	scopeExhausted bool
 
 	// lastFailover (wi-4b8d21e7, review S-5) — the credential rotation
 	// the passthrough branch performed on THIS attempt: the account it

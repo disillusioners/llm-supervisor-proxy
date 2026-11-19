@@ -58,6 +58,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -337,20 +338,35 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 7 — Token allow-list (mirrors imggen). Empty
-	// AllowedModels = all models allowed.
-	if authToken != nil && len(authToken.AllowedModels) > 0 {
-		if !authToken.IsModelAllowed(modelID) {
-			h.publishEvent(eventTypeDecision, map[string]interface{}{
-				"outcome":         "model_not_allowed",
-				"model":           modelID,
-				"token":           authToken.ID,
-				"duration_ms":     time.Since(startTime).Milliseconds(),
-				"upstream_status": 0,
-			})
-			h.sendModelNotAllowedError(w, modelID)
-			return
-		}
+	// Step 7 — THE SCOPE PREDICATE (the shared entry gate).
+	//
+	// ADR D8: the four entry sites collapse into ONE predicate — the
+	// scope resolved by pkg/authz (the ONE resolver). A lane may not
+	// re-implement the wildcard rule or read the raw grant slices.
+	//
+	// PD-9: the gate authorizes the RESOLVED row (model.ID), never the
+	// client-requested string. On this lane the two are identical —
+	// claims are group-only (modelscache/models.go:283), so a non-group
+	// row always satisfies model.ID == req.Model.
+	//
+	// PRECEDENCE (T2.13, the pinned order):
+	//   401 (auth) -> 404 (unknown model) -> 400 decision_misroute
+	//   (kind/lane) -> 403 (scope) -> 502 (unservable)
+	// The scope check runs AFTER the kind/lane gate above, so a
+	// chat-kind model posted here is a 400 decision_misroute REGARDLESS
+	// of the token's scope (a token-dependent answer would leak the
+	// decision-lane configuration).
+	scope := authz.Resolve(authToken, h.membersOf())
+	if scope != nil && !scope.Allows(model.ID) {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "model_not_allowed",
+			"model":           modelID,
+			"token":           authToken.ID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.sendModelNotAllowedError(w, modelID)
+		return
 	}
 
 	// Step 8 — Credential resolution. main.go wires the resolver

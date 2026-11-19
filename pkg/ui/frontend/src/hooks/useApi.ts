@@ -895,11 +895,33 @@ export function useTokens() {
     }
   }, []);
 
-  const createToken = useCallback(async (name: string, expiresAt: string | null, allowedModels?: string[]): Promise<ApiToken> => {
+  // Token grant axes — the frozen token-scope wire contract
+  // (BE pkg/ui/server.go: handleTokens create / updateTokenPermission patch).
+  //
+  // ONE shared reading rule, TWO different write rules:
+  //   ABSENT  = key missing OR explicit null  => no allow-list => UNRESTRICTED
+  //   PRESENT-EMPTY = []                      => grants NOTHING on that axis
+  //   PRESENT       = [ids...]                => exactly those ids
+  //
+  // CREATE is a FULL WRITE of both columns, so both keys are ALWAYS emitted
+  // and an absent axis is written as an explicit `null` (never omitted).
+  // PATCH is a MERGE, so an untouched axis is written as a MISSING key —
+  // and, because Go decodes an omitted key and an explicit `null` to the
+  // same nil *[]string, sending `null` on PATCH is a no-op KEEP, not a
+  // clear. CLEARING an axis therefore MUST send `[]`. (The pre-change FE
+  // sent `null` for a cleared axis: under this BE that silently kept the
+  // grant — the operator believes access was removed and it was not —
+  // and under a pre-change BE it was a wildcard escalation.)
+
+  const createToken = useCallback(async (name: string, expiresAt: string | null, allowedModels?: string[] | null, allowedGroups?: string[] | null): Promise<ApiToken> => {
+    // Full write: both axes always present on the wire.
+    //   undefined => null (ABSENT / unrestricted)   [] => PRESENT-empty
+    //   null      => null (ABSENT / unrestricted)   ids => PRESENT
     const body: Record<string, unknown> = {
       name,
       expires_at: expiresAt,
-      allowed_models: allowedModels && allowedModels.length > 0 ? allowedModels : null,
+      allowed_models: allowedModels ?? null,
+      allowed_groups: allowedGroups ?? null,
     };
     const token = await apiFetch<ApiToken>('/tokens', {
       method: 'POST',
@@ -910,21 +932,42 @@ export function useTokens() {
     return token;
   }, [fetchTokens]);
 
-  const updateTokenPermission = useCallback(async (id: string, allowedModels?: string[]): Promise<boolean> => {
+  // PATCH writes only the axes the caller named; every other axis is LEFT
+  // OUT of the body so the BE keeps its stored bytes (an unreadable
+  // DENY-ALL column must never be healed to NULL by a merge that says
+  // nothing about it).
+  //
+  //   undefined => OMIT the key            (KEEP — column untouched)
+  //   null      => explicit `null`         (also KEEP — Go maps omitted == null)
+  //   []        => `[]`                    (CLEAR — grants nothing; NEVER null)
+  //   [ids...]  => `[ids...]`              (REPLACE)
+  //
+  // The local optimistic merge mirrors the write semantics: an omitted or
+  // null axis keeps its previous value, [] and ids replace it.
+  const updateTokenPermission = useCallback(async (id: string, allowedModels?: string[] | null, allowedGroups?: string[] | null): Promise<boolean> => {
     try {
+      const body: Record<string, unknown> = {};
+      if (allowedModels !== undefined) body.allowed_models = allowedModels;
+      if (allowedGroups !== undefined) body.allowed_groups = allowedGroups;
       const response = await fetch(`${API_BASE}/tokens/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         if (response.status === 404) return false;
         const err = await response.json().catch(() => ({ error: 'Request failed' }));
         throw new Error(err.error || 'Request failed');
       }
-      setTokens(prev => prev.map(t => t.id === id ? { ...t, allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null } : t));
+      setTokens(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        const next = { ...t };
+        // null means KEEP (omitted and null are identical on the wire), so
+        // only a non-null value is an actual local-state change.
+        if (allowedModels !== undefined && allowedModels !== null) next.allowed_models = allowedModels;
+        if (allowedGroups !== undefined && allowedGroups !== null) next.allowed_groups = allowedGroups;
+        return next;
+      }));
       // Invalidate cache so next fetch gets fresh data
       defaultAPICache.delete('tokens');
       return true;

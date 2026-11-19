@@ -833,7 +833,7 @@ func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 	// under the same group id.)
 	mgr.groupEngine.OnGroupChanged(allBackup.ID, GroupMemberRefs(allBackup.Members))
 
-	memberID, newlyBound, pool, stale, ok := mgr.pickServableGroupMember(&allBackup, "conv-d8-empty")
+	memberID, newlyBound, pool, stale, ok := mgr.pickServableGroupMember(&allBackup, "conv-d8-empty", nil, nil)
 	if !ok {
 		t.Fatal("empty default pool: the picker must serve a BACKUP member, not fail")
 	}

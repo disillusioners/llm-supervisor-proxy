@@ -431,7 +431,10 @@ func newSepCoord(t *testing.T, chain []sepModel, provider providers.Provider, st
 		tune(cfg)
 	}
 	rawBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%v}`, modelIDs[0], stream))
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "sep-req", false, engine, convKey, liveGate, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "sep-req", false, engine, convKey, liveGate, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	return coord, bus
 }
 
@@ -1055,7 +1058,10 @@ func TestCacheLayer_D1_Wiring_AttemptPrefersUnmarkedCredential(t *testing.T) {
 	cfg.MaxGenerationTime = 5 * time.Second
 	cfg.StreamDeadline = 5 * time.Second
 	raw := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), raw, []string{"m1"}, events.NewBus(), "d1-wire", false, engine, "conv-d1-wire", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), raw, []string{"m1"}, events.NewBus(), "d1-wire", false, engine, "conv-d1-wire", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	coord.Start()
 	if w := coord.WaitForWinner(); w == nil {
@@ -1452,5 +1458,110 @@ func TestCacheLayer_DB_AnthropicContentFilterForwarded(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("content_filter completion not forwarded (status=%d body=%q)", rec.Code, rec.Body.String())
+	}
+}
+
+// ───────────────────────────── P-G10 ─────────────────────────────
+
+// TestHedge_And_CredFailover_NeverIntroduceModel pins P-G10: the hedge
+// (and a credential failover) reuses c.models[0] on a SECONDARY
+// credential — the MODEL identity is never changed, so the set of
+// attempted model ids stays inside Reach(T) and no new model id ever
+// appears.
+//
+// Reach(T) here is the execution list the coordinator was constructed
+// with ([m1] + its chain [m2]) — exactly the set a token granting m1
+// (chain explicitly granted, D5) would carry. The pin is SET-level: any
+// future mechanism that minted a model id outside that set (a hedge that
+// "helpfully" substituted a sibling, a failover that retargeted the row)
+// fails here.
+// pg10SlowProvider answers 200 after a fixed delay and records the wire
+// model of every call — slow enough that the idle hedge fires, chatty
+// enough to assert the wire-side model set.
+type pg10SlowProvider struct {
+	mu    sync.Mutex
+	calls []string
+	delay time.Duration
+}
+
+func (p *pg10SlowProvider) Name() string { return "pg10-slow" }
+
+func (p *pg10SlowProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	return nil, &providers.ProviderError{StatusCode: 500, Message: "not stream"}
+}
+
+func (p *pg10SlowProvider) IsRetryable(err error) bool { return true }
+
+func (p *pg10SlowProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, req.Model)
+	p.mu.Unlock()
+	select {
+	case <-time.After(p.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &providers.ChatCompletionResponse{
+		ID: "cc", Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model,
+		Choices: []providers.Choice{{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
+	}, nil
+}
+
+func TestHedge_And_CredFailover_NeverIntroduceModel(t *testing.T) {
+	provider := &pg10SlowProvider{delay: 150 * time.Millisecond}
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1", creds: 2, chain: []string{"m2"}}, {id: "m2"}},
+		provider, false, false, "conv-p-g10",
+		func(cfg *ConfigSnapshot) {
+			cfg.IdleTimeout = 40 * time.Millisecond
+			cfg.RaceParallelOnIdle = true
+			cfg.RaceMaxParallel = 3
+			cfg.MaxGenerationTime = 5 * time.Second
+		})
+	coord.Start()
+	if winner := coord.WaitForWinner(); winner == nil {
+		t.Fatalf("no winner (calls=%v)", provider.calls)
+	}
+	if len(provider.calls) < 2 {
+		t.Fatalf("upstream calls = %v, want >= 2 — the pin is vacuous unless the hedge fired", provider.calls)
+	}
+
+	// Reach(T): the head m1 plus its (explicitly granted) chain m2.
+	reach := map[string]bool{"m1": true, "m2": true}
+
+	attempted := map[string]bool{}
+	hedgeRows := 0
+	for _, row := range spawnOrderSnapshot(coord) {
+		parts := strings.SplitN(row, ":", 2)
+		if len(parts) != 2 {
+			t.Fatalf("unparsable spawn row %q", row)
+		}
+		modelType, modelID := parts[0], parts[1]
+		if !reach[modelID] {
+			t.Errorf("spawn row %q carries model %q OUTSIDE Reach %v — a hedge / credential failover must never introduce a new model id", row, modelID, reach)
+		}
+		attempted[modelID] = true
+		if modelType == "second" {
+			hedgeRows++
+			// The hedge is the HEAD model on a secondary credential —
+			// never a different row.
+			if modelID != "m1" {
+				t.Errorf("hedge (second) row spawned model %q, want the head c.models[0] == m1 (the hedge changes the CREDENTIAL, never the model)", row)
+			}
+		}
+	}
+	if hedgeRows < 1 {
+		t.Fatalf("no hedge (second) row spawned (rows=%v) — the pin is vacuous unless the hedge fired", spawnOrderSnapshot(coord))
+	}
+
+	// The provider saw exactly the same (in-reach) set the coordinator
+	// spawned — no wire-side substitution either.
+	for _, wireModel := range provider.calls {
+		if !reach[wireModel] {
+			t.Errorf("the upstream saw wire model %q outside Reach %v", wireModel, reach)
+		}
+	}
+	if len(attempted) == 0 {
+		t.Fatal("no spawn rows recorded — vacuous")
 	}
 }

@@ -1305,6 +1305,101 @@ func (c *CachedModelsConfig) RewriteGroupEntries(modelList []string, conversatio
 	return models.GroupRewriteResult{ModelList: modelList}
 }
 
+// RewriteGroupEntriesScoped forwards the SCOPED rewrite to the inner
+// manager (the reach-aware pick). A backend without the capability
+// degrades to the UNSCOPED rewrite — the request layer's reach filter
+// (applyReachFilter) is then the fail-closed backstop.
+//
+// THE FORWARD IS LOAD-BEARING: production always runs through this
+// decorator (CACHE_LAYER_ENABLED defaults ON), so a missing forward
+// would be a SILENT no-op in production while the raw-manager tests
+// stayed green (the modelscache-decorator-forward trap). The
+// compile-time assertion at the bottom of this file is the guard.
+func (c *CachedModelsConfig) RewriteGroupEntriesScoped(modelList []string, conversationKey string, reach models.ReachFilter) models.GroupRewriteResult {
+	if gr, ok := c.inner.(models.GroupRewriterScoped); ok {
+		return gr.RewriteGroupEntriesScoped(modelList, conversationKey, reach)
+	}
+	if reach != nil {
+		// THE DEGRADATION IS ANNOUNCED HERE (ids only — never a token
+		// value, never a grant): the inner backend cannot scope its pick,
+		// so the request layer's reach filter (applyReachFilter) is the
+		// fail-closed backstop. The request-layer log at the call site
+		// covers the OTHER degradation shape (a backend that is not this
+		// decorator at all); this one is the decorator's own inner
+		// degradation, which the request layer cannot see.
+		//
+		// PER CALL, NOT once-per-request: the announcement is not
+		// rate-limited and not de-duplicated — every call that reaches
+		// this branch logs it. That is cheap because the branch is a rare
+		// path in production (the decorator's inner backend implements the
+		// scoped seam); reading it as a once-per-request announcement
+		// would be wrong.
+		log.Printf("[authz] modelscache decorator: the inner backend lacks the scoped rewrite — permission filtering falls back to the request-layer list filter")
+	}
+	return c.RewriteGroupEntries(modelList, conversationKey)
+}
+
+// ExcludeGroupMemberScoped forwards the SCOPED exclude-and-reselect to
+// the inner manager. A backend without the capability degrades to the
+// legacy (unscoped) exclude — the legacy call can never report
+// ScopeOnly=true, so the caller keeps its availability path.
+//
+// DEFENSE IN DEPTH (the degraded branch): the legacy exclude cannot
+// scope its offer, so the replacement it hands back is checked against
+// the reach set HERE. An out-of-reach replacement is REFUSED (the zero
+// value: OK=false) instead of being offered and stamped by the re-entry
+// walk — the same rule the request layer applies to the same degraded
+// shape (pkg/proxy's excludeGroupMemberScoped fallback).
+func (c *CachedModelsConfig) ExcludeGroupMemberScoped(groupID, conversationKey, memberID string, cooldown time.Duration, reach models.ReachFilter) models.GroupExcludeOutcome {
+	if gr, ok := c.inner.(models.GroupRewriterScoped); ok {
+		return gr.ExcludeGroupMemberScoped(groupID, conversationKey, memberID, cooldown, reach)
+	}
+	replacement, pool, ok := c.ExcludeGroupMember(groupID, conversationKey, memberID, cooldown)
+	if !ok || replacement == "" {
+		return models.GroupExcludeOutcome{}
+	}
+	if reach != nil && !reach.Allows(replacement) {
+		// The legacy offer ignored the reach set — refuse it here.
+		return models.GroupExcludeOutcome{}
+	}
+	return models.GroupExcludeOutcome{Replacement: replacement, Pool: pool, OK: true}
+}
+
+// GroupMembers answers "what are the CURRENT member ids of this group"
+// straight from the IN-MEMORY snapshot — no DB read and NO deep copy of
+// the model set (GetModels() copies every row on every call; this
+// allocates only the member-id slice the caller asked for).
+//
+// It implements models.GroupMembershipReader — the optional seam the
+// per-request reach resolution uses (Ruling 5: the membership must come
+// from the in-memory snapshot, never from a live SELECT under
+// m.mu.RLock).
+//
+// FRESHNESS: the snapshot is rebuilt on every write-through mutation
+// (AddModel / UpdateModel / RemoveModel) and on every reconciler tick,
+// so a membership change is visible on the next request without
+// re-minting the token (ADR D12).
+func (c *CachedModelsConfig) GroupMembers(groupID string) []string {
+	if c == nil || groupID == "" {
+		return nil
+	}
+	c.mu.RLock()
+	g, ok := c.modelsByID[groupID]
+	if !ok || g == nil || !g.IsGroup() {
+		c.mu.RUnlock()
+		return nil
+	}
+	out := make([]string, 0, len(g.Members))
+	for _, m := range g.Members {
+		if m.ModelID == "" {
+			continue
+		}
+		out = append(out, m.ModelID)
+	}
+	c.mu.RUnlock()
+	return out
+}
+
 // ExcludeGroupMember forwards the group-level exclude-and-reselect
 // (Am24) to the inner manager's engine. group-backup-members / D5:
 // the returned `pool` string ("default" / "backup") propagates
@@ -1526,3 +1621,25 @@ func (c *CachedModelsConfig) flattenCredentialRefsCacheSide(model *models.ModelC
 	}
 	return out
 }
+
+// ─── Compile-time seam assertions ────────────────────────────────────────────
+//
+// THE PRODUCTION BINDING MUST NOT BE A SILENT NO-OP.
+//
+// Production always runs through this decorator (CACHE_LAYER_ENABLED
+// defaults ON — cmd/main.go), so a missing forward here would be a
+// SILENT no-op in production while the raw-manager tests stayed green
+// (the modelscache-decorator-forward trap, exact shape — the precedent
+// is ClearGroupMemberCooldown). These assertions make a missing
+// forward a COMPILE BREAK instead.
+//
+//   - models.GroupRewriterScoped: the scoped rewrite + the scoped
+//     exclude (the reach-aware pick). Without it the group's pick
+//     ignores the token's reach set.
+//   - models.GroupMembershipReader: the non-copying in-memory
+//     membership accessor the per-request reach resolution uses.
+var (
+	_ models.GroupRewriterScoped   = (*CachedModelsConfig)(nil)
+	_ models.GroupMembershipReader = (*CachedModelsConfig)(nil)
+	_ models.GroupRewriter         = (*CachedModelsConfig)(nil)
+)

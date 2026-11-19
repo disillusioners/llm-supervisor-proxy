@@ -172,7 +172,10 @@ func newQuotaScopeEnv(t *testing.T, chain []layeredChainModel, walledCredIDs map
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"` + modelIDs[0] + `","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "quota-scope-req", false, engine, conversationKey, false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "quota-scope-req", false, engine, conversationKey, false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	return coord, env, engine, cfg.ModelSkipCache, cfg.UpstreamSkipCache
 }
 

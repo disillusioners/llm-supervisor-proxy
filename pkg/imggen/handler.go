@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
@@ -81,6 +82,24 @@ type Handler struct {
 	usage             *usage.Counter
 	resolveModel      modelResolver
 	resolveCredential credentialResolver
+
+	// modelsConfig is the OPTIONAL seam to the models manager. It
+	// answers the group-membership question the scope resolution needs
+	// (a token that grants a GROUP must reach that group's current
+	// members).
+	//
+	// It mirrors the decision lane's seam (pkg/decision's
+	// SetModelsConfig) and exists for the same reason: the membership
+	// must be read from the IN-MEMORY models snapshot (the
+	// modelscache decorator's non-copying accessor), NEVER from a live
+	// DB read — the raw manager's GetModelNative is a `SELECT … FROM
+	// models` issued UNDER m.mu.RLock, which stalls every reader
+	// behind the writer-preferring RWMutex (Ruling 5).
+	//
+	// It is optional by design: a handler built without it keeps the
+	// pre-group behaviour (no membership expansion — the model's own
+	// axis decides).
+	modelsConfig models.ModelsConfigInterface
 }
 
 // configGetter is the slice of config.ManagerInterface this
@@ -244,7 +263,12 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// parallel attempts, no race, no loop detection, no
 	// toolcall buffer, no toolrepair — the exclusions table at
 	// phase1-plan.md:L49-59 is binding.
-	_, ok = h.resolveModel(modelID)
+	//
+	// The RESOLVED row is captured (not discarded): the scope
+	// predicate authorizes the RESOLVED row (PD-9). On this lane the
+	// resolved id IS the client string — claims are group-only, so a
+	// non-group row always satisfies row.ID == modelID.
+	row, ok := h.resolveModel(modelID)
 	if !ok {
 		// 404 — unknown model (BE-A1 / Amendment 17). Distinct
 		// from 403 (model known but not in token's allowed_models).
@@ -259,23 +283,36 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 4) Token allow-list check. Empty AllowedModels = all
-	// models allowed (mirrors chat; pkg/auth/token.go:129-144).
-	// 403 only fires when AllowedModels is non-empty AND the
-	// model is not in the list (existing-token-with-restrictions
-	// case).
-	if authToken != nil && len(authToken.AllowedModels) > 0 {
-		if !authToken.IsModelAllowed(modelID) {
-			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-				"outcome":         "model_not_allowed",
-				"model":           modelID,
-				"token":           authToken.ID,
-				"duration_ms":     time.Since(startTime).Milliseconds(),
-				"upstream_status": 0,
-			})
-			h.sendModelNotAllowedError(w, modelID)
-			return
-		}
+	// 4) THE SCOPE PREDICATE (the shared entry gate).
+	//
+	// ADR D8: the four entry sites collapse into ONE predicate — the
+	// scope resolved by pkg/authz (the ONE resolver). A lane may not
+	// re-implement the wildcard rule or read the raw grant slices.
+	//
+	// PD-9: the gate authorizes the RESOLVED row (row.ID), never the
+	// client-requested string. On this lane the two are identical
+	// (claims are group-only), so the check is behaviourally identical
+	// to today's allow-list check.
+	//
+	// PRECEDENCE (T2.13): 401 (auth) -> 400 missing_model ->
+	// 404 (unknown model) -> 403 (scope) -> 502. The scope check runs
+	// AFTER the 404, so an unknown id is never answered with a
+	// permission error.
+	//
+	// NOTE: this lane has NO candidate list — an image-generation
+	// model has no FallbackChain (pkg/imggen/handler.go's header), so
+	// the entry check is the WHOLE scope obligation on this lane.
+	scope := authz.Resolve(authToken, h.membersOf())
+	if scope != nil && !scope.Allows(row.ID) {
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+			"outcome":         "model_not_allowed",
+			"model":           modelID,
+			"token":           authToken.ID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.sendModelNotAllowedError(w, modelID)
+		return
 	}
 
 	// 5) Credential resolution. We use the chat-side helper
@@ -738,6 +775,48 @@ type modelResolver func(modelID string) (*models.ModelConfig, bool)
 
 // credentialResolver returns the resolved credential for a model ID.
 type credentialResolver func(modelID string) (models.ResolvedCredential, bool)
+
+// membersOf returns the CURRENT member ids of a group — the adapter
+// pkg/authz.Resolve consumes to expand a granted group into its
+// members.
+//
+// The accessor is the OPTIONAL models.GroupMembershipReader seam: the
+// modelscache decorator implements it with a NON-COPYING read of its
+// in-memory snapshot (one small allocation — the member-id slice), so
+// the request path performs NO DB read (Ruling 5). Without the seam
+// (a handler built without the models config) there is no membership
+// expansion at all.
+func (h *Handler) membersOf() func(string) []string {
+	return func(groupID string) []string {
+		if h == nil || h.modelsConfig == nil {
+			return nil
+		}
+		if r, ok := h.modelsConfig.(models.GroupMembershipReader); ok {
+			return r.GroupMembers(groupID)
+		}
+		for _, row := range h.modelsConfig.GetModels() {
+			if row.ID != groupID || !row.IsGroup() {
+				continue
+			}
+			out := make([]string, 0, len(row.Members))
+			for _, m := range row.Members {
+				out = append(out, m.ModelID)
+			}
+			return out
+		}
+		return nil
+	}
+}
+
+// SetModelsConfig wires the models-manager seam (the group-membership
+// reader the scope resolution needs). It mirrors the decision lane's
+// seam; nil-safe (no-op on nil).
+func (h *Handler) SetModelsConfig(cfg models.ModelsConfigInterface) {
+	if h == nil {
+		return
+	}
+	h.modelsConfig = cfg
+}
 
 // SetModelResolver installs the model-lookup function. Called
 // from cmd/main.go at composition time. nil-safe (no-op on nil).

@@ -661,8 +661,11 @@ func TestStickyOrder_CancelledLoser_Invalidated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m-slow"}`))
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, []byte(`{"model":"m-slow"}`),
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, req, []byte(`{"model":"m-slow"}`),
 		[]string{"m-slow"}, nil, "cancelled-loser", false, nil, convKey, false, eng)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	coord.Start()
 
 	// Let the attempt reach the upstream, then cancel it mid-flight.

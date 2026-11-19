@@ -24,6 +24,11 @@ type fakeTokenStore struct {
 	infraErr error // when non-nil, ValidateToken returns it
 	innerErr error // when non-nil (and infraErr nil), returned as-is
 	listErr  error
+	// lastPerm / lastPermID record the last UpdateTokenPermission call so a
+	// decorator test can prove the payload was forwarded verbatim (not
+	// re-derived). Token-authz T1.4.
+	lastPerm   *auth.OptionalTokenPermission
+	lastPermID string
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -54,10 +59,10 @@ func (f *fakeTokenStore) ValidateToken(ctx context.Context, plaintext string) (*
 	return tok, nil
 }
 
-func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, perm auth.OptionalTokenPermission) (string, *auth.AuthToken, error) {
 	plaintext, _, _ := auth.GenerateToken()
 	hash := auth.HashToken(plaintext)
-	tok := &auth.AuthToken{ID: "id-" + name, Name: name, TokenHash: hash, ExpiresAt: expiresAt, CreatedBy: createdBy}
+	tok := &auth.AuthToken{ID: "id-" + name, Name: name, TokenHash: hash, ExpiresAt: expiresAt, CreatedBy: createdBy, AllowedModels: perm.AllowedModels.Value(), AllowedGroups: perm.AllowedGroups.Value()}
 	f.mu.Lock()
 	f.tokens[hash] = tok
 	f.mu.Unlock()
@@ -101,7 +106,12 @@ func (f *fakeTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Aut
 	return nil, auth.ErrTokenNotFound
 }
 
-func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
+func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, perm auth.OptionalTokenPermission) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := perm
+	f.lastPerm = &p
+	f.lastPermID = id
 	return nil
 }
 
@@ -394,7 +404,7 @@ func TestCachedTokenStore_WriteThrough_CreateToken(t *testing.T) {
 	inner := newFakeTokenStore()
 	c := NewCachedTokenStore(inner, Options{})
 
-	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", nil)
+	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", auth.FullPermission(nil, nil))
 	if err != nil || tok == nil {
 		t.Fatalf("CreateToken: %v %v", tok, err)
 	}
@@ -545,5 +555,252 @@ func TestIsInfraError_ShapeInjection(t *testing.T) {
 				t.Errorf("isInfraError(%q) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Decorator grant forwarding (token-authz plan T1.11 / T1.4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCachedTokenStore_ForwardsGroupsAndDropsOnUpdate proves two things the
+// plan calls out separately:
+//
+//  1. FORWARD: the auth.TokenPermission payload reaches the inner store
+//     verbatim (both axes, nil-vs-empty intact) — the decorator must not
+//     flatten it.
+//  2. DROP IS EFFECTIVE: after UpdateTokenPermission the cached positive is
+//     gone, so the NEXT ValidateToken re-reads and returns the NEW grants. A
+//     drop that was merely "called" but ineffective would leave a stale
+//     permission in force for up to TokensPositiveTTL.
+//  3. FLAGS SURVIVE: AllowedGroups and BOTH Invalid flags ride the cached
+//     *AuthToken across a cache hit (a cache hit must not lose DENY-ALL).
+func TestCachedTokenStore_ForwardsGroupsAndDropsOnUpdate(t *testing.T) {
+	inner := newFakeTokenStore()
+	c := NewCachedTokenStore(inner, Options{})
+	c.Stop()
+
+	plaintext, hash, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	// Inner row: a narrow group token.
+	inner.mu.Lock()
+	inner.tokens[hash] = &auth.AuthToken{
+		ID:            "tok-grants",
+		Name:          "narrow",
+		TokenHash:     hash,
+		AllowedModels: nil,
+		AllowedGroups: []string{"g1"},
+	}
+	inner.mu.Unlock()
+
+	// Warm the cache.
+	got, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("warm validate: %v", err)
+	}
+	if len(got.AllowedGroups) != 1 || got.AllowedGroups[0] != "g1" {
+		t.Fatalf("first validate AllowedGroups = %v, want [g1]", got.AllowedGroups)
+	}
+
+	// A cache hit must still carry the group axis + the flags.
+	inner.mu.Lock()
+	before := inner.validate.Load()
+	inner.mu.Unlock()
+	hit, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("cached validate: %v", err)
+	}
+	inner.mu.Lock()
+	after := inner.validate.Load()
+	inner.mu.Unlock()
+	if after != before {
+		t.Error("second validate hit the inner store — the positive entry was not cached")
+	}
+	if len(hit.AllowedGroups) != 1 || hit.AllowedGroups[0] != "g1" {
+		t.Errorf("cached AllowedGroups = %v, want [g1] (the group axis must survive the cache boundary)", hit.AllowedGroups)
+	}
+
+	// Mutating the returned token must NOT corrupt the cached entry (deep clone).
+	hit.AllowedGroups = append(hit.AllowedGroups, "g-injected")
+	again, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("post-mutation validate: %v", err)
+	}
+	if len(again.AllowedGroups) != 1 {
+		t.Errorf("cached entry was aliased: a caller mutation changed the cache to %v", again.AllowedGroups)
+	}
+
+	// Now change the grants in the inner store and update through the
+	// decorator. The payload must be forwarded verbatim…
+	inner.mu.Lock()
+	inner.tokens[hash].AllowedGroups = []string{"g2", "g3"}
+	inner.mu.Unlock()
+
+	if err := c.UpdateTokenPermission(context.Background(), "tok-grants", auth.GrantGroups([]string{"g2", "g3"})); err != nil {
+		t.Fatalf("UpdateTokenPermission: %v", err)
+	}
+
+	// (1) FORWARD — the payload reached the inner store verbatim: the id, the
+	// group axis intact, and the model axis still nil (not coerced to []).
+	inner.mu.Lock()
+	fwd, fwdID := inner.lastPerm, inner.lastPermID
+	inner.mu.Unlock()
+	if fwdID != "tok-grants" {
+		t.Errorf("forwarded id = %q, want tok-grants", fwdID)
+	}
+	if fwd == nil {
+		t.Fatal("the inner UpdateTokenPermission was never called — the decorator did not forward")
+	}
+	if !fwd.AllowedGroups.IsSet() {
+		t.Fatal("forwarded group axis is Set:false — the decorator dropped the write")
+	}
+	fwdGroups := fwd.AllowedGroups.Value()
+	if len(fwdGroups) != 2 || fwdGroups[0] != "g2" || fwdGroups[1] != "g3" {
+		t.Errorf("forwarded AllowedGroups = %v, want [g2 g3]", fwdGroups)
+	}
+	if fwd.AllowedModels.IsSet() {
+		t.Errorf("forwarded model axis is Set:true (%v) — an omitted axis must stay Set:false through the decorator", fwd.AllowedModels.Value())
+	}
+
+	// …and the cached entry must be GONE, so the next validate re-reads.
+	inner.mu.Lock()
+	before = inner.validate.Load()
+	inner.mu.Unlock()
+	fresh, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("post-update validate: %v", err)
+	}
+	inner.mu.Lock()
+	after = inner.validate.Load()
+	inner.mu.Unlock()
+	if after != before+1 {
+		t.Errorf("post-update validate made %d inner call(s), want exactly 1 — the cache entry was not dropped", after-before)
+	}
+	if len(fresh.AllowedGroups) != 2 || fresh.AllowedGroups[0] != "g2" || fresh.AllowedGroups[1] != "g3" {
+		t.Errorf("post-update AllowedGroups = %v, want [g2 g3] (the drop must make the change visible within one validation)", fresh.AllowedGroups)
+	}
+}
+
+// TestCachedTokenStore_CloneCarriesInvalidFlags is the PD-7(b) pin: DENY-ALL
+// survives the cache. The flags live on the struct for exactly this reason —
+// a separately-returned flag would be dropped at the cache boundary and a
+// corrupt token would silently become a wildcard after the first 60s. A cache
+// hit must be indistinguishable from a DB read for the deny-all state.
+func TestCachedTokenStore_CloneCarriesInvalidFlags(t *testing.T) {
+	inner := newFakeTokenStore()
+	c := NewCachedTokenStore(inner, Options{})
+	c.Stop()
+
+	plaintext, hash, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	inner.mu.Lock()
+	inner.tokens[hash] = &auth.AuthToken{ID: "tok-invalid", TokenHash: hash, ModelsInvalid: true}
+	inner.mu.Unlock()
+
+	first, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("warm validate: %v", err)
+	}
+	if !first.ModelsInvalid {
+		t.Fatal("first validate lost ModelsInvalid")
+	}
+
+	inner.mu.Lock()
+	before := inner.validate.Load()
+	inner.mu.Unlock()
+	cached, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("cached validate: %v", err)
+	}
+	inner.mu.Lock()
+	after := inner.validate.Load()
+	inner.mu.Unlock()
+	if after != before {
+		t.Fatal("expected a cache hit (no inner call)")
+	}
+	if !cached.ModelsInvalid {
+		t.Error("ModelsInvalid was dropped at the cache boundary — a corrupt token would become a wildcard after the positive TTL")
+	}
+}
+
+// TestCachedTokenStore_ClonePreservesPresentEmpty is the PD-7(a) pin, and it
+// guards the single most dangerous line in the decorator: the clone must NOT
+// turn PRESENT-empty into ABSENT.
+//
+// `append([]string(nil), []string{}...)` returns nil — which would convert a
+// "grants nothing" axis into an "absent" axis and, under the conjunctive
+// wildcard rule, could escalate a token to unrestricted. The clone therefore
+// uses make+copy behind a nil check. This test is the reason it must stay that
+// way, and it also proves the returned value shares NO backing array with the
+// cached entry.
+func TestCachedTokenStore_ClonePreservesPresentEmpty(t *testing.T) {
+	inner := newFakeTokenStore()
+	c := NewCachedTokenStore(inner, Options{})
+	c.Stop()
+
+	plaintext, hash, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	inner.mu.Lock()
+	inner.tokens[hash] = &auth.AuthToken{
+		ID:            "tok-present-empty",
+		TokenHash:     hash,
+		AllowedModels: []string{}, // PRESENT-empty
+		AllowedGroups: []string{}, // PRESENT-empty
+	}
+	inner.mu.Unlock()
+
+	warm, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("warm validate: %v", err)
+	}
+	// The write-through path (storePositive) must also preserve emptiness.
+	if warm.AllowedModels == nil {
+		t.Error("AllowedModels became nil on the write-through path — PRESENT-empty must stay non-nil")
+	}
+	if warm.AllowedGroups == nil {
+		t.Error("AllowedGroups became nil on the write-through path — PRESENT-empty must stay non-nil")
+	}
+
+	// Now read from the CACHE (no inner call) and assert the same.
+	inner.mu.Lock()
+	before := inner.validate.Load()
+	inner.mu.Unlock()
+	cached, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("cached validate: %v", err)
+	}
+	inner.mu.Lock()
+	after := inner.validate.Load()
+	inner.mu.Unlock()
+	if after != before {
+		t.Fatal("expected a cache hit")
+	}
+	if cached.AllowedGroups == nil {
+		t.Fatal("AllowedGroups became nil through the cache clone — PRESENT-empty collapsed into ABSENT (wildcard-escalation shape)")
+	}
+	if len(cached.AllowedGroups) != 0 {
+		t.Errorf("AllowedGroups = %v, want empty", cached.AllowedGroups)
+	}
+	if cached.AllowedModels == nil {
+		t.Fatal("AllowedModels became nil through the cache clone — PRESENT-empty collapsed into ABSENT")
+	}
+
+	// No aliasing: mutating what the caller got must not reach the cache.
+	cached.AllowedGroups = append(cached.AllowedGroups, "g-injected")
+	again, err := c.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("post-mutation validate: %v", err)
+	}
+	if len(again.AllowedGroups) != 0 {
+		t.Errorf("the cached entry was aliased: caller mutation leaked into the cache (%v)", again.AllowedGroups)
+	}
+	if again.AllowedGroups == nil {
+		t.Error("the cached entry's PRESENT-empty state was lost after a caller mutation")
 	}
 }

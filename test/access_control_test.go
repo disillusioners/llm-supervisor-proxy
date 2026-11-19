@@ -194,7 +194,7 @@ func TestA1_AllowedModelMatch(t *testing.T) {
 
 	// Create token with allowed_models containing IDs (NOT names)
 	// Token allows "model-id-1" which maps to "First Model"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestA2_AllowedModelMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models containing "model-id-1" only
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestA3_UnknownModelFailClosed(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models (has restrictions)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestA4_OpenAccessUnrestricted(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with NO allowed_models (nil = open access)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", auth.FullPermission(nil, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty allowed_models slice
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "empty-allowed-token", nil, "test", []string{})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "empty-allowed-token", nil, "test", auth.FullPermission([]string{}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -328,11 +328,18 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	if rr.Code == http.StatusForbidden {
-		t.Error("Expected 200 OK for empty allowed_models slice, got 403")
+	// conjunctive contract: a PRESENT-EMPTY axis is RESTRICTED and grants nothing (pkg/authz/scope.go Resolve())
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 access_denied, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if rr.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	// verify access_denied body shape
+	var errResp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	errorObj, _ := errResp["error"].(map[string]interface{})
+	if errorObj["type"] != "access_denied" || errorObj["message"] != "model not allowed for this token" || errorObj["model"] != "model-id-1" {
+		t.Errorf("unexpected body: %s", rr.Body.String())
 	}
 }
 
@@ -346,7 +353,7 @@ func TestA5_RestrictedToken_UnknownModel_Denied(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models = ["model-id-1"] (restricted)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -404,7 +411,7 @@ func TestC1_IsModelAllowedReceivesIDs(t *testing.T) {
 	}
 
 	// Create token allowing "model-id-1"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-test-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-test-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -450,7 +457,7 @@ func TestEdge_IDMatchesName(t *testing.T) {
 	}
 
 	// Create token allowing "gpt-4" (works as both ID and name)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-equals-name-token", nil, "test", []string{"gpt-4"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-equals-name-token", nil, "test", auth.FullPermission([]string{"gpt-4"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -471,7 +478,7 @@ func TestEdge_CaseSensitiveIDMatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Token allows "model-id-1"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-test-token", nil, "test", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-test-token", nil, "test", auth.FullPermission([]string{"model-id-1"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -505,7 +512,7 @@ func TestEdge_MultipleModelsAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	// Token allows both model-id-1 and model-id-2
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "multi-allowed-token", nil, "test", []string{"model-id-1", "model-id-2"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "multi-allowed-token", nil, "test", auth.FullPermission([]string{"model-id-1", "model-id-2"}, nil))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}

@@ -78,7 +78,8 @@ func setupE2EEnv(t *testing.T) *e2eTestEnv {
 			created_by TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 						ultimate_model TEXT,
-			allowed_models TEXT
+			allowed_models TEXT,
+			allowed_groups TEXT DEFAULT NULL
 		)
 	`
 	if _, err := authDB.Exec(createTable); err != nil {
@@ -90,7 +91,7 @@ func setupE2EEnv(t *testing.T) *e2eTestEnv {
 	env.authTokenStore = auth.NewTokenStore(authDB, database.SQLite)
 
 	// Create a test token
-	plaintext, _, err := env.authTokenStore.CreateToken(context.Background(), "e2e-test-token", nil, "e2e-test", nil)
+	plaintext, _, err := env.authTokenStore.CreateToken(context.Background(), "e2e-test-token", nil, "e2e-test", auth.FullPermission(nil, nil))
 	if err != nil {
 		mcpDB.Close()
 		authDB.Close()
@@ -963,5 +964,3 @@ func TestE2E_ServerDisabled(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 }
-
-

@@ -153,7 +153,10 @@ func newLayeredChainEnv(t *testing.T, chain []layeredChainModel, failN int, conv
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"` + modelIDs[0] + `","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "layered-test-req", false, engine, conversationKey, false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "layered-test-req", false, engine, conversationKey, false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 	return coord, provider, bus, engine
 }
 
@@ -888,7 +891,10 @@ func TestCoordinator_ChainEnd_WithNilCredPlan_IsTerminal(t *testing.T) {
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "terminal-chain-end", false, engine, "conv-terminal-end", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "terminal-chain-end", false, engine, "conv-terminal-end", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	coord.Start()
 	if winner := coord.WaitForWinner(); winner != nil {
@@ -1022,7 +1028,10 @@ func TestCoordinator_LayeredChain_IdleTimeout_PreservesLegacyAdvanceTarget(t *te
 	defer cancel()
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), rawBody, []string{"m1", "m2"}, bus, "idle-legacy-advance", false, engine, "conv-idle-legacy", false, nil)
+	coord, err := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), rawBody, []string{"m1", "m2"}, bus, "idle-legacy-advance", false, engine, "conv-idle-legacy", false, nil)
+	if err != nil {
+		t.Fatalf("newRaceCoordinator: %v", err)
+	}
 
 	coord.Start()
 	winner := coord.WaitForWinner()
