@@ -29,7 +29,7 @@ Add a **stdlib-only, dormant-by-default** internal OAuth2 / OIDC authentication 
 | S2 | `/oauth2/start`, `/oauth2/callback`, `/oauth2/logout` routes (Casdoor / oauth2-proxy path parity) | `cmd/main.go:384` (mux), `k8s/templates/ingress-public.yaml:29-35` (existing `/oauth2` path) |
 | S3 | `/fe/api/auth/me` identity probe (enabled / authenticated / user) | `pkg/ui/server.go:193-246` (the `/fe/api/*` route block) |
 | S4 | Gate middleware wrapping the mux in `cmd/main.go`, with an explicit path-class gating table | `cmd/main.go:514` |
-| S5 | Frontend: shared 401 handling across **all 22 fetch sites** (21 in `useApi.ts` + `ModelForm.tsx:461`), SSE `EventSource` 401 detection + reconnect-loop break, optional signed-in badge + logout in the header | `pkg/ui/frontend/src/hooks/useApi.ts`, `hooks/useEvents.ts`, `components/Header.tsx`, `components/config/ModelForm.tsx:461` |
+| S5 | Frontend: shared 401 handling across **all 22 fetch sites** (21 in `useApi.ts` + `ModelForm.tsx:462`), SSE `EventSource` 401 detection + reconnect-loop break, optional signed-in badge + logout in the header | `pkg/ui/frontend/src/hooks/useApi.ts`, `hooks/useEvents.ts`, `components/Header.tsx`, `components/config/ModelForm.tsx:462` |
 | S6 | Helm chart dormant toggles: `oauth2Proxy.enabled: true` (default) + `internalOAuth2.enabled: false` (default), mutual exclusion, **three-state** `helm template` parity proof | `k8s/values.yaml`, `k8s/templates/*.yaml` |
 | S7 | Go unit + integration tests, FE Vitest suites, `helm template` verification, Pack A/B + `go vet` + `gofmt` + `HOME`-isolation gates | `.agents/tester/PACKS.md` |
 | S8 | Vite rebuild → `pkg/ui/static/` committed (Single-Image FE/BE Coupling) | `pkg/ui/frontend/vite.config.ts` (`outDir: '../static'`) |
@@ -1009,7 +1009,7 @@ export async function guardedFetch(input: RequestInfo | URL, init?: RequestInit)
 | 19 | `hooks/useApi.ts:1164` | `deleteCredentialGroup` | `guardedFetch` |
 | 20 | `hooks/useApi.ts:1187` | providers (hook) | `guardedFetch` |
 | 21 | `hooks/useApi.ts:1211` | `getProviders` | `guardedFetch` |
-| 22 | `components/config/ModelForm.tsx:461` | `/fe/api/models/test` | `guardedFetch` |
+| 22 | `components/config/ModelForm.tsx:462` | `/fe/api/models/test` | `guardedFetch` |
 
 (22 call sites; `useApi.ts` holds 21 of them. `grep -rn "fetch("` must afterwards return **only** the `guardedFetch` internals + the auth probe.)
 
@@ -1287,7 +1287,7 @@ internalOAuth2:
 | Toolchain | `GOTOOLCHAIN=local`, `GOPATH=/home/nea/go`, `GOMODCACHE=/home/nea/go/pkg/mod`, `GOCACHE=/home/nea/.cache/go-build`; Go 1.26 (`/home/nea/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.linux-amd64/bin/go`). |
 | HOME isolation | `export HOME=$(mktemp -d)` for every Go test run (the `pkg/proxy` suite rewrites `config.json` via `APPLY_ENV_OVERRIDES=1`). Hash the **absolute real-home** `config.json` **before** the export and compare after (the `~` form resolves to the quarantine and can never fire). |
 | Pack A | `timeout 300 go test -timeout=240s ./pkg/proxy/... ./pkg/store/... ./pkg/decision/... ./pkg/ui/... ./cmd/...` — **includes the new `pkg/ui` auth tests and the new `cmd` boot test**. |
-| Pack B | `timeout 300 go test -timeout=240s $(go list ./... \| grep -vE 'github\.com/disillusioners/llm-supervisor-proxy/(cmd\|pkg/(proxy\|store\|decision\|ui))(/\|$)')` — **the new `pkg/oauth2` **and `pkg/identity`** land here**; the Pack B package count **grows 35 → 37** (pkg/oauth2 + pkg/identity) — re-measure, never copy the frozen count. **The `(/|$)` suffix is load-bearing.** |
+| Pack B | **the module-anchored complement of Pack A** (every package except `cmd` + `pkg/proxy` + `pkg/store` + `pkg/decision` + `pkg/ui` and their subpackages) — **the copy-pasteable command is the fenced block immediately below this table**: a command written *inside* a table cell needs its regex alternation escaped as `\|`, which ERE reads as a LITERAL pipe and silently widens the selection back to the whole suite (46 packages instead of 37). **the new `pkg/oauth2` **and `pkg/identity`** land here**; the Pack B package count **grows 35 → 37** (pkg/oauth2 + pkg/identity) — re-measure, never copy the frozen count. **The `(/\|$)` suffix is load-bearing** (escaped here only because this cell is a table row — the copy-pasteable form is in the block below). |
 | `make test` | exit 0 except the known quarantine pair (`pkg/mcp` httpbin.org redirect 403s at `handlers_api_test.go:1864/:1904`) — adjudicate as the known third-party failure, identical signature. **`make test` now runs, in order: the six import guards, then `make census-gate` (anti-drift), then `go test ./...`** — the census gate MUST stay green inside the full run. |
 | `go build -o /tmp/llmproxy ./cmd` | exit 0 (the **real** entry; the bare `go build ./cmd` form collides with the `cmd/` directory and exits 1 — use the `-o /tmp/llmproxy` form; the repo-root `test_load.go` stub is a 3.7 MB no-port binary — do not gate on it). `go build ./...` + `go vet ./...` exit 0. |
 | `gofmt` | **ZERO new drift**: `git show <base>:<file> \| gofmt -d` per touched file; the NEW flagged-line set = HEAD flagged set − base flagged set must be **empty**. Run `gofmt -l` on **all** touched `_test.go` (a sweep can silently add whole-file drift). |
@@ -1297,6 +1297,14 @@ internalOAuth2:
 | Boundary diff | `git --no-pager diff --stat $BASE..HEAD -- k8s/ .github/ pkg/store/database/migrations/ pkg/store/database/migrate.go pkg/config/ pkg/proxy/` — the **only** expected entries are under `k8s/` (the chart toggles). `pkg/config/`, `pkg/store/database/migrations/`, `migrate.go`, `pkg/proxy/`, `.github/` ⇒ **0 bytes** (the proxy data plane is untouched by this feature). |
 | `go.mod` / `go.sum` | **zero diff** (D4). |
 | Anti-vacuity | every ADDED test function must show a literal `--- PASS` line in the gate log; the added-name set must equal the expected set exactly (no missing, no unlisted). |
+
+**Pack B — the copy-pasteable package-selection command** (unescaped pipes; a fenced code block needs no escaping, which is exactly why the command lives here and not in the table row above):
+
+```bash
+go list ./... | grep -vE 'github\.com/disillusioners/llm-supervisor-proxy/(cmd|pkg/(proxy|store|decision|ui))(/|$)'
+```
+
+Pack B then runs `timeout 300 go test -timeout=240s` over exactly those packages. **The `(/|$)` end-anchor suffix is load-bearing** — measured at this branch state: dropping it (end-anchor-only) widens the selection to 41 packages by leaking Pack A's subpackages (`pkg/proxy/normalizers`, `pkg/proxy/token`, `pkg/proxy/translator`, `pkg/store/database`); the module prefix is currently redundant (the repo-relative form also selects 37) but is retained per house norms. **Expected Pack B count at this branch state: 37 packages** (46 total − 9 Pack A packages) — re-measure, never copy the frozen count.
 
 ### 9.5 Acceptance criteria (Phase 1 is done when ALL hold)
 
@@ -1454,7 +1462,7 @@ Phase 1 is **DONE** when:
 | 6 | `crypto.InitEncryption` is a `sync.Once` singleton bound to `INTERNAL_ENCRYPTION_KEY`, passthrough when unset ⇒ the OAuth2 cookie key needs its **own** initialization | `pkg/crypto/encryption.go:17`, `:52-95`, `:99`, `:130`, `:179` |
 | 7 | `go.mod` has **zero** OIDC/JWT/JOSE dependencies; the offline cache has `golang.org/x/oauth2@v0.35.0` (client-side only) and no JWT verifier ⇒ **stdlib-only** design | `go.mod:1-30` |
 | 8 | The FE is Preact 10.19 + Vite 5.1 (`outDir: '../static'`, `base: '/ui/'`) + Vitest 3.2.7 (happy-dom) with a frozen `tsc` baseline of **18 errors / 9 files** | `pkg/ui/frontend/package.json`, `vite.config.ts`, `vitest.config.ts`, `tsc-baseline.txt` |
-| 9 | `apiFetch` + **22** direct `fetch(` sites across `useApi.ts` (21) and `ModelForm.tsx` (1) | `pkg/ui/frontend/src/hooks/useApi.ts:26,96,242,286,434,545,649,741,782,882,952,1019,1035,1049,1063,1114,1127,1147,1164,1187,1211`; `components/config/ModelForm.tsx:461` |
+| 9 | `apiFetch` + **22** direct `fetch(` sites across `useApi.ts` (21) and `ModelForm.tsx` (1) | `pkg/ui/frontend/src/hooks/useApi.ts:26,96,242,286,434,545,649,741,782,882,952,1019,1035,1049,1063,1114,1127,1147,1164,1187,1211`; `components/config/ModelForm.tsx:462` |
 | 10 | `new EventSource('/fe/api/events')` with an exponential-backoff reconnect loop that never terminates on a CLOSED source (⇒ a 401 would loop forever) | `pkg/ui/frontend/src/hooks/useEvents.ts:34`, `:51-78` |
 | 11 | The header's right-hand block (version / RAM / status / settings) — the badge + logout slot | `pkg/ui/frontend/src/components/Header.tsx:44-78` |
 | 12 | The Helm chart: the ingress `oauth2-proxy` Deployment + Service (`quay.io/oauth2-proxy/oauth2-proxy:v7.6.0`, issuer `https://door.daoduc.org`, `--email-domain=*`, `--cookie-expire=24h`, `secretRef: oauth2-proxy-secret`), the nginx auth annotations, the `/oauth2` → oauth2-proxy public path, and the app's `env:` block | `k8s/templates/oauth2-proxy-deployment.yaml:1-47`, `k8s/templates/ingress-protected.yaml:14-16`, `k8s/templates/ingress-public.yaml:29-42`, `k8s/templates/deployment.yaml:36-58`, `k8s/values.yaml:20-54`, `k8s/secrets-example.yaml:12-20` |
