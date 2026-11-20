@@ -489,3 +489,45 @@ func TestImggenAuthz_UnknownID_404_RegardlessOfGrants(t *testing.T) {
 		t.Fatalf("status = %d, want 404 (unknown id, regardless of grants); body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---------- PD-9: the 403 quotes the CLIENT string, not the resolved id ----------
+
+// TestImggenAuthz_ClaimedID_403QuotesClientString is the PD-9 mirror pin
+// that T1 alone cannot make: T1's client string equals the group id, so
+// it cannot distinguish the two. Here a CLAIMED id ("claim-alias") is
+// resolved claims-first INTO the group arm (a custom resolver maps it to
+// the canonical group row), while the token grants only an unrelated
+// model. ARM#1 authorizes the RESOLVED group id (img-group) but the 403
+// must quote the CLIENT string (claim-alias) — the canonical id never
+// appears in the body. Mirrors pkg/decision/group.go:130-138 / T2.16.
+func TestImggenAuthz_ClaimedID_403QuotesClientString(t *testing.T) {
+	env, _, _ := newAuthzGroupEnv(t)
+	setGrants(env, []string{"some-other-model"}, nil)
+
+	// Simulate the claims-first resolve: the client string resolves to
+	// the canonical group row (which is what the arm authorizes).
+	env.handler.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+		if id != "claim-alias" {
+			return nil, false
+		}
+		for i := range env.stub.rows {
+			if env.stub.rows[i].ID == "img-group" {
+				row := env.stub.rows[i]
+				return &row, true
+			}
+		}
+		return nil, false
+	})
+
+	rec := env.post(`{"model":"claim-alias","prompt":"x"}`)
+
+	assertImggen403Bytes(t, rec, "claim-alias") // the CLIENT string
+	if strings.Contains(rec.Body.String(), "img-group") {
+		t.Errorf("the 403 body leaks the canonical resolved id img-group (%s) — only the client string may appear", rec.Body.String())
+	}
+	evt := findEvent(env.events(), "model_not_allowed")
+	if evt == nil || evt["model"] != "claim-alias" {
+		t.Errorf("event model = %v, want the CLIENT string claim-alias", evt["model"])
+	}
+	assertZeroEngineStateAfter403(t, env)
+}
