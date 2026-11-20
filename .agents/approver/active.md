@@ -1,20 +1,14 @@
-Current Plan: internal-oauth2 (dormant-by-default internal OAuth2 authentication + documented per-host cutover off the external oauth2-proxy edge gate — plan approval)
-Tracking File: internal-oauth2-tracking.md
-Iteration: 003
-Status: ESCALATED
-Mode: Plan Approval (plan-approval) — iter 003: 2 partitioned workers (plan-overview+phase1-plan / plan-overview+phase2-switch with cross-doc reference resolution); corpus = plan-overview.md 256L + phase1-plan.md 1474L + phase2-switch-plan.md 1240L (2970L); prior modes (iter 001 = 3 partitioned workers, iter 002 = 2 partitioned workers) recorded in tracking file; supporting refs architecture-recommendation.md + architecture-decision-record.md consulted, not under approval
-Worktree: /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-internal-oauth2 @ 92c4234 (branch feature/internal-oauth2, base origin/latest 92c4234)
-Last Updated: 2026-11-19 (iteration 003 REJECTED — 4 blocking, each a NEW defect class in EXECUTABLE artifacts: (1) phase1 §5.7/§6.2/§9.1 route-census citation range pkg/ui/server.go:193-246 omits /ui/ (:164) and / (:184) + mcp RegisterProxyHandlers; (2) phase2 §3.2.2 step b L335 render assertion greps Envoy "value: /oauth2" but daoduc renders nginx "path: /oauth2" → false FAIL + exit 1 on a correct overlap render; (3) phase2 §4.5.3 steps 1-2 L838-847 kubectl apply overwrites the spec.strategy=Recreate patch with the manifest RollingUpdate/maxSurge 1 → defeats AR-53 no-two-pod-straddle on the PRIMARY host; (4) phase2 §3.3 L373-374 vs §6 L1137-1138 overlap probe expectations self-contradictory + P-E expects 200+app cookie on class-5 /fe/api/models (401 JSON) → a correct 401 = STOP before D3. All 14 iter-001/002 blockers verified landed; these 4 are new-class. Max iterations reached (3) — ESCALATED to Leader.)
-Final Verdict: REJECTED x3 (001, 002, 003) — max iterations reached (3), escalated to Leader 2026-11-19. Unresolved (iteration 003, all executable-artifact defects): P2 kubectl-apply overwrites the Recreate strategy patch (ensem/primary, AR-53 voided); P1 daoduc render assertion greps the wrong ingress form (D1 false-fail); P3 overlap probe expectations contradict each other and the app gating contract (false STOP before D3); P1 phase1 route-census citation range omits /ui/ and / (browser-facing gated routes).
+Current Plan: imggen-groups (image-gen model groups via shared kind='group' lane widening + Text/ImageGen FE sub-tab restructure)
+Tracking File: imggen-groups-tracking.md
+Iteration: 003 (final)
+Status: APPROVED
+Mode: Plan Approval (plan-approval) — iter 001: 2 section-parallel workers; iter 002: 1 fix-verification worker (claims C1-C6); iter 003: 1 final fix-verification worker (E1-E6) (backend: overview+phase1+decisions / FE+ship: overview+phase2+phase3+phase4+decisions); corpus 1900L (overview 101 / phase1 748 / phase2 337 / phase3 313 / phase4 210 / decisions 191)
+Worktree: /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-imggen-groups @ 5cf1ecd (branch feature/imggen-groups-text-subtabs, base origin/latest 5cf1ecd)
+Final Verdict: APPROVED @ iteration 003 (2026-11-20) — 0 blocking outstanding; residual non-blocking observations recorded in imggen-groups-tracking.md
+Last Updated: 2026-11-20 (iteration 003 APPROVED — all 3 plan-overview.md edits verified on disk: :55 D-12 = :43 DECISION-lane, :36 = absolute freeze + decision-lane delta, :24 = 315; whole-file sweep zero stale hits; register↔phase3 §4.4 full agreement; no new defects. Both prior blockers verified fixed across iters 002+003.)
+
+Superseded entry: internal-oauth2 (REJECTED x3, ESCALATED 2026-11-19 — see internal-oauth2-tracking.md)
+
 Superseded entry: token-authz-allowed-groups (REJECTED x3, ESCALATED 2026-11-19 — see token-authz-allowed-groups-tracking.md)
 
-Current Plan: token-authz-allowed-groups (AUTH COMMISSION — Token Permission Model: allowed_groups token field + per-layer exclusion + decision-group allowlist fix)
-Tracking File: token-authz-allowed-groups-tracking.md
-Iteration: 003 (final)
-Status: ESCALATED
-Mode: Plan Approval — iter 001: 2 workers, REJECTED (6 blocking); iter 002 (frozen c7efdccf): REJECTED (5 blocking; decision-side APPROVED); iter 003 (frozen cb2820c0, gen 7): plan-approval REJECTED (3 blocking, all documentation-contract; landed code verified correct on each) + decision-approval APPROVED (0 blocking) ⇒ REJECTED
-Worktree: /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-token-authz @ 81e8788 (16 commits, 91 files +9623/−890; landed code worker-verified: freeze reproduces, 112-pin ledger literally true, security mechanisms landed, build green); corpus frozen cb2820c0736b4265d5feb4a84a0c3eef2133553d85731e04fd5261c8a498b4a6 (untracked)
-Final Verdict: REJECTED x3 (001, 002, 003) — max iterations reached (3), escalated to Leader 2026-11-19.
-Unresolved (iteration 003, all doc-contract): I3-1 fail-open scanner semantics restated at plan.md:359/phase1-plan.md:97/adr:441 (contradicts landed INVALID⇒DENY-ALL); I3-2 decisions.md:110-111 Q1 rollback story omits reverse-repartition-first (contradicts §7.1 MUST); I3-3 §12 FE contract describes the rejected one-picker design (ledger #81 + landed FE = two per-axis pickers).
-Last Updated: 2026-11-19 (iteration-003 verdict, ESCALATED)
 Superseded entry: decision-groups (REJECTED x3, ESCALATED 2026-11-16 — see decision-groups-tracking.md; prior supersede chain: load-balance-groups APPROVED 2026-10-16)
