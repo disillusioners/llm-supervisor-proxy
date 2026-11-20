@@ -28,11 +28,18 @@ const HARDCODED_INTERNAL = true as const;
 const SHADOW_TARGET_MISSING: Record<GroupLane, string> = {
   chat: 'does not exist (must reference an existing chat-kind model)',
   decision: 'does not exist (must reference an existing decision-kind model)',
+  'image-gen': 'does not exist (must reference an existing image-gen-kind model)',
 };
 
 const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
   chat: 'Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.',
   decision: 'Decision group — kind: group · internal: true · backup-only members are recourse-tier candidates (served only after every default member has failed). No fallback chain and no racing on this lane.',
+  // The image-gen lane (imggen-groups) states what the lane ACTUALLY
+  // builds: the members fail over across the group and each member
+  // rotates through its own credentials. No fallback chain and no
+  // racing on this lane.
+  'image-gen':
+    'Image-gen group — kind: group · internal: true · backup-only members are recourse-tier candidates (served only after every default member has failed). Members fail over across the group, each rotating through its own credentials. No fallback chain and no racing on this lane.',
 };
 
 // The lane-consistency block message — it NAMES THE OTHER SURFACE so the
@@ -41,6 +48,11 @@ const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
 const LANE_GUARD_MESSAGE: Record<GroupLane, string> = {
   chat: 'This is a decision group — edit it under Decision Models → Group.',
   decision: 'This is a chat group — edit it under Group Models.',
+  // The image-gen surface can host EITHER of the two older lanes (the
+  // lane is inferred from the members), so the static string routes
+  // BOTH homes.
+  'image-gen':
+    'This is a chat or decision group — edit it under Models → Group (chat) or Decision Models → Group (decision).',
 };
 
 // Wire payload emitted by the form on submit (mirrors the BE Model DTO

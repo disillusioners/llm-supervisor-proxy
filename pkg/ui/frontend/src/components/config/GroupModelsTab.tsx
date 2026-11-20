@@ -59,6 +59,15 @@ const TOAST: Record<GroupLane, Record<'added' | 'updated' | 'deleted' | 'toggled
     deleted: 'Decision group deleted successfully',
     toggled: 'Decision group toggled successfully',
   },
+  // The image-gen lane (imggen-groups): the group's members are
+  // image-gen-kind models and the group is served by
+  // /v1/image_generation only.
+  'image-gen': {
+    added: 'Image-gen group added successfully',
+    updated: 'Image-gen group updated successfully',
+    deleted: 'Image-gen group deleted successfully',
+    toggled: 'Image-gen group toggled successfully',
+  },
 };
 
 // Lane-aware chrome copy (heading / CTA / empty state / row badge).
@@ -69,16 +78,19 @@ const TOAST: Record<GroupLane, Record<'added' | 'updated' | 'deleted' | 'toggled
 const HEADING: Record<GroupLane, string> = {
   chat: 'Group Models',
   decision: 'Decision Groups',
+  'image-gen': 'Image-Gen Groups',
 };
 
 const CTA: Record<GroupLane, string> = {
   chat: 'Add Group Model',
   decision: 'Add Decision Group',
+  'image-gen': 'Add Image-Gen Group',
 };
 
 const EMPTY_TITLE: Record<GroupLane, string> = {
   chat: 'No group models configured',
   decision: 'No decision groups configured',
+  'image-gen': 'No image-gen groups configured',
 };
 
 const EMPTY_BODY: Record<GroupLane, string> = {
@@ -88,11 +100,25 @@ const EMPTY_BODY: Record<GroupLane, string> = {
   // attempts WITHIN a member.
   decision:
     'Members are picked by weight per request — there is no per-conversation pinning on the decision lane; resilience is per-credential attempts within a member; a fallback chain has no equivalent concept on this lane (deliberately not built).',
+  // The image-gen lane (imggen-groups) promises ONLY what the lane
+  // builds: a weighted pick per request, a failover walk across the
+  // members, and per-credential rotation WITHIN a member. NO race
+  // engine, NO fallback chain, NO sticky pinning (there is no
+  // conversation key on this lane).
+  'image-gen':
+    'Members are picked by weight per request — there is no per-conversation pinning on the image-gen lane; a member failure advances the walk to the next member, and each member rotates through its own credentials first; a fallback chain has no equivalent concept on this lane (deliberately not built).',
 };
 
+// The badge glyph per lane. The decision lane's badge is 🎯 (the app's
+// established decision glyph), NOT 🔀: the shuffle glyph would promise a
+// racing / load-balancing engine this lane does not have (ADR-8 /
+// ADR-11 OQ-3 option (a) — the decision lane has no hedge/race engine).
+// The image-gen lane uses the app's established image glyph 🖼️ for the
+// same reason — the image-gen lane has no race chain either.
 const BADGE_GLYPH: Record<GroupLane, string> = {
   chat: '🔀',
   decision: '🎯',
+  'image-gen': '🖼️',
 };
 
 export function GroupModelsTab({

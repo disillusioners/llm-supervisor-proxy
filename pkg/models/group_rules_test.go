@@ -162,11 +162,21 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 			wantErrSub: "group-as-member is forbidden",
 		},
 		{
+			// G3 member-kind rule — WIDENED by the imggen-groups
+			// commission (§3.8 "G3 MODIFIED-with-justification"): a
+			// member must be a model of the GROUP'S LANE kind (chat,
+			// decision or image-gen — MemberLane decides). The
+			// image-gen member is therefore LEGAL in a group of its own
+			// lane (pinned by the image-gen parity test in pkg/ui); the
+			// rejection this case still pins is the member whose kind
+			// belongs to NO lane at all — worded with the group's lane
+			// (the chat wording, byte-identical to the historical text).
+			// The case ID is kept verbatim (the plan ledger names it).
 			name: "G3_member_must_be_chat_kind",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}}
-				*coll = append(*coll, img)
-				m.Members = []GroupMember{{ModelID: "img-model", Weight: 1}}
+				nolane := ModelConfig{ID: "nolane-model", Name: "NoLane", Enabled: true, Kind: "mystery-kind", Internal: true, InternalModel: "mystery-01"}
+				*coll = append(*coll, nolane)
+				m.Members = []GroupMember{{ModelID: "nolane-model", Weight: 1}}
 			},
 			wantErrSub: "must be a chat-kind model",
 		},
@@ -516,7 +526,7 @@ func TestValidateGroupMembers_MixedKindMembers_Rejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("mixed-kind group must be rejected")
 	}
-	if !strings.Contains(err.Error(), "members must all share one kind (chat or decision)") {
+	if !strings.Contains(err.Error(), "members must all share one kind (chat, decision or image-gen)") {
 		t.Errorf("mixed-kind error %q must carry the dedicated homogeneity message", err.Error())
 	}
 	// The message names the offending member.
@@ -552,8 +562,14 @@ func TestValidateGroupMembers_LegacyEmptyKind_IsChatLane(t *testing.T) {
 	if lane, ok := MemberLane(KindDecision); !ok || lane != GroupLaneDecision {
 		t.Fatalf("MemberLane(decision) = (%q, %v), want (decision, true)", lane, ok)
 	}
-	if _, ok := MemberLane(KindImageGen); ok {
-		t.Fatal("MemberLane(image-gen) must not be a valid lane")
+	// imggen-groups commission (ADR-19 / D-3) — the image-gen kind IS
+	// a lane now, so this pin FLIPS DELIBERATELY, IN PLACE (the test
+	// NAME is untouched: it carries the legacy-""-is-chat scope, and a
+	// rename is FORBIDDEN by the W-7 ledger). The dedicated lane pin
+	// lives in TestMemberLane_ImageGen_IsImageGenLane; the MIXED-lane
+	// pins live in TestUnanimousGroupLane_MixedImageGenLane_Unrepresentable.
+	if lane, ok := MemberLane(KindImageGen); !ok || lane != GroupLaneImageGen {
+		t.Fatalf("MemberLane(image-gen) = (%q, %v), want (image-gen, true)", lane, ok)
 	}
 	if lane, ok := UnanimousGroupLane([]string{KindChat, ""}); !ok || lane != GroupLaneChat {
 		t.Fatalf("UnanimousGroupLane([chat,\"\"]) = (%q, %v), want (chat, true)", lane, ok)
@@ -570,6 +586,66 @@ func TestValidateGroupMembers_LegacyEmptyKind_IsChatLane(t *testing.T) {
 	group.Members = []GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "legacy", Weight: 1}}
 	if err := ValidateGroupMembers(&group, collection); err == nil {
 		t.Fatal("a legacy \"\" member must not join a decision group")
+	}
+}
+
+// TestMemberLane_ImageGen_IsImageGenLane — the imggen-groups lane
+// widening (ADR-19 / D-3): the image-gen kind is a LANE of its own,
+// exactly like chat and decision.
+//
+// The lane is INFERRED from the members and never persisted, so the
+// vocabulary itself is the load-bearing change: a member whose kind is
+// image-gen votes for the image-gen lane (it used to vote for NO lane
+// and was ignored as unservable).
+func TestMemberLane_ImageGen_IsImageGenLane(t *testing.T) {
+	if lane, ok := MemberLane(KindImageGen); !ok || lane != GroupLaneImageGen {
+		t.Fatalf("MemberLane(image-gen) = (%q, %v), want (image-gen, true)", lane, ok)
+	}
+	// A group of image-gen members is an IMAGE-GEN group (the unanimous
+	// fold returns the single lane the members share).
+	if lane, ok := UnanimousGroupLane([]string{KindImageGen}); !ok || lane != GroupLaneImageGen {
+		t.Fatalf("UnanimousGroupLane([image-gen]) = (%q, %v), want (image-gen, true)", lane, ok)
+	}
+	if lane, ok := UnanimousGroupLane([]string{KindImageGen, KindImageGen}); !ok || lane != GroupLaneImageGen {
+		t.Fatalf("UnanimousGroupLane([image-gen,image-gen]) = (%q, %v), want (image-gen, true)", lane, ok)
+	}
+	// The lane ORDER is part of the contract: chat, decision, image-gen.
+	lanes := GroupLanesOf([]string{KindImageGen, KindDecision, KindChat})
+	want := []GroupLane{GroupLaneChat, GroupLaneDecision, GroupLaneImageGen}
+	if len(lanes) != len(want) {
+		t.Fatalf("GroupLanesOf([image-gen,decision,chat]) = %v, want %v", lanes, want)
+	}
+	for i := range want {
+		if lanes[i] != want[i] {
+			t.Fatalf("GroupLanesOf([image-gen,decision,chat]) = %v, want %v (the stable lane order is part of the contract)", lanes, want)
+		}
+	}
+}
+
+// TestUnanimousGroupLane_MixedImageGenLane_Unrepresentable — a MIXED
+// lane set (an image-gen member next to a chat or a decision member)
+// has NO unanimous lane: the group is unrepresentable at write time
+// and fails closed at request time (never misrouted).
+//
+// This is the mirror of the server fold's answer for the same inputs —
+// the FE twin (pkg/ui/frontend/src/components/config/groupLane.ts) must
+// answer null for exactly these sets (ADR-19: the two must not ship
+// different answers).
+func TestUnanimousGroupLane_MixedImageGenLane_Unrepresentable(t *testing.T) {
+	for _, kinds := range [][]string{
+		{KindChat, KindImageGen},
+		{KindImageGen, KindChat},
+		{KindDecision, KindImageGen},
+		{KindImageGen, KindDecision},
+	} {
+		if lane, ok := UnanimousGroupLane(kinds); ok {
+			t.Errorf("UnanimousGroupLane(%v) = (%q, true), want (ok=false) — a mixed lane set is unrepresentable", kinds, lane)
+		}
+		// The mixed set is still two DISTINCT lanes in the fold (the
+		// mixed-ness is what makes it unrepresentable).
+		if lanes := GroupLanesOf(kinds); len(lanes) != 2 {
+			t.Errorf("GroupLanesOf(%v) = %v, want exactly two lanes (the mixed set)", kinds, lanes)
+		}
 	}
 }
 

@@ -1220,11 +1220,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model, not a group`, newModel.ShadowModelID, groupLane))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference %s %s-kind model, not a group`, newModel.ShadowModelID, models.LaneArticle(string(groupLane)), groupLane))
 					return
 				}
 				if shadowLane, ok := models.MemberLane(shadowTarget.Kind); !ok || shadowLane != groupLane {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model (got kind %q)`, newModel.ShadowModelID, groupLane, shadowTarget.Kind))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference %s %s-kind model (got kind %q)`, newModel.ShadowModelID, models.LaneArticle(string(groupLane)), groupLane, shadowTarget.Kind))
 					return
 				}
 				// G8 uniqueness scan — no OTHER enabled group claims
@@ -1775,11 +1775,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model, not a group`, updatedModel.ShadowModelID, groupLane))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference %s %s-kind model, not a group`, updatedModel.ShadowModelID, models.LaneArticle(string(groupLane)), groupLane))
 					return
 				}
 				if shadowLane, ok := models.MemberLane(shadowTarget.Kind); !ok || shadowLane != groupLane {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model (got kind %q)`, updatedModel.ShadowModelID, groupLane, shadowTarget.Kind))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference %s %s-kind model (got kind %q)`, updatedModel.ShadowModelID, models.LaneArticle(string(groupLane)), groupLane, shadowTarget.Kind))
 					return
 				}
 				// G8 uniqueness scan — no OTHER enabled group claims

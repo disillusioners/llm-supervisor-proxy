@@ -201,14 +201,17 @@ export type DecisionModel = Model & { kind: 'decision' };
 // GroupLane — which lane a group (and therefore each of its members)
 // belongs to. 'chat' is the legacy default lane: a model row with an
 // absent / "" kind IS chat (the server's legacy-kind normalisation).
-// 'decision' is the decision-model lane.
+// 'decision' is the decision-model lane. 'image-gen' is the
+// image-generation lane (the imggen-groups commission — the lane
+// vocabulary mirrors the server's models.GroupLane constants
+// literally, so the lane VALUE equals the model-kind value).
 //
 // Additive only — no existing type changes. The lane is NEVER
 // persisted and NEVER travels on the wire (ruling D-2): it is
 // INFERRED at display time from the group's current member rows (see
 // components/config/groupLane.ts), and the server stays authoritative
 // on every write.
-export type GroupLane = 'chat' | 'decision';
+export type GroupLane = 'chat' | 'decision' | 'image-gen';
 
 // GroupMember — one (model, weight) entry of a group's flat member list
 // (load-balance-groups / Round-2 membership pivot). JSON tags mirror the

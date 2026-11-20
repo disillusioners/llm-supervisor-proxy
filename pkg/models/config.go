@@ -120,12 +120,13 @@ const (
 	// triples). A group row carries a flat Members list
 	// ([]GroupMember{ModelID, Weight}, 1..16 entries, each an
 	// existing model ID of the group's LANE — chat-kind for a chat
-	// group, decision-kind for a decision group) and an optional
-	// single ID-space claim (ShadowModelID). Groups are served by
-	// the lane their members belong to (chat or decision — the lane
-	// is inferred from the members, never persisted): one thin layer
-	// rewrites the request's modelList to the sticky-picked member,
-	// after which the member's existing pipeline runs unchanged.
+	// group, decision-kind for a decision group, image-gen-kind for an
+	// image-gen group) and an optional single ID-space claim
+	// (ShadowModelID). Groups are served by the lane their members
+	// belong to (chat, decision or image-gen — the lane is inferred
+	// from the members, never persisted): one thin layer rewrites the
+	// request's modelList to the sticky-picked member, after which the
+	// member's existing pipeline runs unchanged.
 	// Groups carry no credentials, no fallback_chain, no
 	// secondary_upstream_model, and no peak_hour_* or
 	// release_stream_chunk_deadline (G6).

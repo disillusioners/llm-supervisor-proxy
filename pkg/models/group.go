@@ -110,13 +110,14 @@ func validateGroupRules(m *ModelConfig, internalProvider string) error {
 // (ModelsConfig.Validate group branch), and the pkg/ui POST/PUT
 // inline mirrors' parity reference (kind_rules_parity_test.go).
 //
-// G3 kind rule (decision-groups commission): a group's members must
-// all share ONE normalized kind — chat (or the legacy "" ⇒ chat) OR
-// decision — and the group's shadow target must belong to that same
+// G3 kind rule (decision-groups commission, widened by the
+// imggen-groups commission): a group's members must all share ONE
+// normalized kind — chat (or the legacy "" ⇒ chat), decision OR
+// image-gen — and the group's shadow target must belong to that same
 // lane. A mixed-kind group is rejected with a dedicated message (the
-// lane is never persisted; it is inferred from the members). Image-gen
-// and group kinds are not valid members in either lane, and groups
-// are rejected with the explicit G5 flat-membership message.
+// lane is never persisted; it is inferred from the members). The group
+// kind and any unknown kind are not valid members in any lane, and
+// groups are rejected with the explicit G5 flat-membership message.
 //
 // The member-kind and shadow-target errors are worded with the
 // group's LANE; the CHAT wording is byte-identical to the historical
@@ -193,11 +194,12 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 		memberRows = append(memberRows, target)
 	}
 
-	// G3 kind rule — the LANE fold (decision-groups commission).
+	// G3 kind rule — the LANE fold (decision-groups commission,
+	// widened by the imggen-groups commission).
 	// A group's members must all share one normalized kind (chat or
-	// the legacy "" ⇒ chat, OR decision): a mixed-kind group is
-	// unrepresentable at write time, because the request-time lane
-	// inference (unanimity over the CURRENT member rows) would be
+	// the legacy "" ⇒ chat, OR decision, OR image-gen): a mixed-kind
+	// group is unrepresentable at write time, because the request-time
+	// lane inference (unanimity over the CURRENT member rows) would be
 	// ambiguous and the group could then be served on the wrong
 	// lane. The error is worded with the group's lane — the CHAT
 	// wording stays byte-identical to the historical text (the
@@ -222,11 +224,11 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 		// Unreachable in practice (len(lanes) > 1 implies a
 		// disagreeing member exists) — kept as a defensive fallback
 		// so the function can never fall through without an error.
-		return fmt.Errorf("model %s: kind %q members must all share one kind (chat or decision)", m.ID, KindGroup)
+		return fmt.Errorf("model %s: kind %q members must all share one kind (chat, decision or image-gen)", m.ID, KindGroup)
 	}
 	// Per-member kind check (now lane-worded). An invalid kind (a
-	// kind that belongs to no lane — image-gen, group, unknown) is
-	// rejected: the member cannot serve either lane.
+	// kind that belongs to no lane — group, unknown) is rejected: the
+	// member cannot serve any lane.
 	for idx, target := range memberRows {
 		if _, ok := MemberLane(target.Kind); ok {
 			continue
@@ -236,19 +238,21 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 
 	// G8 collection half — shadow-target integrity + uniqueness.
 	// The shadow target must belong to the GROUP'S LANE (the
-	// decision-groups commission): a chat group claims a chat-kind
-	// row, a decision group claims a decision-kind row. The CHAT
-	// wording stays byte-identical to the historical text.
+	// decision-groups commission, widened by the imggen-groups
+	// commission): a chat group claims a chat-kind row, a decision
+	// group claims a decision-kind row, an image-gen group claims an
+	// image-gen-kind row. The CHAT wording stays byte-identical to the
+	// historical text.
 	if m.ShadowModelID != "" {
 		target, exists := byID[m.ShadowModelID]
 		if !exists {
 			return fmt.Errorf("model %s: kind %q shadow_model_id %q does not exist (must reference an existing %s-kind model)", m.ID, KindGroup, m.ShadowModelID, groupLane)
 		}
 		if target.Kind == KindGroup {
-			return fmt.Errorf("model %s: kind %q shadow_model_id %q must reference a %s-kind model, not a group", m.ID, KindGroup, m.ShadowModelID, groupLane)
+			return fmt.Errorf("model %s: kind %q shadow_model_id %q must reference %s %s-kind model, not a group", m.ID, KindGroup, m.ShadowModelID, LaneArticle(string(groupLane)), groupLane)
 		}
 		if shadowLane, ok := MemberLane(target.Kind); !ok || shadowLane != groupLane {
-			return fmt.Errorf("model %s: kind %q shadow_model_id %q must reference a %s-kind model (got kind %q)", m.ID, KindGroup, m.ShadowModelID, groupLane, target.Kind)
+			return fmt.Errorf("model %s: kind %q shadow_model_id %q must reference %s %s-kind model (got kind %q)", m.ID, KindGroup, m.ShadowModelID, LaneArticle(string(groupLane)), groupLane, target.Kind)
 		}
 		// Uniqueness scan: no OTHER ENABLED group may claim the
 		// same ID (two disabled claims are inert — claims activate

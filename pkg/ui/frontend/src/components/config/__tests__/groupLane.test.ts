@@ -177,19 +177,14 @@ describe('groupLane — the client-side lane inference (decision-groups, phase 2
     const kindIndex = index({
       'chat-1': 'chat',
       'dec-1': 'decision',
-      'img-1': 'image-gen',
       'grp-1': 'group',
     });
-    // An image-gen member carries NO lane evidence — the server's
-    // models.MemberLane returns ok=false for its kind and
-    // models.GroupLanesOf ignores it (pkg/models/group_lane.go :46-55
-    // and :67-71). The surviving chat member decides.
-    const withImg = makeGroup([
-      { model_id: 'chat-1', weight: 1 },
-      { model_id: 'img-1', weight: 1 },
-    ]);
-    expect(inferGroupLane(withImg, kindIndex)).toBe('chat');
-    // A member that is itself a GROUP row is the same case.
+    // A member that is itself a GROUP row belongs to NO lane — the
+    // server's models.MemberLane returns ok=false for its kind and
+    // models.GroupLanesOf ignores it (pkg/models/group_lane.go :53-62
+    // and :72-94). The surviving members decide.
+    // (The image-gen kind IS a lane since the imggen-groups commission
+    // — it is pinned by E9, not here.)
     const withGroup = makeGroup([
       { model_id: 'dec-1', weight: 1 },
       { model_id: 'grp-1', weight: 1 },
@@ -197,8 +192,8 @@ describe('groupLane — the client-side lane inference (decision-groups, phase 2
     expect(inferGroupLane(withGroup, kindIndex)).toBe('decision');
     // A group whose ONLY member is of no lane has an EMPTY surviving
     // set — no lane is present at all, so the lane is unknown (server
-    // models.UnanimousGroupLane :96-99).
-    const onlyNoLane = makeGroup([{ model_id: 'img-1', weight: 1 }]);
+    // models.UnanimousGroupLane :103-109).
+    const onlyNoLane = makeGroup([{ model_id: 'grp-1', weight: 1 }]);
     expect(inferGroupLane(onlyNoLane, kindIndex)).toBeNull();
 
     // A kind OUTSIDE the vocabulary is the same case: the server's
@@ -242,5 +237,37 @@ describe('groupLane — the client-side lane inference (decision-groups, phase 2
     expect(inferGroupLane(builtMixed, built)).toBe('decision');
     const builtOnlyLegacy = makeGroup([{ model_id: 'legacy-1', weight: 1 }]);
     expect(inferGroupLane(builtOnlyLegacy, built)).toBeNull();
+  });
+
+  it('E9 — an image-gen member votes for the image-gen lane; a mixed image-gen set is undecidable', () => {
+    const kindIndex = index({
+      'chat-1': 'chat',
+      'dec-1': 'decision',
+      'img-1': 'image-gen',
+    });
+    // The image-gen kind IS a lane (the imggen-groups commission — the
+    // FE twin of the server's models.MemberLane image-gen arm, ADR-19:
+    // the two folds must not ship different answers). A group of
+    // image-gen members is an IMAGE-GEN group, exactly as the server
+    // answers for the same members.
+    const imgGroup = makeGroup([{ model_id: 'img-1', weight: 1 }]);
+    expect(inferGroupLane(imgGroup, kindIndex)).toBe('image-gen');
+
+    // A MIXED surviving set (chat + image-gen, decision + image-gen) is
+    // undecidable: the server's fold yields two valid lanes and no
+    // unanimity (server models.UnanimousGroupLane :103-109 ⇒ ok=false).
+    // The FE must answer null for EXACTLY the inputs the server
+    // refuses — a group that mixes lanes is unrepresentable at write
+    // time and fails closed at request time.
+    const chatAndImg = makeGroup([
+      { model_id: 'chat-1', weight: 1 },
+      { model_id: 'img-1', weight: 1 },
+    ]);
+    expect(inferGroupLane(chatAndImg, kindIndex)).toBeNull();
+    const decAndImg = makeGroup([
+      { model_id: 'dec-1', weight: 1 },
+      { model_id: 'img-1', weight: 1 },
+    ]);
+    expect(inferGroupLane(decAndImg, kindIndex)).toBeNull();
   });
 });

@@ -512,6 +512,10 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 		name   string
 		substr string
 		mutate func(*models.ModelConfig)
+		// seed seeds EXTRA fixture rows for this case (the shared
+		// addGroupMembers fixture stays untouched — a case that needs
+		// its own member row declares it here).
+		seed func(*modelTestServer)
 	}
 
 	cases := []ruleCase{
@@ -568,10 +572,26 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 			},
 		},
 		{
+			// G3 member-kind rule — WIDENED by the imggen-groups
+			// commission (§3.8 "G3 MODIFIED-with-justification"): a
+			// member must be a model of the GROUP'S LANE kind (chat,
+			// decision or image-gen — MemberLane decides). The
+			// image-gen member is therefore LEGAL in a group of its own
+			// lane (pinned by TestKindRules_Parity_Group_ImageGenLane);
+			// the rejection this case still pins is the member whose
+			// kind belongs to NO lane at all — worded with the group's
+			// lane (the chat wording, byte-identical to the historical
+			// text). The case ID is kept verbatim (the plan ledger
+			// names it).
 			name:   "G3_member_must_be_chat_kind",
 			substr: "must be a chat-kind model",
+			seed: func(ts *modelTestServer) {
+				ts.mockModels.AddModel(models.ModelConfig{
+					ID: "member-nolane", Name: "Member NoLane", Enabled: true, Kind: "mystery-kind",
+				})
+			},
 			mutate: func(m *models.ModelConfig) {
-				m.Members = []models.GroupMember{{ModelID: "member-img", Weight: 1}}
+				m.Members = []models.GroupMember{{ModelID: "member-nolane", Weight: 1}}
 			},
 		},
 		{
@@ -625,6 +645,9 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := newModelTestServer()
 			addGroupMembers(ts)
+			if tc.seed != nil {
+				tc.seed(ts)
+			}
 			srv := ts.serve()
 			defer srv.Close()
 
@@ -831,7 +854,7 @@ func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
 		},
 		{
 			name:   "chat_member_in_decision_group_rejected",
-			substr: "members must all share one kind (chat or decision)",
+			substr: "members must all share one kind (chat, decision or image-gen)",
 			group: models.ModelConfig{
 				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
 				Kind: models.KindGroup, Internal: true,
@@ -840,7 +863,7 @@ func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
 		},
 		{
 			name:   "decision_member_in_chat_group_rejected",
-			substr: "members must all share one kind (chat or decision)",
+			substr: "members must all share one kind (chat, decision or image-gen)",
 			group: models.ModelConfig{
 				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
 				Kind: models.KindGroup, Internal: true,
@@ -987,6 +1010,236 @@ func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
 			"fallback_chain": ["decision-group-1"]
 		}`
 		putStatus, putErr := putDecisionModel(t, putSrv.URL, "chat-with-decision-chain", putBody)
+		if putStatus != http.StatusBadRequest {
+			t.Errorf("PUT: status = %d, want 400; err=%q", putStatus, putErr)
+		} else if !strings.Contains(putErr, chainSubstr) {
+			t.Errorf("PUT: err %q does not contain %q", putErr, chainSubstr)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// imggen-groups commission — the IMAGE-GEN lane rules across the three
+// enforcement sites (helper ≡ POST ≡ PUT, each asserted INDEPENDENTLY —
+// the house multi-site rule-parity discipline).
+//
+// The image-gen fixtures live in their OWN helper (the shared
+// addGroupMembers fixture is NOT touched — no churn in the GET ?kind=
+// tests).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// addImageGenGroupMembers seeds the IMAGE-GEN-lane fixture rows: two
+// image-gen-kind member models (the image-gen provider vocabulary is
+// {minimax, 9router} — the minimax credential qualifies) and one
+// chat-kind model (the mixed-shape row).
+func addImageGenGroupMembers(ts *modelTestServer) {
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "img-member-a", Name: "Image Member A", Enabled: true, Kind: models.KindImageGen,
+		Internal: true, InternalModel: "image-01",
+		Credentials: imgGenTestCreds(),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "img-member-b", Name: "Image Member B", Enabled: true, Kind: models.KindImageGen,
+		Internal: true, InternalModel: "image-02",
+		Credentials: imgGenTestCreds(),
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "chat-member-y", Name: "Chat Member Y", Enabled: true, Kind: models.KindChat,
+	})
+}
+
+// imageGenGroupBase returns a valid IMAGE-GEN-lane group row (two
+// image-gen members, no claim).
+func imageGenGroupBase() models.ModelConfig {
+	return models.ModelConfig{
+		ID:       "image-gen-group-1",
+		Name:     "Image Gen Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "img-member-a", Weight: 1}, {ModelID: "img-member-b", Weight: 2}},
+	}
+}
+
+// TestKindRules_Parity_Group_ImageGenLane — the image-gen-lane rule
+// matrix across helper / POST / PUT.
+//
+// Cases: image-gen members ACCEPTED (the imggen-groups lane widening —
+// the member-kind rule is now "a model of the group's lane kind"); a
+// chat member in an image-gen group rejected; an image-gen member in a
+// chat group rejected; a lane-matched shadow accepted; a lane-mismatched
+// shadow rejected; a chat model whose fallback_chain names an
+// image-gen-lane group rejected (the ValidateFallbackChainLanes arm).
+func TestKindRules_Parity_Group_ImageGenLane(t *testing.T) {
+	type ruleCase struct {
+		name string
+		// substr is the rule phrase the rejection must carry ("" for
+		// the accepted cases).
+		substr string
+		// group is the payload under test.
+		group models.ModelConfig
+		// accepted marks the positive cases.
+		accepted bool
+	}
+
+	cases := []ruleCase{
+		{
+			name:     "image_gen_members_accepted",
+			accepted: true,
+			group:    imageGenGroupBase(),
+		},
+		{
+			name:   "chat_member_in_image_gen_group_rejected",
+			substr: "members must all share one kind (chat, decision or image-gen)",
+			group: models.ModelConfig{
+				ID: "image-gen-group-1", Name: "Image Gen Group One", Enabled: true,
+				Kind: models.KindGroup, Internal: true,
+				Members: []models.GroupMember{{ModelID: "img-member-a", Weight: 1}, {ModelID: "chat-member-y", Weight: 1}},
+			},
+		},
+		{
+			name:   "image_gen_member_in_chat_group_rejected",
+			substr: "members must all share one kind (chat, decision or image-gen)",
+			group: models.ModelConfig{
+				ID: "image-gen-group-1", Name: "Image Gen Group One", Enabled: true,
+				Kind: models.KindGroup, Internal: true,
+				Members: []models.GroupMember{{ModelID: "chat-member-y", Weight: 1}, {ModelID: "img-member-a", Weight: 1}},
+			},
+		},
+		{
+			name:     "lane_matched_shadow_accepted",
+			accepted: true,
+			group: func() models.ModelConfig {
+				g := imageGenGroupBase()
+				g.ShadowModelID = "img-member-a"
+				return g
+			}(),
+		},
+		{
+			name:   "lane_mismatched_shadow_rejected",
+			substr: "must reference an image-gen-kind model (got kind \"chat\")",
+			group: func() models.ModelConfig {
+				g := imageGenGroupBase()
+				g.ShadowModelID = "chat-member-y"
+				return g
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each arm runs on its OWN stack: an accepted POST creates
+			// a real row (and may claim the shadow target), which would
+			// otherwise contaminate the PUT arm's G8 uniqueness scan.
+			newStack := func() (*modelTestServer, *httptest.Server) {
+				ts := newModelTestServer()
+				addDecisionCreds(ts)
+				addImageGenGroupMembers(ts)
+				return ts, ts.serve()
+			}
+
+			// --- Helper reference ---
+			helperTS, _ := newStack()
+			helperErr := validateGroupRulesCaller(tc.group, helperTS.mockModels.GetModels())
+			if tc.accepted {
+				if helperErr != "" {
+					t.Fatalf("helper rejected the valid image-gen-lane group %q: %v", tc.name, helperErr)
+				}
+			} else {
+				if helperErr == "" {
+					t.Fatalf("helper returned nil err for the broken image-gen-lane group %q — the rule under test did not fire", tc.name)
+				}
+				if !strings.Contains(helperErr, tc.substr) {
+					t.Fatalf("helper err %q does not contain expected rule phrase %q — models group validators may have drifted", helperErr, tc.substr)
+				}
+			}
+
+			// --- POST inline mirror ---
+			_, postSrv := newStack()
+			defer postSrv.Close()
+			postStatus, postErrSubstr := postDecisionModel(t, postSrv.URL, marshalGroupModel(tc.group))
+			if tc.accepted {
+				if postStatus != http.StatusCreated {
+					t.Errorf("POST inline mirror REJECTED the valid image-gen-lane group (status=%d, err=%q) — server.go POST group arm has drifted for %s", postStatus, postErrSubstr, tc.name)
+				}
+			} else {
+				if postStatus != http.StatusBadRequest {
+					t.Errorf("POST inline mirror ACCEPTED the broken image-gen-lane group (status=%d, err=%q) — server.go POST group arm has drifted for %s; must reject with 400", postStatus, postErrSubstr, tc.name)
+				} else if !strings.Contains(postErrSubstr, tc.substr) {
+					t.Errorf("POST inline err %q does not contain expected rule phrase %q — server.go POST group arm has drifted", postErrSubstr, tc.substr)
+				}
+			}
+
+			// --- PUT inline mirror (seed the row first) ---
+			putTS, putSrv := newStack()
+			defer putSrv.Close()
+			seed := imageGenGroupBase()
+			seed.ID = "image-gen-group-1"
+			if err := putTS.mockModels.AddModel(seed); err != nil {
+				t.Fatalf("seed image-gen group: %v", err)
+			}
+			putStatus, putErrSubstr := putDecisionModel(t, putSrv.URL, "image-gen-group-1", marshalGroupModel(tc.group))
+			if tc.accepted {
+				if putStatus != http.StatusOK {
+					t.Errorf("PUT inline mirror REJECTED the valid image-gen-lane group (status=%d, err=%q) — server.go PUT group arm has drifted for %s", putStatus, putErrSubstr, tc.name)
+				}
+			} else {
+				if putStatus != http.StatusBadRequest {
+					t.Errorf("PUT inline mirror ACCEPTED the broken image-gen-lane group (status=%d, err=%q) — server.go PUT group arm has drifted for %s; must reject with 400", putStatus, putErrSubstr, tc.name)
+				} else if !strings.Contains(putErrSubstr, tc.substr) {
+					t.Errorf("PUT inline err %q does not contain expected rule phrase %q — server.go PUT group arm has drifted", putErrSubstr, tc.substr)
+				}
+			}
+		})
+	}
+
+	// Chain-rule subtest: a chat model whose fallback_chain names an
+	// IMAGE-GEN-lane group must be rejected at the API boundary (the
+	// ValidateFallbackChainLanes imggen arm).
+	t.Run("chain_rule_chat_model_references_image_gen_group", func(t *testing.T) {
+		// Seed an image-gen group in the mock store.
+		seedStack := func() (*modelTestServer, *httptest.Server) {
+			ts := newModelTestServer()
+			addDecisionCreds(ts)
+			addImageGenGroupMembers(ts)
+			g := imageGenGroupBase()
+			g.ID = "image-gen-group-1"
+			if err := ts.mockModels.AddModel(g); err != nil {
+				t.Fatalf("seed image-gen group: %v", err)
+			}
+			return ts, ts.serve()
+		}
+
+		chainSubstr := "fallback_chain must not reference the image-gen-lane group"
+
+		// --- POST arm ---
+		_, postSrv := seedStack()
+		defer postSrv.Close()
+		postBody := `{
+			"id": "chat-with-image-gen-chain",
+			"name": "Chat With Image Gen Chain",
+			"enabled": true,
+			"kind": "chat",
+			"fallback_chain": ["image-gen-group-1"]
+		}`
+		postStatus, postErr := postDecisionModel(t, postSrv.URL, postBody)
+		if postStatus != http.StatusBadRequest {
+			t.Errorf("POST: status = %d, want 400; err=%q", postStatus, postErr)
+		} else if !strings.Contains(postErr, chainSubstr) {
+			t.Errorf("POST: err %q does not contain %q", postErr, chainSubstr)
+		}
+
+		// --- PUT arm (seed the chat model first) ---
+		putTS, putSrv := seedStack()
+		defer putSrv.Close()
+		seedChat := models.ModelConfig{
+			ID: "chat-with-image-gen-chain", Name: "Chat With Image Gen Chain",
+			Enabled: true, Kind: models.KindChat,
+		}
+		if err := putTS.mockModels.AddModel(seedChat); err != nil {
+			t.Fatalf("seed chat model: %v", err)
+		}
+		putStatus, putErr := putDecisionModel(t, putSrv.URL, "chat-with-image-gen-chain", postBody)
 		if putStatus != http.StatusBadRequest {
 			t.Errorf("PUT: status = %d, want 400; err=%q", putStatus, putErr)
 		} else if !strings.Contains(putErr, chainSubstr) {
