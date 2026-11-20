@@ -33,6 +33,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
@@ -120,6 +121,23 @@ type configGetter interface {
 	GetImageGenTimeout() time.Duration
 	GetImageGenGroupWalkTimeout() time.Duration
 }
+
+// groupLaneSeam is the OPTIONAL lane-query seam (the imggen-groups
+// commission). It lives OUTSIDE models.ModelsConfigInterface on
+// purpose: the optional-seam shape keeps the structural test fakes
+// and the JSON backend valid (the house pattern — the precedent:
+// ClearGroupMemberCooldown, groupLaneReader).
+type groupLaneSeam interface {
+	GroupLane(groupID string) (models.GroupLane, bool)
+}
+
+// The compile-time proof that the PRODUCTION models binding satisfies
+// the lane seam: the production conf.ModelsConfig is
+// *modelscache.CachedModelsConfig (CACHE_LAYER_ENABLED defaults ON),
+// so a REMOVED decorator forward must break the BUILD, not silently
+// no-op in production while the raw-manager tests stay green (the
+// modelscache-decorator-forward-trap, exact shape).
+var _ groupLaneSeam = (*modelscache.CachedModelsConfig)(nil)
 
 // NewHandler constructs the /v1/image_generation handler. The
 // usage counter may be nil (metering silently skipped) and the
@@ -315,7 +333,53 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 4) THE SCOPE PREDICATE (the shared entry gate).
+	// 4) THE KIND / LANE GATE (imggen-groups commission / T1.5).
+	//
+	// PRECEDENCE (the decision lane's law, pkg/decision/handler.go:
+	// "kind/lane BEFORE scope"): the gate runs BEFORE the scope
+	// predicate below, so a misroute answer is TOKEN-INDEPENDENT — it
+	// can never leak the lane configuration through a permission
+	// answer.
+	//
+	// Three arms:
+	//   - a GROUP whose lane is image-gen ⇒ the group serving branch
+	//     (the walk);
+	//   - a GROUP whose lane is NOT image-gen (chat / decision /
+	//     unknown) ⇒ 400 image_misroute;
+	//   - a NON-group row that is not image-gen ⇒ 400 image_misroute.
+	//     This closes a REAL pre-existing gap: ANY model id used to
+	//     resolve here, pass the scope check, resolve a credential and
+	//     die at the provider lookup as a 502 unsupported_provider —
+	//     and a chat model whose provider happened to be minimax would
+	//     even be SERVED on this lane.
+	//   - a plain image-gen row ⇒ today's path, unchanged.
+	if row.IsGroup() {
+		if !h.groupIsImageGenLane(row.ID) {
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+				"outcome":         imggenMisrouteCode,
+				"model":           modelID,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
+				"upstream_status": 0,
+			})
+			h.openAIErrorWithCode(w, http.StatusBadRequest,
+				fmt.Sprintf("image-generation models are served by /v1/image_generation only (group %q is not an image-gen group)", row.ID),
+				imggenMisrouteCode)
+			return
+		}
+	} else if !row.IsImageGen() {
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+			"outcome":         imggenMisrouteCode,
+			"model":           modelID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIErrorWithCode(w, http.StatusBadRequest,
+			fmt.Sprintf("image-generation models are served by /v1/image_generation only (model %q is kind %q)", row.ID, row.Kind),
+			imggenMisrouteCode)
+		return
+	}
+
+	// 5) THE SCOPE PREDICATE (the shared entry gate).
 	//
 	// ADR D8: the four entry sites collapse into ONE predicate — the
 	// scope resolved by pkg/authz (the ONE resolver). A lane may not
@@ -327,13 +391,19 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// to today's allow-list check.
 	//
 	// PRECEDENCE (T2.13): 401 (auth) -> 400 missing_model ->
-	// 404 (unknown model) -> 403 (scope) -> 502. The scope check runs
-	// AFTER the 404, so an unknown id is never answered with a
-	// permission error.
+	// 404 (unknown model) -> 400 image_misroute (kind/lane) ->
+	// 403 (scope) -> 502. The scope check runs AFTER the 404 and
+	// AFTER the kind/lane gate, so an unknown id is never answered
+	// with a permission error and a misroute is never answered with
+	// a permission error.
 	//
-	// NOTE: this lane has NO candidate list — an image-generation
-	// model has no FallbackChain (pkg/imggen/handler.go's header), so
-	// the entry check is the WHOLE scope obligation on this lane.
+	// NOTE: for a PLAIN image-generation model this lane has NO
+	// candidate list — an image-generation model has no FallbackChain
+	// (pkg/imggen/handler.go's header) — so the entry check is the
+	// WHOLE scope obligation on that path. For a GROUP the scope
+	// surface is bigger (the group's members are the candidates), and
+	// the group arm owns it (the marked SCOPE seam in group.go — the
+	// authz composition lands in Phase 2).
 	scope := authz.Resolve(authToken, h.membersOf())
 	if scope != nil && !scope.Allows(row.ID) {
 		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
@@ -347,7 +417,16 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 5) Credential resolution. We use the chat-side helper
+	// 6) THE GROUP BRANCH (an image-gen-lane group). The lane gate
+	// was already resolved above (it runs BEFORE the scope predicate,
+	// so the misroute answer is token-independent); the group arm
+	// re-checks it fail-closed and then runs the walk.
+	if row.IsGroup() {
+		h.serveImageGenGroup(w, r, row, authToken, bodyBytes, startTime)
+		return
+	}
+
+	// 7) Credential resolution. We use the chat-side helper
 	// through the ModelsConfigInterface so the existing
 	// affinity engine (Phase 3 / pkg/credentiallb) participates
 	// when wired. Stable key (modelID, modelID) per BE-A3 +
@@ -365,7 +444,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 6-10) THE ATTEMPT (imggen-groups commission / T1.6): the
+	// 8-12) THE ATTEMPT (imggen-groups commission / T1.6): the
 	// provider lookup, the upstream build, the single POST, the
 	// bounded read and the classification live in ONE shared
 	// function — the standalone path and the GROUP walk call the
@@ -408,7 +487,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	respBody := attempt.body
 	respStatus := attempt.upstreamStatus
 
-	// 11) Relay (T1.4.6 / write-first observe-after). On
+	// 13) Relay (T1.4.6 / write-first observe-after). On
 	// PassAsIs: copy headers, write upstream status, write body
 	// verbatim. On PromoteToError: 502 (or whatever RelayStatus
 	// is), preserve the upstream body verbatim (no envelope of
@@ -465,7 +544,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[imggen] write to client failed: %v (model=%s, provider=%s)", err, modelID, cred.Provider)
 	}
 
-	// 12) Meter + event. Meter first (observe-after: even on
+	// 14) Meter + event. Meter first (observe-after: even on
 	// error-in-200, request_count+1, image_count=0 — Amendment
 	// 14 documented divergence from chat's success-only). Then
 	// publish the telemetry event with the final outcome.
@@ -864,6 +943,18 @@ func (h *Handler) openAIError(w http.ResponseWriter, code int, message string) {
 		models.ErrorTypeServerError, "", message))
 }
 
+// openAIErrorWithCode threads the supplied errorCode into the
+// envelope (image_misroute / imggen_all_members_failed / similar
+// typed codes). Mirrors the decision lane's helper (pkg/decision/
+// handler.go) — the packages do not import each other (the import
+// guard forbids it), so the helper is spelled twice.
+func (h *Handler) openAIErrorWithCode(w http.ResponseWriter, code int, message, errorCode string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(models.NewOpenAIError(
+		models.ErrorTypeServerError, errorCode, message))
+}
+
 // sendAuthError writes the OpenAI-envelope 401. Maps 401 to
 // "authentication_error" (matches pkg/proxy/handler.go:346-355 —
 // the public-surface decision the chat handler adopted so FE
@@ -948,6 +1039,37 @@ func (h *Handler) SetModelsConfig(cfg models.ModelsConfigInterface) {
 		return
 	}
 	h.modelsConfig = cfg
+}
+
+// groupLane resolves the group's lane through the OPTIONAL seam.
+// Nil-safe: a handler without the models config (or without the seam)
+// answers "no lane" — the group branch then fails CLOSED.
+func (h *Handler) groupLane(groupID string) (models.GroupLane, bool) {
+	if h == nil || h.modelsConfig == nil {
+		return "", false
+	}
+	gl, ok := h.modelsConfig.(groupLaneSeam)
+	if !ok {
+		return "", false
+	}
+	return gl.GroupLane(groupID)
+}
+
+// groupIsImageGenLane is the group branch's entry gate: the group
+// must be an IMAGE-GEN-lane group.
+//
+// The seam is OPTIONAL: an absent seam (or an unresolvable lane — a
+// mixed-kind group) fails CLOSED — the caller keeps the 400
+// image_misroute path — and the refusal is logged LOUDLY, because a
+// missing decorator forward would otherwise be a SILENT no-op in
+// production (the modelscache-decorator-forward-trap).
+func (h *Handler) groupIsImageGenLane(groupID string) bool {
+	lane, ok := h.groupLane(groupID)
+	if !ok {
+		log.Printf("[imggen] group=%s: the group-lane seam is absent or the lane is unresolvable — failing closed (a group is never served without a resolved lane)", groupID)
+		return false
+	}
+	return lane == models.GroupLaneImageGen
 }
 
 // SetModelResolver installs the model-lookup function. Called
