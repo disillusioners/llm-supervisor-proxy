@@ -42,6 +42,12 @@ const (
 	// the config knob is zero. Mirrors config.Defaults.ImageGenTimeout.
 	defaultImageGenTimeout = 120 * time.Second
 
+	// defaultImageGenGroupWalkTimeout is the package default applied
+	// when the config knob is zero. Mirrors
+	// config.Defaults.ImageGenGroupWalkTimeout (= 2 × the per-member
+	// default — imggen-groups commission / F-1 / D-17).
+	defaultImageGenGroupWalkTimeout = 240 * time.Second
+
 	// maxRequestBodyBytes is the request body cap (BE-G1). Spec
 	// allows subject_reference < 10 MB; 16 MB has slack for the
 	// base64 round-trip. Over-cap → 413 via errors.As
@@ -105,8 +111,14 @@ type Handler struct {
 // configGetter is the slice of config.ManagerInterface this
 // handler actually uses. Defined locally so tests can substitute
 // a stub without depending on the full config surface.
+//
+// imggen-groups commission / F-1 / D-17: the GROUP walk budget
+// getter joins the per-member deadline getter here. BOTH are HOT
+// (per-request reads — PUT /fe/api/config applies them without a
+// restart); neither is boot-owned.
 type configGetter interface {
 	GetImageGenTimeout() time.Duration
+	GetImageGenGroupWalkTimeout() time.Duration
 }
 
 // NewHandler constructs the /v1/image_generation handler. The
@@ -132,6 +144,24 @@ func (h *Handler) imageGenTimeout() time.Duration {
 	d := h.configMgr.GetImageGenTimeout()
 	if d <= 0 {
 		return defaultImageGenTimeout
+	}
+	return d
+}
+
+// imageGenGroupWalkTimeout returns the TOTAL walk budget of an
+// image-gen GROUP request (imggen-groups commission / F-1 / D-17),
+// falling back to the package default when the config knob is zero
+// (e.g., a hand-edited config or a test stub).
+//
+// HOT: the read goes through the config manager's per-request getter,
+// so PUT /fe/api/config applies a new budget without a restart.
+func (h *Handler) imageGenGroupWalkTimeout() time.Duration {
+	if h.configMgr == nil {
+		return defaultImageGenGroupWalkTimeout
+	}
+	d := h.configMgr.GetImageGenGroupWalkTimeout()
+	if d <= 0 {
+		return defaultImageGenGroupWalkTimeout
 	}
 	return d
 }
