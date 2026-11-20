@@ -15,6 +15,13 @@
 // (Architect Amendment 17): a model that exists but is NOT in the
 // token's allowed_models returns 403; a model that does not exist
 // returns 404. Distinct conditions, the divergence is by design.
+//
+// SCOPE SURFACES (imggen-groups commission / P2): a PLAIN image-gen
+// model's scope is resolved at the entry gate; a GROUP's scope is
+// resolved INSIDE its serving branch (pkg/imggen/group.go). The group
+// arm owns group-id-in-reach, member exclusion on a copy, and the
+// 403-vs-502 discriminator. ADR O1 ("Image-gen has no group or chain
+// surfaces") is superseded by this commission.
 package imggen
 
 import (
@@ -379,7 +386,22 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 5) THE SCOPE PREDICATE (the shared entry gate).
+	// 5) THE GROUP BRANCH (an image-gen-lane group). It dispatches BEFORE
+	//    the entry-gate scope predicate below (the v203 bypass-closed
+	//    pattern, mirroring pkg/decision/handler.go:324-329): the group
+	//    arm resolves its OWN scope and owns the whole group scope
+	//    surface — group-id-in-reach, member exclusion, and the
+	//    403-vs-502 discriminator (pkg/imggen/group.go ARM#1/2/3).
+	//    The entry gate must NOT authorize the group id here: doing so
+	//    would make ARM#1 unreachable and answer with the resolved id.
+	//    The kind/lane gate above already ran, so a misroute stays a
+	//    token-independent 400.
+	if row.IsGroup() {
+		h.serveImageGenGroup(w, r, row, authToken, modelID, bodyBytes, startTime)
+		return
+	}
+
+	// 6) THE SCOPE PREDICATE (the shared entry gate) — PLAIN models only.
 	//
 	// ADR D8: the four entry sites collapse into ONE predicate — the
 	// scope resolved by pkg/authz (the ONE resolver). A lane may not
@@ -397,13 +419,13 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// with a permission error and a misroute is never answered with
 	// a permission error.
 	//
-	// NOTE: for a PLAIN image-generation model this lane has NO
-	// candidate list — an image-generation model has no FallbackChain
-	// (pkg/imggen/handler.go's header) — so the entry check is the
-	// WHOLE scope obligation on that path. For a GROUP the scope
-	// surface is bigger (the group's members are the candidates), and
-	// the group arm owns it (the marked SCOPE seam in group.go — the
-	// authz composition lands in Phase 2).
+	// NOTE: this entry check covers PLAIN image-generation models (no
+	// candidate list — an image-gen model has no FallbackChain). A
+	// GROUP's scope is resolved INSIDE its serving branch (the three
+	// arms in pkg/imggen/group.go, mirroring pkg/decision/group.go:
+	// 117-208): the group arm owns its scope — resolve-inside-arm,
+	// member exclusion on a copy, and the empty-order fork. ADR O1
+	// ("Image-gen has no group or chain surfaces") is superseded.
 	scope := authz.Resolve(authToken, h.membersOf())
 	if scope != nil && !scope.Allows(row.ID) {
 		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
@@ -414,15 +436,6 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			"upstream_status": 0,
 		})
 		h.sendModelNotAllowedError(w, modelID)
-		return
-	}
-
-	// 6) THE GROUP BRANCH (an image-gen-lane group). The lane gate
-	// was already resolved above (it runs BEFORE the scope predicate,
-	// so the misroute answer is token-independent); the group arm
-	// re-checks it fail-closed and then runs the walk.
-	if row.IsGroup() {
-		h.serveImageGenGroup(w, r, row, authToken, bodyBytes, startTime)
 		return
 	}
 

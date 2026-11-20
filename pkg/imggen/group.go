@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
@@ -274,10 +275,44 @@ func (h *Handler) safeResolveCredential(modelID string) (models.ResolvedCredenti
 	return h.resolveCredential(modelID)
 }
 
+// countBaseServableMembers counts the members buildGroupPolicy WOULD have
+// admitted on the UNFILTERED row — the SAME candidacy predicate the policy
+// uses (the row exists AND is enabled AND the member's lane matches the
+// group's lane — buildGroupPolicy's candidacy block above). It is the
+// discriminator between "empty by scope" (403) and "empty by unservability"
+// (502): a group whose members are ALL disabled has baseServable == 0, so its
+// empty order is an AVAILABILITY failure even when scope also excluded members
+// (a disabled out-of-scope member is still a disabled member — availability,
+// not permission). The decision lane's countBaseServableMembers mirror.
+//
+// The count is computed on the UNFILTERED member list — counting the filtered
+// copy would make the two cases indistinguishable.
+func countBaseServableMembers(members []models.GroupMember, rows []models.ModelConfig, lane models.GroupLane) int {
+	byID := make(map[string]models.ModelConfig, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	n := 0
+	for _, member := range members {
+		if member.ModelID == "" {
+			continue
+		}
+		row, ok := byID[member.ModelID]
+		if !ok || !row.Enabled {
+			continue
+		}
+		if memberLane, ok := models.MemberLane(row.Kind); !ok || memberLane != lane {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // serveImageGenGroup serves an image-gen-lane group request: the
 // policy order, the per-member attempts, the single commit at the
 // winner and the exhaustion envelope.
-func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, group *models.ModelConfig, authToken *auth.AuthToken, bodyBytes []byte, startTime time.Time) {
+func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, group *models.ModelConfig, authToken *auth.AuthToken, clientModel string, bodyBytes []byte, startTime time.Time) {
 	groupID := group.ID
 
 	// 1) THE LANE GATE (fail closed, BEFORE any scope work).
@@ -300,33 +335,83 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 		return
 	}
 
-	// 2) SCOPE (Phase 2 — authz composition): today the entry gate
-	//    (the shared scope predicate above — the resolved row IS the
-	//    group row) is the whole scope obligation for the group id.
-	//    Phase 2 replaces this block with the three arms, mirroring
-	//    pkg/decision/group.go:117-208:
-	//      ARM#1 group-id-in-reach (403 quotes the CLIENT string)
-	//      ARM#2 member exclusion on a COPY before buildGroupPolicy
-	//      ARM#3 empty-order fork: scope-caused ⇒ 403, unservable ⇒ 502
-	//    The loop below must NEVER consult scope (structural law).
+	// 2) THE SCOPE — ARM#1 (bypass-closed): the GROUP itself must be in reach.
+	//    Resolved INSIDE the group arm, right after the lane gate (the
+	//    v203 bypass-closed pattern: the arm owns its OWN scope; the
+	//    handler keeps no cross-request scope state). The membersOf
+	//    adapter reads the IN-MEMORY model rows (no DB read on the request
+	//    path — Ruling 5). This is the SECOND authz.Resolve site in
+	//    pkg/imggen (the entry gate keeps its own for PLAIN models).
 	//
-	// The scope-exclusion counter is initialized HERE so the Phase-2
-	// arms find the plumbing in place (its value is 0 in Phase 1 —
-	// the scope composition lands in Phase 2).
+	//    ADR O1 ("Image-gen has no group or chain surfaces", token-authz
+	//    ADR) is SUPERSEDED by this commission: the image-gen lane now
+	//    HAS a group surface, so its group arm composes the same three
+	//    v203 arms as pkg/decision/group.go:117-208. P4's decisions.md
+	//    carries the formal supersession entry.
+	scope := authz.Resolve(authToken, h.membersOf())
+
+	// ARM#1 — the check: AFTER the lane gate (a chat/decision group stays
+	// a 400 image_misroute regardless of grants — T8) and BEFORE any
+	// candidate construction. Authorize the RESOLVED group id (group.ID);
+	// QUOTE the CLIENT-requested string (clientModel) — a claimed id
+	// resolves INTO this arm, so the canonical id never appears in the
+	// body while the client string does (PD-9 mirror).
+	if scope != nil && !scope.Allows(group.ID) {
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+			"outcome": "model_not_allowed", "model": clientModel,
+			"duration_ms": time.Since(startTime).Milliseconds(), "upstream_status": 0,
+		})
+		h.sendModelNotAllowedError(w, clientModel)
+		return
+	}
+
+	// ARM#2 — filter a COPY of the member slice BEFORE buildGroupPolicy.
+	// The policy's doctrine is "may reorder candidates, never exclude
+	// them", so exclusion happens HERE, on a FRESH backing array
+	// (make(..., 0, len)) — the cached row's member slice is never
+	// mutated (PD-15; group.Members[:0] would share capacity and write
+	// into the cached row). buildGroupPolicy stays BYTE-UNCHANGED.
+	filtered := *group
+	filtered.Members = make([]models.GroupMember, 0, len(group.Members))
 	scopeExcluded := 0
-	_ = scopeExcluded
+	for _, mbr := range group.Members {
+		if scope == nil || scope.Allows(mbr.ModelID) {
+			filtered.Members = append(filtered.Members, mbr)
+			continue
+		}
+		scopeExcluded++
+	}
 
 	// 3) THE POLICY + THE ATTEMPT ORDER — computed BEFORE the first
 	//    attempt (the structural law: the order is known before any
 	//    upstream call, so the scope-caused emptiness is decidable
-	//    without an attempt).
+	//    without an attempt). ONE live-row read serves BOTH the
+	//    base-servable count (ARM#3) and the policy — GetModels
+	//    deep-copies the whole set, so it must not be called twice
+	//    (W-3 / PD-5).
 	rows := h.currentModelRows()
-	policy := buildGroupPolicy(group, rows, lane)
+	baseServable := countBaseServableMembers(group.Members, rows, lane)
+	policy := buildGroupPolicy(&filtered, rows, lane)
 	order := policy.order()
 	if len(order) == 0 {
-		// No servable member: the walk never starts. The exhaustion
-		// envelope owns the answer (the group row is billed — the
-		// imggen lane's bill-on-error continuity).
+		// ARM#3 — "empty by scope" (403) vs "empty by unservability"
+		// (502), ATTEMPT-COUNT-KEYED: the order is computed BEFORE the
+		// first attempt, so ZERO upstream calls ran here ⇒ a
+		// scope-caused emptiness is a PERMISSION failure (403), never
+		// the availability envelope.
+		//
+		// baseServable is counted on the UNFILTERED row: if every
+		// member is DISABLED, baseServable == 0 ⇒ the empty order is
+		// genuine unservability ⇒ 502, even when scopeExcluded > 0 (a
+		// disabled out-of-scope member is still a disabled member).
+		if scope != nil && scopeExcluded > 0 && baseServable > 0 {
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+				"outcome": "model_not_allowed", "model": clientModel,
+				"duration_ms": time.Since(startTime).Milliseconds(), "upstream_status": 0,
+			})
+			h.sendModelNotAllowedError(w, clientModel)
+			return
+		}
 		h.exhaustImageGenGroup(w, groupID, authToken, 0, 0, 0, startTime, "", false, false)
 		return
 	}
