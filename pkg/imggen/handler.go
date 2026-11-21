@@ -22,6 +22,10 @@
 // arm owns group-id-in-reach, member exclusion on a copy, and the
 // 403-vs-502 discriminator. ADR O1 ("Image-gen has no group or chain
 // surfaces") is superseded by this commission.
+//
+// FILE SIZE (~1.25k lines): this file owns the entry gate, the shared
+// attempt mechanics (attemptImageGenMember, both surfaces), the group-arm
+// integration, and the response/count helpers; the member LOOP lives in group.go.
 package imggen
 
 import (
