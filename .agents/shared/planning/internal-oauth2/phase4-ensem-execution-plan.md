@@ -45,7 +45,7 @@
 6. ⏸ Staged rollback operands — **Stage 0 in §2 creates them** (pre-flight step, first mutation-free action of the execution window).
 
 ### 1.3 Live primary state (baseline for every diff)
-- Deployment `llm-supervisor-proxy`: **gen 44/44**, `RollingUpdate` (maxSurge 1/maxUnavailable 0), image `abd61d7`, running digest `sha256:cfc34862…` == verified index. Pod `llm-supervisor-proxy-6b94cd7cdb-pgmrv` ready.
+- Deployment `llm-supervisor-proxy`: **gen 44/44**, `RollingUpdate` (maxSurge 1/maxUnavailable 0), image `abd61d7`, running digest `sha256:139b612a…` == verified index. Pod `llm-supervisor-proxy-6b94cd7cdb-pgmrv` ready.
 - ⚠️ **`restarts=1` — pre-existing v204 defect, NOT oauth2:** container died 2026-11-20T10:44:13Z, exit 2 — `panic: nil pointer dereference` in `pkg/proxy/sendHeartbeat` (heartbeat.go:114; `bufio.Writer` nil on an SSE flush after a client disconnect, post 14.7s stream). One crash in ~14h; recovered clean; zero panics since. **Handoff: Developer to fix the SSE-heartbeat client-disconnect race (guard the flush / recover the goroutine).** Plan impact: if a crash lands mid-window, the Recreate rollout state machine still converges; the R1+R2 unit is unaffected. Not a blocker; noted in the risk table.
 - Edge: `oauth2-proxy` deploy 1/1 + svc (113d), secret `oauth2-proxy-secret` keys `CLIENT_ID/CLIENT_SECRET/COOKIE_SECRET` ✓.
 - HTTPRoute `llm-ensem-dev-route`: live spec == GitOps (`/oauth2`→edge, `/v1`→app+30m, `/`,`/ui`,`/fe/api`→edge+30m); redirect companion intact. **No SecurityPolicy on the llm path** (only unrelated `nonself/opa-auth-api`, `test-envy/example-jwt-policy`).
