@@ -309,6 +309,13 @@ cite this commission as precedent for imggen-lane claim semantics.
   assertion edit inside it, and the diff must show the file as modified,
   not renamed+recreated.
 
+### 3.8 addendum — post-implementation ledger verification (2026-11-20)
+
+The §3.8 ledger above is SETTLED normative text; this dated addendum records how it LANDED (no rewrite of the settled body).
+
+- **W-7 test ledger — BOTH entries landed exactly as pinned.** **ADDED** `TestMemberLane_ImageGen_IsImageGenLane` (`pkg/models/group_rules_test.go:600`: `MemberLane(KindImageGen) == (GroupLaneImageGen, true)` + `UnanimousGroupLane([image-gen])=(image-gen,true)` + stable-order `GroupLanesOf` pin). **MODIFIED IN PLACE** `TestValidateGroupMembers_LegacyEmptyKind_IsChatLane` (`:555`, ORIGINAL name kept, rename forbidden): the test's pin now asserts `MemberLane("") == (GroupLaneChat, true)` and `MemberLane(KindChat) == (GroupLaneChat, true)` (the legacy-""-is-chat ruling survives; the former "image-gen must not be a valid lane" pin is superseded by the dedicated ADDED positive test). Git sees the file as modified, not renamed/recreated.
+- **W-4 / G3 `member_must_be_chat_kind` — MODIFIED with justification in BOTH parity matrices.** `pkg/models/group_rules_test.go:175-179` and `pkg/ui/kind_rules_parity_test.go:586-594`: the case ID is kept verbatim; its fixture is now a **no-lane kind** (`Kind: "mystery-kind"`, so `MemberLane` returns `ok=false` — an unknown kind belongs to no lane), and it still asserts the historical chat-worded rejection `"must be a chat-kind model"`. Justification: the member-kind rule IS the lane rule (lane inferred from members), so the case now pins only the no-lane rejection; **image-gen member legality is pinned by the new positive cases** (the ADDED dedicated test above + the FE parity `TestKindRules_Parity_Group_ImageGenLane` at `pkg/ui/kind_rules_parity_test.go:1073`), not by renaming or repurposing the legacy case. G8 stays GREEN (lane-agnostic claim machinery).
+
 ## 4. Components (file-anchored)
 
 ### 4.1 `pkg/models/group_lane.go` — the vocabulary (S1)

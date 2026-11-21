@@ -183,6 +183,7 @@ Widen, don't fork. An image-gen group is **the same `models.kind="group"` row** 
 | 1 | `/v1/models` group exclusion at `pkg/proxy/handler.go:423-426` | The lane fold is `:415-428`; the exclusion sites are `:432` (image-gen/decision kinds), `:435` (decision groups — where the imggen sibling goes), `:438` (claimed). Approximate, not wrong. |
 | 2 | "migration count reconciliation gate (88 SQL / 91 grep)" | **88 .sql files verified** (`find pkg/store/database/migrations -name '*.sql' \| wc -l`). The **91-grep counterpart could NOT be reproduced** at this base with the obvious candidates (registry refs, `.sql` greps). Re-derive the exact grep↔file-count pairing at gate time IF a migration lands; research expects none (D-1). |
 | 3 | internal-oauth2 `phase4-ensem-execution-plan.md` as a path in this tree | The file is **NOT on this branch** — it lives only on `docs/phase4-ensem-execution-plan` @ `cd445c8` (verified via `git ls-remote`; the worktree's `internal-oauth2/` dir has phase1/phase2-switch/plan-overview only). The phase-4 rider must operate on that branch. |
+| 4 | tsc baseline "19 errors / 19 files" (commission-brief prose) | **Stale prose.** The baseline file `pkg/ui/frontend/tsc-baseline.txt` footer is `TOTAL_ERRORS=18` / `TOTAL_FILES=9` (authoritative; the file was NEVER edited) and gate G6 proved exact parity **18/9** (committed gate artifact `.agents/tester/RESULTS/imggen-groups-gates-bbd76f7.md`). The corpus already cites 18/9 everywhere as current state; the "19" survives only as historical precedent (26/11 → 19/9 → 18/9 by credential-groups). No corpus correction was owed. |
 
 ## Not verified (stated, not cited)
 
@@ -213,3 +214,12 @@ Widen, don't fork. An image-gen group is **the same `models.kind="group"` row** 
 **D-6 — quota counter semantics.** `consecutiveQuota` counts consecutive quota-class FAILURE OUTCOMES; a non-quota failure outcome (e.g. 5xx) RESETS it; an UNRESOLVED member (`credential_unresolved` — no attempt, no class) does NOT reset it. Documented at the constant and at the counter. Pins: the existing `TestServeImageGenGroup_QuotaShortCircuit_ResetsOnNonQuota` (quota,quota,5xx,quota,quota ⇒ no short-circuit) stays green + NEW `TestServeImageGenGroup_QuotaUnresolved_DoesNotResetShortCircuit` (quota,quota,unresolved,quota,quota ⇒ short-circuit at the third quota).
 
 **Fences held:** `pkg/decision/**` and `pkg/authz/**` untouched; FE `src/**` + `static/**` untouched; no migrations. The shared resolution helper is additive in `pkg/models`; the store's private helper was rewired to delegate (no behavior change). All P1+P2 pins green.
+
+---
+
+## D-11 formal record — ADR O1 supersession (P4 fold, 2026-11-20)
+
+**Status: SUPERSEDED — formal register entry.** The token-authz ADR's O1 ("Image-gen has no group or chain surfaces", `.agents/shared/planning/token-authz-allowed-groups/adr-token-permission-model.md:450`) is **superseded by this commission**: image-gen now HAS a group surface and is an authz unit on the `allowed_groups` axis for ANY lane (D-7.1). P2 landed the supersession in-code and in its commit message and explicitly deferred this formal register entry to P4 (D-11 "Implementing phase"); this block is that entry.
+
+- **In-code records:** `pkg/imggen/group.go:338-350` (the group arm's scope comment: "ADR O1 … is SUPERSEDED by this commission … its group arm composes the same three v203 arms as pkg/decision/group.go:117-208") and `pkg/imggen/handler.go:18-24` (the `SCOPE SURFACES` package comment: "ADR O1 … is superseded by this commission"). Landed in commit `b617e1d` (`feat(imggen): compose v203 authz onto the image-gen group branch (P2)`).
+- **Composition unchanged:** v203 authz composes byte-for-byte — group id is the authz unit on `allowed_groups` for any lane; member exclusion on a copy before policy; the 403-vs-502 discriminator order-computed-before-first-attempt. `pkg/authz/**` is frozen at **0 bytes diff** vs base `5cf1ecdc` (verified `git diff --stat 5cf1ecdc..HEAD -- pkg/authz` empty); no authz code, scope vocabulary, or credential/token store rows were touched by this commission.

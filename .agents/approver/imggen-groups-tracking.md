@@ -60,3 +60,11 @@ Mode: Plan Approval (plan-approval), 1 fix-verification worker (approve-worker-f
 - phase3:51 vs plan-overview:6 iteration-labelling not cross-referenced (cosmetic).
 
 Status: COMPLETE — APPROVED iteration 003, 2026-11-20.
+
+## Post-implementation completion (2026-11-20) — IMPLEMENTED, GATED GREEN
+
+- Implemented + gated green: 14 commits `d0ae6f3..50ea22b` (d0ae6f3 plan corpus → … → bbd76f7 P3 FE → 50ea22b gate artifact). Gates G1–G15 PASS; gate artifact `.agents/tester/RESULTS/imggen-groups-gates-bbd76f7.md` (committed @ 50ea22b).
+- ADR O1 supersession: formal register entry folded into `decisions.md` (D-11 formal record; in-code at `pkg/imggen/group.go:338-350` / `handler.go:18-24`, commit `b617e1d`; `pkg/authz` 0-byte diff).
+- D-19 verification-fix iteration recorded in `decisions.md` (D1–D6, commits `070f6fa` + `e83c2c6`).
+- W-4/W-7 flipped-pin ledger + R1 digest-rider prep recorded as dated post-implementation addenda (`phase1-plan.md` §3.8, `phase4-plan.md` §7 R1). tsc figure reconciled: baseline footer 18/9 (corpus already correct; brief's "19" was stale prose — `decisions.md` §Drift #4).
+- Approver status: COMPLETE — no blocking items outstanding.

@@ -4,6 +4,7 @@ Date: 2026-11-20
 Status: **Complete** — all phase plans written, verified on disk, cross-phase assumptions reconciled (this file). **Revised 2026-11-20** — reviewer verdict APPROVED-CONDITIONAL folded: 5 adjudicated rulings (D-14..D-18) + adopted warnings applied doc-only across the corpus (see "Revision fold" below).
 
 > **Execution note (iteration 002):** all plan citations are **base-`5cf1ecdc` anchors** — implementers MUST re-anchor line references against the working tree before quoting or editing (known drift: the D-15 chat-side misroute cites are off by 100+ lines; several pins are ±6 lines).
+> **Post-implementation ledger pointer (2026-11-20):** the W-4/W-7 flipped-pin ledger (ADDED `TestMemberLane_ImageGen_IsImageGenLane` + MODIFIED-in-place `TestValidateGroupMembers_LegacyEmptyKind_IsChatLane`, rename forbidden; G3 `member_must_be_chat_kind` parity matrices MODIFIED-with-justification in `pkg/models` + `pkg/ui`) is recorded as a dated addendum at `phase1-plan.md` §3.8 — normative; the §3.8 body is SETTLED and not rewritten.
 Base / worktree: `feature/imggen-groups-text-subtabs` @ `5cf1ecdc` (== `origin/latest`) — `/home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-imggen-groups`
 Authorship: 3 research explorers (read-only) + 3 plan-creation workers (one skill each); this overview is the planner's aggregation — every technical claim below originates in and cites the phase files.
 
