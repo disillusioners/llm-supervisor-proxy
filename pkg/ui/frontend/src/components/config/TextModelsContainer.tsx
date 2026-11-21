@@ -1,7 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import type { Model } from '../../types';
 import { GroupModelsTab } from './GroupModelsTab';
-import { SubTabContainer } from './SubTabContainer';
+import { SubTabContainer, type SubTabItem } from './SubTabContainer';
 
 // The TEXT lane's container — the shared sub-tab shape (models | group)
 // with the chat lane's surfaces inside it.
@@ -84,7 +84,7 @@ export type TextModelsContainerProps = {
 // the decision lane's nav ("Decision Models" / "Decision Groups"): the
 // lane name plus the surface name, so a screen reader never hears a
 // bare "Models" next to the top-level "Models" tab.
-const NAV_ITEMS: { child: ChildTab; label: string; ariaLabel: string; testId: string }[] = [
+const NAV_ITEMS: SubTabItem<ChildTab>[] = [
   {
     child: 'models',
     label: 'Models',

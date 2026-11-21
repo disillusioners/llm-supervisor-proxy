@@ -1,7 +1,7 @@
 import type { Model } from '../../types';
 import { ImgGenModelsTab } from './ImgGenModelsTab';
 import { GroupModelsTab } from './GroupModelsTab';
-import { SubTabContainer } from './SubTabContainer';
+import { SubTabContainer, type SubTabItem } from './SubTabContainer';
 
 // The IMAGE-GEN lane's container — the shared sub-tab shape (models |
 // group) with the image-gen surfaces inside it.
@@ -57,7 +57,7 @@ export interface ImgGenModelsContainerProps {
 // Nav items — the same shape as the decision lane's nav: the lane's
 // surface name as the accessible name, so a screen reader never hears a
 // bare "Models" next to the top-level "Models" tab.
-const NAV_ITEMS: { child: ChildTab; label: string; ariaLabel: string; testId: string }[] = [
+const NAV_ITEMS: SubTabItem<ChildTab>[] = [
   {
     child: 'models',
     label: 'Models',

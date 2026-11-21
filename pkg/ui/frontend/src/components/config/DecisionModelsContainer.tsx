@@ -1,7 +1,7 @@
 import type { Model } from '../../types';
 import { DecisionModelsTab } from './DecisionModelsTab';
 import { GroupModelsTab } from './GroupModelsTab';
-import { SubTabContainer } from './SubTabContainer';
+import { SubTabContainer, type SubTabItem } from './SubTabContainer';
 
 // The container owns the VERTICAL LEFT NAV and the child-tab state.
 // It has NO page-level heading of its own: each child panel owns its
@@ -53,7 +53,7 @@ interface DecisionModelsContainerProps {
 // Models). The accessible names are unambiguous against the top-level
 // "Models" and "Group Models" tabs: aria-label="Decision Models" /
 // aria-label="Decision Groups".
-const NAV_ITEMS: { child: ChildTab; label: string; ariaLabel: string; testId: string }[] = [
+const NAV_ITEMS: SubTabItem<ChildTab>[] = [
   {
     child: 'models',
     label: 'Models',
