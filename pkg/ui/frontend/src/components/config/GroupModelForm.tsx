@@ -47,7 +47,15 @@ const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
 // client-side inference, so a group can be mis-filed for a while).
 const LANE_GUARD_MESSAGE: Record<GroupLane, string> = {
   chat: 'This is a decision group — edit it under Decision Models → Group.',
-  decision: 'This is a chat group — edit it under Group Models.',
+  // imggen-groups (phase 3): the top-level "Group Models" tab RETIRED
+  // — the chat lane's group surface is now the Text container's Group
+  // child (Models → Group). A navigation pointer to a tab that no
+  // longer exists changes the operator's ability to act, so this ONE
+  // decision-lane string is reworded to the post-consolidation home.
+  // It mirrors the chat arm's established "Decision Models → Group"
+  // shape. This is the ONLY user-facing string delta in the phase (the
+  // chat-lane copy is frozen absolutely).
+  decision: 'This is a chat group — edit it under Models → Group.',
   // The image-gen surface can host EITHER of the two older lanes (the
   // lane is inferred from the members), so the static string routes
   // BOTH homes.

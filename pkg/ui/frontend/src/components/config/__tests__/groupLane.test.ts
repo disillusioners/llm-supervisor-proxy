@@ -270,4 +270,80 @@ describe('groupLane — the client-side lane inference (decision-groups, phase 2
     ]);
     expect(inferGroupLane(decAndImg, kindIndex)).toBeNull();
   });
+
+  it('E10 — a mixed chat + image-gen member set is unknown and lands in the TEXT bucket', () => {
+    const kindIndex = index({
+      'chat-1': 'chat',
+      'img-1': 'image-gen',
+    });
+    // The MIXED surviving set is undecidable (two valid lanes, no
+    // unanimity) — the same verdict the server's fold returns.
+    const mixed = makeGroup([
+      { model_id: 'chat-1', weight: 1 },
+      { model_id: 'img-1', weight: 1 },
+    ]);
+    expect(inferGroupLane(mixed, kindIndex)).toBeNull();
+
+    // The unknown row is the operator's REPAIR target: it stays in the
+    // text lane's group child (the historical-home rule) — it does NOT
+    // leak into the image-gen bucket.
+    const split = splitGroupsByLane([mixed], kindIndex);
+    expect(split.unknown.map((g) => g.id)).toEqual(['g1']);
+    expect(split['image-gen']).toEqual([]);
+    expect(split.chat).toEqual([]);
+  });
+
+  it('E11 — the split routes the image-gen bucket: an image-gen group leaves the unknown bucket', () => {
+    const kindIndex = index({
+      'chat-1': 'chat',
+      'dec-1': 'decision',
+      'img-1': 'image-gen',
+    });
+    const chatGroup = makeGroup([{ model_id: 'chat-1', weight: 1 }]);
+    const imgGroup = { ...makeGroup([{ model_id: 'img-1', weight: 1 }]), id: 'g2' } as GroupModel;
+    const decGroup = { ...makeGroup([{ model_id: 'dec-1', weight: 1 }]), id: 'g3' } as GroupModel;
+
+    const split = splitGroupsByLane([chatGroup, imgGroup, decGroup], kindIndex);
+
+    // EVERY row lands in exactly ONE bucket (the single-home
+    // invariant): the image-gen group is in the image-gen bucket and
+    // NOWHERE else.
+    expect(split['image-gen'].map((g) => g.id)).toEqual(['g2']);
+    expect(split.chat.map((g) => g.id)).toEqual(['g1']);
+    expect(split.decision.map((g) => g.id)).toEqual(['g3']);
+    expect(split.unknown).toEqual([]);
+  });
+
+  it('E12 — under three lanes the unknown bucket stays text-only (no row is invisible, no row is double-listed)', () => {
+    const kindIndex = index({
+      'chat-1': 'chat',
+      'dec-1': 'decision',
+      'img-1': 'image-gen',
+    });
+    const chatGroup = makeGroup([{ model_id: 'chat-1', weight: 1 }]);
+    const decGroup = { ...makeGroup([{ model_id: 'dec-1', weight: 1 }]), id: 'g2' } as GroupModel;
+    const imgGroup = { ...makeGroup([{ model_id: 'img-1', weight: 1 }]), id: 'g3' } as GroupModel;
+    // An unknown row: every member vanished.
+    const unknownGroup = { ...makeGroup([{ model_id: 'ghost', weight: 1 }]), id: 'g4' } as GroupModel;
+
+    const split = splitGroupsByLane([chatGroup, decGroup, imgGroup, unknownGroup], kindIndex);
+
+    // The unknown row is in the TEXT bucket (chat + unknown), NOT in
+    // the image-gen bucket and NOT in the decision bucket.
+    expect(split.unknown.map((g) => g.id)).toEqual(['g4']);
+    expect(split.chat.map((g) => g.id)).toEqual(['g1']);
+    expect(split['image-gen'].map((g) => g.id)).toEqual(['g3']);
+    expect(split.decision.map((g) => g.id)).toEqual(['g2']);
+
+    // NO ROW IS EVER INVISIBLE and NO ROW IS DOUBLE-LISTED: the three
+    // buckets together cover every row exactly once.
+    const allBuckets = [
+      ...split.chat.map((g) => g.id),
+      ...split.decision.map((g) => g.id),
+      ...split['image-gen'].map((g) => g.id),
+      ...split.unknown.map((g) => g.id),
+    ];
+    expect(allBuckets.slice().sort()).toEqual(['g1', 'g2', 'g3', 'g4']);
+    expect(new Set(allBuckets).size).toBe(allBuckets.length);
+  });
 });

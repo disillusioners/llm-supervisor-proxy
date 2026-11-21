@@ -53,11 +53,15 @@ export function GroupMemberEditor({ members, lane, laneModels, onChange }: Group
   // lane still offers inactive chat models). The decision arm adds the
   // candidate-eligibility clause (ADR-7 / AC-R6): an inactive model is
   // a valid CHAIN target but NOT a group candidate, so it never
-  // appears here.
+  // appears here. The image-gen arm mirrors the decision arm (the
+  // imggen-groups commission — IA-4): an image-gen member candidate
+  // must be an ENABLED image-gen-kind model.
   const pickerModels =
     lane === 'chat'
       ? laneModels.filter((m) => !m.kind || m.kind === 'chat')
-      : laneModels.filter((m) => m.kind === 'decision' && m.enabled);
+      : lane === 'image-gen'
+        ? laneModels.filter((m) => m.kind === 'image-gen' && m.enabled)
+        : laneModels.filter((m) => m.kind === 'decision' && m.enabled);
 
   const addMember = () => {
     if (members.length >= MAX_GROUP_MEMBERS) return;
@@ -123,7 +127,11 @@ export function GroupMemberEditor({ members, lane, laneModels, onChange }: Group
                 data-testid="group-member-model-select"
               >
                 <option value="">
-                  {lane === 'chat' ? 'Select a chat model…' : 'Select a decision model…'}
+                  {lane === 'chat'
+                    ? 'Select a chat model…'
+                    : lane === 'image-gen'
+                      ? 'Select an image-gen model…'
+                      : 'Select a decision model…'}
                 </option>
                 {pickerModels.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -214,11 +222,19 @@ export function GroupMemberEditor({ members, lane, laneModels, onChange }: Group
           are false on this lane: there is NO fallback chain and NO
           racing engine here (ADR-11 OQ-2 / OQ-3 option (a)) — a
           member's resilience is per-credential attempts WITHIN the
-          member. */}
+          member. The image-gen arm states the same truth for the
+          image-gen lane (imggen-groups): a weighted pick per request, a
+          failover walk across the members, per-credential rotation
+          within a member — no chain, no racing, no per-conversation
+          pinning (the lane has no conversation key). */}
       <p class="text-xs text-gray-400 mt-1">
         {lane === 'chat' ? (
           <>
             Add up to {MAX_GROUP_MEMBERS} chat models. Higher weight = more requests routed to that member. Members run their own full pipeline (credentials, fallback, race). Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — same weighted-random + sticky rules apply among backups.
+          </>
+        ) : lane === 'image-gen' ? (
+          <>
+            Add up to {MAX_GROUP_MEMBERS} image-gen models. Higher weight = more requests routed to that member. Each member runs its own credentials; resilience is per-credential attempts within the member. A member failure advances the walk to the next member. There is no fallback chain on this lane (deliberately not built) and no racing. Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — the same weighted pick applies among backups.
           </>
         ) : (
           <>

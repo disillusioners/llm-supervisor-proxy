@@ -172,7 +172,7 @@ export function inferGroupLane(
       : 'chat';
 }
 
-// The three buckets the parent hands to the two group surfaces.
+// The four buckets the parent hands to the three group surfaces.
 //
 // The buckets are typed as the ACTUAL INPUT (Model[]), not as
 // GroupModel[]: splitGroupsByLane receives Model[] and Model.kind is
@@ -183,15 +183,19 @@ export function inferGroupLane(
 export interface GroupLaneSplit {
   chat: Model[];
   decision: Model[];
+  // The image-gen bucket (imggen-groups): the ImgGen container's Group
+  // child receives THIS bucket and nothing else.
+  'image-gen': Model[];
   unknown: Model[];
 }
 
 // splitGroupsByLane buckets the group list by the inferred lane.
 //
-// NO ROW IS EVER INVISIBLE IN BOTH TABS: the text lane receives
-// chat + unknown, the decision lane receives decision only. A group
-// the FE cannot classify stays in the text tab — next to its
-// historical home, where the operator can repair it.
+// NO ROW IS EVER INVISIBLE: every group lands in exactly ONE bucket —
+// the text lane receives chat + unknown, the decision lane receives
+// decision only, the image-gen lane receives image-gen only. A group the
+// FE cannot classify stays in the text lane — next to its historical
+// home, where the operator can repair it.
 //
 // "Unknown" is the FE's mirror of the server's UNRESOLVED lane
 // (pkg/store/database/store_group_rewrite.go :162-166 — the server
@@ -205,7 +209,7 @@ export function splitGroupsByLane(
   groups: Model[],
   kindIndex: Map<string, string>,
 ): GroupLaneSplit {
-  const split: GroupLaneSplit = { chat: [], decision: [], unknown: [] };
+  const split: GroupLaneSplit = { chat: [], decision: [], 'image-gen': [], unknown: [] };
   for (const group of groups) {
     const lane = inferGroupLane(group, kindIndex);
     // The row is a Model — Model.kind is OPTIONAL, so the old
@@ -216,13 +220,11 @@ export function splitGroupsByLane(
     const row: Model = group;
     if (lane === 'decision') split.decision.push(row);
     else if (lane === 'chat') split.chat.push(row);
-    // The 'image-gen' lane has NO bucket yet: the ImgGen container and
-    // its Group sub-tab are Phase-3 work, so an image-gen group falls
-    // into `unknown` — it stays VISIBLE in the text tab (the
-    // single-home invariant: no row is ever invisible) until Phase 3
-    // gives the lane its own home. The FOLD above already answers
-    // 'image-gen' (the parity with the server is in inferGroupLane);
-    // only the DISPLAY bucket is still missing.
+    // The image-gen lane has its OWN home now (imggen-groups, phase 3):
+    // an image-gen group leaves the unknown bucket and appears ONLY in
+    // the ImgGen container's Group child — the single-home invariant
+    // (no row is invisible, no row is double-listed).
+    else if (lane === 'image-gen') split['image-gen'].push(row);
     else split.unknown.push(row);
   }
   return split;
