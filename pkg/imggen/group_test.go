@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
@@ -55,6 +58,10 @@ type groupModelsStub struct {
 	rows     []models.ModelConfig
 	lanes    map[string]models.GroupLane
 	getCalls int
+	// credRows serves the in-request credential-list seam (D-1). It is
+	// keyed by credential ID and holds the credential row (provider /
+	// key / baseURL); the member's own row carries the ordered refs.
+	credRows map[string]models.CredentialConfig
 }
 
 // GetModels returns the stub's rows and COUNTS the read (the W-3
@@ -77,6 +84,21 @@ func (s *groupModelsStub) GetEnabledModels() []models.ModelConfig {
 		}
 	}
 	return out
+}
+
+// GetCredential serves the in-request credential-list seam (D-1) from
+// the harness's credential rows. The embedded JSON twin's credential
+// store is intentionally left empty — the harness injects rows
+// directly (no write-time provider validation, no crypto init).
+func (s *groupModelsStub) GetCredential(id string) *models.CredentialConfig {
+	if s.credRows == nil {
+		return nil
+	}
+	cred, ok := s.credRows[id]
+	if !ok {
+		return nil
+	}
+	return &cred
 }
 
 // GroupLane answers the OPTIONAL lane seam.
@@ -136,28 +158,27 @@ func newGroupUpstreamDelayed(t *testing.T, status int, body []byte, delay time.D
 	return fu
 }
 
-// credSequence is a member's credential sequence: the resolver hands
-// the credentials out in order and then repeats the LAST one — the
-// triedPairs check is what ends the member's rotation (the decision
-// lane's mechanism).
-type credSequence struct {
-	mu    sync.Mutex
-	creds []models.ResolvedCredential
-	idx   int
+// boundCredential models the PRODUCTION affinity binding: once a member
+// resolves to a credential, every RE-RESOLVE returns that SAME credential
+// (the (memberID, memberID) conversation-key binding with a 30m TTL).
+//
+// It is deliberately NOT a sequence stub. The old credSequence handed out
+// distinct credentials on each resolve, which could pass a rotation pin
+// while production was broken (D-1): the walk re-resolved, got the next
+// credential from the stub, and never noticed that the real engine would
+// have returned the bound one again. Rotation in the group walk is now
+// driven by the IN-REQUEST credential-list seam, never by re-resolution —
+// so the pin must model the binding shape honestly.
+type boundCredential struct {
+	mu   sync.Mutex
+	cred models.ResolvedCredential
+	ok   bool
 }
 
-func (c *credSequence) next() (models.ResolvedCredential, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.creds) == 0 {
-		return models.ResolvedCredential{}, false
-	}
-	if c.idx >= len(c.creds) {
-		c.idx = len(c.creds) - 1
-	}
-	cred := c.creds[c.idx]
-	c.idx++
-	return cred, true
+func (b *boundCredential) resolve() (models.ResolvedCredential, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cred, b.ok
 }
 
 // groupEnv is the image-gen GROUP test harness.
@@ -169,7 +190,7 @@ type groupEnv struct {
 	stub       *groupModelsStub
 	tokenStore *memTokenStore
 	upstreams  map[string]*groupFakeUpstream
-	credSeq    map[string]*credSequence
+	bound      map[string]*boundCredential
 	groupID    string
 }
 
@@ -250,7 +271,12 @@ func newGroupEnv(t *testing.T, rows []models.ModelConfig, lanes map[string]model
 	bus := events.NewBus()
 	ts := newMemTokenStore()
 
-	stub := &groupModelsStub{ModelsConfig: models.NewModelsConfig(), rows: rows, lanes: lanes}
+	stub := &groupModelsStub{
+		ModelsConfig: models.NewModelsConfig(),
+		rows:         rows,
+		lanes:        lanes,
+		credRows:     map[string]models.CredentialConfig{},
+	}
 	env := &groupEnv{
 		t:          t,
 		bus:        bus,
@@ -258,11 +284,39 @@ func newGroupEnv(t *testing.T, rows []models.ModelConfig, lanes map[string]model
 		stub:       stub,
 		tokenStore: ts,
 		upstreams:  upstreams,
-		credSeq:    map[string]*credSequence{},
+		bound:      map[string]*boundCredential{},
 	}
 
+	// Seed the models seam for the in-request credential-list (D-1):
+	// each member's resolved-credential list becomes (a) ordered
+	// CredentialRefs on the member's own row and (b) credential rows
+	// in the stub, so FlattenCredentialRefs + GetCredential reproduce
+	// the production shape. The resolver stub models the AFFINITY
+	// BINDING: it always returns the member's FIRST credential, even
+	// after a rotation-eligible failure — a re-resolve-based rotation
+	// would therefore stall and this harness would catch it.
+	rowIndex := map[string]int{}
+	for i, row := range stub.rows {
+		rowIndex[row.ID] = i
+	}
 	for id, seq := range creds {
-		env.credSeq[id] = &credSequence{creds: seq}
+		refs := make([]models.CredentialRef, 0, len(seq))
+		for i, cred := range seq {
+			credID := cred.CredentialID
+			if credID == "" {
+				credID = "cred-" + id + "-" + strconv.Itoa(i)
+			}
+			stub.credRows[credID] = models.CredentialConfig{
+				ID: credID, Provider: cred.Provider, APIKey: cred.APIKey, BaseURL: cred.BaseURL,
+			}
+			refs = append(refs, models.CredentialRef{CredentialID: credID, Weight: 1, Position: i})
+		}
+		if idx, ok := rowIndex[id]; ok {
+			stub.rows[idx].Credentials = refs
+		}
+		if len(seq) > 0 {
+			env.bound[id] = &boundCredential{cred: seq[0], ok: true}
+		}
 	}
 
 	h := NewHandler(stubConfig{timeout: 2 * time.Second}, bus, ts, uc)
@@ -277,11 +331,11 @@ func newGroupEnv(t *testing.T, rows []models.ModelConfig, lanes map[string]model
 		return nil, false
 	})
 	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
-		seq, ok := env.credSeq[id]
+		bound, ok := env.bound[id]
 		if !ok {
 			return models.ResolvedCredential{}, false
 		}
-		return seq.next()
+		return bound.resolve()
 	})
 	env.handler = h
 
@@ -1058,5 +1112,435 @@ func TestServeImageGenGroup_OneGetModelsReadPerRequest(t *testing.T) {
 	}
 	if env.stub.getCalls != 1 {
 		t.Errorf("GetModels reads = %d, want exactly 1 per group request", env.stub.getCalls)
+	}
+}
+
+// ===================================================================
+// Verification-fix iteration 1 (D-1..D-6) pins.
+//
+// These pins exercise the adjudicated defects directly. The harness's
+// credential resolver now models the PRODUCTION affinity binding (the
+// same credential on every resolve), so a rotation that relied on
+// re-resolving would stall — the pins below can only pass via the
+// in-request credential-list seam.
+// ===================================================================
+
+// TestServeImageGenGroup_RotationFiresUnderAffinityBinding — D-1: a
+// member whose FIRST credential is bad and SECOND is healthy must be
+// served 200 from the SECOND. The resolver stub returns the SAME
+// (first) credential on every call (the production binding shape), so
+// the ONLY way to reach the second credential is the in-request
+// credential-list seam. A sequence stub would hide this defect.
+func TestServeImageGenGroup_RotationFiresUnderAffinityBinding(t *testing.T) {
+	badBody := []byte(`{"error":{"message":"quota exhausted"}}`)
+	upBad := newGroupUpstream(t, 429, badBody)
+	upGood := newGroupUpstream(t, 200, successBody(1, 0))
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupRowWithBackups("img-group", "img-a"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {
+				{Provider: "9router", APIKey: "sk-bad", BaseURL: upBad.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-bad"},
+				{Provider: "9router", APIKey: "sk-good", BaseURL: upGood.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-good"},
+			},
+		},
+		map[string]*groupFakeUpstream{"img-a": upBad})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the member's SECOND credential; body=%s", rec.Code, rec.Body.String())
+	}
+	if upBad.hits.Load() != 1 {
+		t.Errorf("bad-credential upstream hits = %d, want 1", upBad.hits.Load())
+	}
+	if upGood.hits.Load() != 1 {
+		t.Errorf("healthy-credential upstream hits = %d, want 1 (rotation must fire)", upGood.hits.Load())
+	}
+}
+
+// TestServeImageGenGroup_RotationThroughCachedConfig — D-1 decorator-
+// through: the SAME rotation proof, but driven through the REAL
+// *modelscache.CachedModelsConfig over a real migrated SQLite store —
+// the production binding. The two methods the seam composes
+// (FlattenCredentialRefs + GetCredential) must both be forwarded by
+// the decorator or the rotation stalls here.
+func TestServeImageGenGroup_RotationThroughCachedConfig(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "imggen-rotation-cached.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	dbStore, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { dbStore.Close() })
+	if err := dbStore.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := database.NewModelsManager(dbStore, nil)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	badBody := []byte(`{"error":{"message":"quota exhausted"}}`)
+	upBad := newGroupUpstream(t, 429, badBody)
+	upGood := newGroupUpstream(t, 200, successBody(1, 0))
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-bad", Provider: "9router", APIKey: "sk-bad", BaseURL: upBad.srv.URL}); err != nil {
+		t.Fatalf("AddCredential(bad): %v", err)
+	}
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-good", Provider: "9router", APIKey: "sk-good", BaseURL: upGood.srv.URL}); err != nil {
+		t.Fatalf("AddCredential(good): %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "img-member", Name: "Img Member", Enabled: true, Internal: true,
+		Kind: models.KindImageGen, InternalModel: "image-img-member",
+		Credentials: []models.CredentialRef{
+			{CredentialID: "cred-bad", Weight: 1, Position: 0},
+			{CredentialID: "cred-good", Weight: 1, Position: 1},
+		},
+	}); err != nil {
+		t.Fatalf("seed image-gen member: %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "img-group", Name: "Img Group", Enabled: true, Internal: true,
+		Kind: models.KindGroup, Members: []models.GroupMember{{ModelID: "img-member", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("seed image-gen group: %v", err)
+	}
+	cached, err := modelscache.NewCachedModelsConfig(mgr, modelscache.Options{ReconcileInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewCachedModelsConfig: %v", err)
+	}
+	t.Cleanup(cached.Stop)
+
+	bus := events.NewBus()
+	ts := newMemTokenStore()
+	ts.add(&auth.AuthToken{ID: "tok-test", Name: "Test Token", TokenHash: auth.HashToken("sk-test-token")})
+	h := NewHandler(stubConfig{timeout: 5 * time.Second}, bus, ts, nil)
+	h.SetModelResolver(func(id string) (*models.ModelConfig, bool) {
+		m := cached.GetModel(id)
+		if m == nil {
+			return nil, false
+		}
+		return m, true
+	})
+	// The PRODUCTION resolver wiring: a NON-EMPTY conversation key
+	// (= modelID) binds one credential. A re-resolve-based rotation
+	// would return that same credential and stall.
+	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+		return cached.ResolveInternalConfigWithAffinity(id, id)
+	})
+	h.SetModelsConfig(cached)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/image_generation", strings.NewReader(`{"model":"img-group","prompt":"x"}`))
+	req.Header.Set("Authorization", "Bearer sk-test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.HandleImageGeneration(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 through the decorator; body=%s", rec.Code, rec.Body.String())
+	}
+	if upBad.hits.Load() != 1 {
+		t.Errorf("bad-credential upstream hits = %d, want 1", upBad.hits.Load())
+	}
+	if upGood.hits.Load() != 1 {
+		t.Errorf("healthy-credential upstream hits = %d, want 1 (the seam must advance through the decorator)", upGood.hits.Load())
+	}
+}
+
+// TestServeImageGenGroup_RotatingMember_RespectsWalkBudget — D-2: a
+// rotating member's SECOND attempt must see the FRESH remaining walk
+// budget, not a stale per-member snapshot. The first attempt consumes
+// most of the budget; the second attempt's ctx deadline must still be
+// bounded by the walk deadline.
+func TestServeImageGenGroup_RotatingMember_RespectsWalkBudget(t *testing.T) {
+	quotaBody := []byte(`{"error":{"message":"quota exhausted"}}`)
+	// cred-1 delays 100ms then fails with quota (rotation-eligible).
+	upSlow := newGroupUpstreamDelayed(t, 429, quotaBody, 100*time.Millisecond)
+	// cred-2 responds at once; we capture its ctx deadline.
+	upFast := newGroupUpstream(t, 200, successBody(1, 0))
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupRowWithBackups("img-group", "img-a"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {
+				{Provider: "9router", APIKey: "sk-1", BaseURL: upSlow.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-1"},
+				{Provider: "9router", APIKey: "sk-2", BaseURL: upFast.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-2"},
+			},
+		},
+		map[string]*groupFakeUpstream{"img-a": upSlow})
+
+	// Walk budget 150ms; per-member timeout 2s (the stub default).
+	// With a STALE per-member `remaining` the second attempt would
+	// grant a ~150ms ctx (deadline ≈ start+250ms). With the FRESH
+	// per-attempt remaining it grants ~50ms (deadline ≈ start+150ms).
+	env.handler.configMgr = budgetConfig{timeout: 2 * time.Second, walk: 150 * time.Millisecond}
+
+	start := time.Now()
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the second credential is healthy); body=%s", rec.Code, rec.Body.String())
+	}
+	if upSlow.hits.Load() != 1 || upFast.hits.Load() != 1 {
+		t.Fatalf("hits = slow %d / fast %d, want 1/1 (rotation must fire)", upSlow.hits.Load(), upFast.hits.Load())
+	}
+	// The whole walk must stay within the budget plus scheduling slack.
+	if elapsed > 220*time.Millisecond {
+		t.Errorf("walk took %v — a rotating member overran the 150ms budget (stale remaining)", elapsed)
+	}
+}
+
+// TestServeImageGenGroup_DistinctMembersAttempted — D-3:
+// members_attempted counts DISTINCT members. A member rotating across
+// two credentials contributes 2 to attempted but only 1 here.
+func TestServeImageGenGroup_DistinctMembersAttempted(t *testing.T) {
+	quotaBody := []byte(`{"error":{"message":"quota exhausted"}}`)
+	errBody := []byte(`{"error":{"message":"boom"}}`)
+	// 429 quota is rotation-eligible ⇒ member A consumes BOTH of its
+	// credentials before the walk advances (a 5xx would advance at
+	// once without rotating).
+	upA := newGroupUpstream(t, 429, quotaBody)
+	upB := newGroupUpstream(t, 500, errBody)
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupMemberRow("img-b"),
+			groupRowWithBackups("img-group", "img-a", "img-b"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {
+				{Provider: "9router", APIKey: "sk-a1", BaseURL: upA.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-a1"},
+				{Provider: "9router", APIKey: "sk-a2", BaseURL: upA.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-a2"},
+			},
+			"img-b": {{Provider: "9router", APIKey: "sk-b", BaseURL: upB.srv.URL, InternalModel: "image-img-b", CredentialID: "cred-b"}},
+		},
+		map[string]*groupFakeUpstream{"img-a": upA, "img-b": upB})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	evt := findEvent(env.events(), "all_members_failed")
+	if evt == nil {
+		t.Fatalf("no all_members_failed event")
+	}
+	if evt["attempted"] != 3 {
+		t.Errorf("attempted = %v, want 3 (A twice + B once)", evt["attempted"])
+	}
+	if evt["members_attempted"] != 2 {
+		t.Errorf("members_attempted = %v, want 2 DISTINCT members (A rotated but counts once)", evt["members_attempted"])
+	}
+}
+
+// TestServeImageGenGroup_SkippedCountsPolicySkipped — D-3: skipped
+// counts the members the POLICY refused as unservable at pick time
+// (vanished / disabled / wrong-kind), not scope-excluded members.
+func TestServeImageGenGroup_SkippedCountsPolicySkipped(t *testing.T) {
+	errBody := []byte(`{"error":{"message":"boom"}}`)
+	upOK := newGroupUpstream(t, 500, errBody)
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-ok"),
+			groupMemberRowDisabled("img-disabled"),
+			groupRowWithBackups("img-group", "img-ok", "img-disabled", "img-vanished"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-ok": {{Provider: "minimax", APIKey: "sk-ok", BaseURL: upOK.srv.URL, InternalModel: "image-img-ok", CredentialID: "cred-ok"}},
+		},
+		map[string]*groupFakeUpstream{"img-ok": upOK})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	evt := findEvent(env.events(), "all_members_failed")
+	if evt == nil {
+		t.Fatalf("no all_members_failed event")
+	}
+	// filtered.Members has 3 entries; the policy admits only img-ok.
+	if evt["skipped"] != 2 {
+		t.Errorf("skipped = %v, want 2 (disabled + vanished were policy-skipped)", evt["skipped"])
+	}
+	if evt["members_attempted"] != 1 {
+		t.Errorf("members_attempted = %v, want 1", evt["members_attempted"])
+	}
+}
+
+// TestServeImageGenGroup_QuotaUnresolved_DoesNotResetShortCircuit — D-6:
+// quota, quota, UNRESOLVED (no attempt / no class), quota, quota ⇒
+// short-circuit AT THE THIRD QUOTA (the unresolved member does NOT
+// reset the consecutive-quota counter).
+func TestServeImageGenGroup_QuotaUnresolved_DoesNotResetShortCircuit(t *testing.T) {
+	quotaBody := []byte(`{"error":{"message":"quota exhausted"}}`)
+	upA := newGroupUpstream(t, 429, quotaBody)
+	upB := newGroupUpstream(t, 429, quotaBody)
+	upD := newGroupUpstream(t, 429, quotaBody)
+	upE := newGroupUpstream(t, 429, quotaBody)
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupMemberRow("img-b"),
+			groupMemberRow("img-unresolved"), // no credential entry ⇒ unresolved
+			groupMemberRow("img-d"),
+			groupMemberRow("img-e"),
+			groupRowWithBackups("img-group", "img-a", "img-b", "img-unresolved", "img-d", "img-e"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {{Provider: "9router", APIKey: "sk-a", BaseURL: upA.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-a"}},
+			"img-b": {{Provider: "9router", APIKey: "sk-b", BaseURL: upB.srv.URL, InternalModel: "image-img-b", CredentialID: "cred-b"}},
+			"img-d": {{Provider: "9router", APIKey: "sk-d", BaseURL: upD.srv.URL, InternalModel: "image-img-d", CredentialID: "cred-d"}},
+			"img-e": {{Provider: "9router", APIKey: "sk-e", BaseURL: upE.srv.URL, InternalModel: "image-img-e", CredentialID: "cred-e"}},
+		},
+		map[string]*groupFakeUpstream{
+			"img-a": upA, "img-b": upB, "img-d": upD, "img-e": upE,
+		})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	// The third quota (member D) triggers the short-circuit; E is never
+	// attempted. If the unresolved member had RESET the counter, D would
+	// be the second quota and E would be attempted.
+	if upD.hits.Load() != 1 {
+		t.Errorf("member D hits = %d, want 1", upD.hits.Load())
+	}
+	if upE.hits.Load() != 0 {
+		t.Errorf("member E hits = %d, want 0 (the third quota must short-circuit)", upE.hits.Load())
+	}
+	evt := findEvent(env.events(), "all_members_failed")
+	if evt == nil {
+		t.Fatalf("no all_members_failed event")
+	}
+	if evt["short_circuited"] != true {
+		t.Errorf("short_circuited = %v, want true", evt["short_circuited"])
+	}
+	unresolved := 0
+	for _, e := range env.events() {
+		if e["outcome"] == "credential_unresolved" {
+			unresolved++
+		}
+	}
+	if unresolved != 1 {
+		t.Errorf("credential_unresolved events = %d, want 1", unresolved)
+	}
+}
+
+// newGroupUpstreamWithHeader is a fake upstream that sets an extra
+// response header — used to pin that the fail-fast relay copies the
+// upstream's response headers (D-4).
+func newGroupUpstreamWithHeader(t *testing.T, status int, body []byte, header, value string) *groupFakeUpstream {
+	t.Helper()
+	fu := newGroupUpstream(t, status, body)
+	// Wrap the existing server handler by standing up a new server
+	// with the same counter semantics plus the extra header.
+	fu.srv.Close()
+	fu.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fu.hits.Add(1)
+		w.Header().Set(header, value)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(fu.srv.Close)
+	return fu
+}
+
+// TestServeImageGenGroup_FailFastCopiesUpstreamHeaders — D-4: the
+// fail-fast relay copies the upstream response headers (parity with
+// the standalone PromoteToError relay), not just the status + body.
+func TestServeImageGenGroup_FailFastCopiesUpstreamHeaders(t *testing.T) {
+	badBody := []byte(`{"error":{"message":"bad prompt"}}`)
+	upA := newGroupUpstreamWithHeader(t, 400, badBody, "X-Upstream-Trace", "trace-42")
+	upB := newGroupUpstream(t, 200, successBody(1, 0))
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupMemberRow("img-b"),
+			groupRowWithBackups("img-group", "img-a", "img-b"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {{Provider: "9router", APIKey: "sk-a", BaseURL: upA.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-a"}},
+			"img-b": {{Provider: "9router", APIKey: "sk-b", BaseURL: upB.srv.URL, InternalModel: "image-img-b", CredentialID: "cred-b"}},
+		},
+		map[string]*groupFakeUpstream{"img-a": upA, "img-b": upB})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Upstream-Trace"); got != "trace-42" {
+		t.Errorf("relayed X-Upstream-Trace = %q, want %q (the fail-fast relay must copy the upstream headers)", got, "trace-42")
+	}
+	if upB.hits.Load() != 0 {
+		t.Errorf("member B hits = %d, want 0 (fail-fast stops the walk)", upB.hits.Load())
+	}
+}
+
+// TestServeImageGenGroup_FailFast_SingleTerminalEvent — D-5: exactly
+// ONE authoritative terminal event on the fail-fast path. The old code
+// emitted a per-attempt client_attributable event AND a second
+// terminal event with the same outcome + member — duplicated meaning.
+func TestServeImageGenGroup_FailFast_SingleTerminalEvent(t *testing.T) {
+	badBody := []byte(`{"error":{"message":"bad prompt"}}`)
+	upA := newGroupUpstream(t, 400, badBody)
+	upB := newGroupUpstream(t, 200, successBody(1, 0))
+
+	env := newGroupEnv(t,
+		[]models.ModelConfig{
+			groupMemberRow("img-a"),
+			groupMemberRow("img-b"),
+			groupRowWithBackups("img-group", "img-a", "img-b"),
+		},
+		map[string]models.GroupLane{"img-group": models.GroupLaneImageGen},
+		map[string][]models.ResolvedCredential{
+			"img-a": {{Provider: "9router", APIKey: "sk-a", BaseURL: upA.srv.URL, InternalModel: "image-img-a", CredentialID: "cred-a"}},
+			"img-b": {{Provider: "9router", APIKey: "sk-b", BaseURL: upB.srv.URL, InternalModel: "image-img-b", CredentialID: "cred-b"}},
+		},
+		map[string]*groupFakeUpstream{"img-a": upA, "img-b": upB})
+
+	rec := env.post(`{"model":"img-group","prompt":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	events := env.events()
+	terminal := 0
+	for _, evt := range events {
+		// The single authoritative event is the one carrying the
+		// accounting counters (attempted/skipped/members_attempted).
+		if _, ok := evt["attempted"]; ok {
+			terminal++
+		}
+		if evt["outcome"] == "client_attributable" {
+			// Any client_attributable event MUST be the accounting one.
+			if _, ok := evt["attempted"]; !ok {
+				t.Errorf("a per-attempt client_attributable event was emitted without accounting — duplicate terminal meaning; events=%v", events)
+			}
+		}
+	}
+	if terminal != 1 {
+		t.Errorf("terminal events with accounting = %d, want exactly 1; events=%v", terminal, events)
+	}
+	if upB.hits.Load() != 0 {
+		t.Errorf("member B hits = %d, want 0 (fail-fast)", upB.hits.Load())
 	}
 }

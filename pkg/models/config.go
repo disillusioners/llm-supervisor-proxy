@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1256,25 +1255,14 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
-	// Provider comes from credential only
-	provider = cred.Provider
-
-	// Resolve baseURL: model override > credential
-	baseURL = modelConfig.InternalBaseURL
-	if baseURL == "" {
-		baseURL = cred.BaseURL
-	}
-
-	// Determine actual model: check peak hour first
-	actualModel := modelConfig.InternalModel
-
-	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
-		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
-			modelConfig.ID, peakModel, modelConfig.InternalModel)
-		actualModel = peakModel
-	}
-
-	return provider, cred.APIKey, baseURL, actualModel, true
+	// Provider comes from the credential only.
+	// baseURL: model override > credential; model: peak-hour override.
+	// ALL THREE are composed by the single shared helper so a lane that
+	// resolves a SPECIFIC credential ref (the image-gen group's in-request
+	// rotation seam) composes the credential byte-identically to this
+	// resolver — no drift between the two paths.
+	resolved := ResolveCredentialFor(modelConfig, cred)
+	return resolved.Provider, resolved.APIKey, resolved.BaseURL, resolved.InternalModel, true
 }
 
 // ResolveInternalConfigWithAffinity (Phase 3 / Task 16 + Tasks 4/8/9 /

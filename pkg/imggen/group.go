@@ -82,8 +82,10 @@ const (
 	// identically, so the remaining members' honest attempts would
 	// only re-prove it while burning the budget).
 	//
-	// The counter is over quota-class failures ONLY: any non-quota
-	// outcome (or a success) RESETS it. No account-fingerprinting.
+	// The counter is over quota-class FAILURE OUTCOMES ONLY. A non-quota
+	// FAILURE OUTCOME (or a success) RESETS it; an UNRESOLVED member
+	// (credential_unresolved — no attempt, no class) does NOT reset it
+	// (D-6: pinned both ways). No account-fingerprinting.
 	quotaShortCircuitThreshold = 3
 )
 
@@ -390,8 +392,20 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 	//    deep-copies the whole set, so it must not be called twice
 	//    (W-3 / PD-5).
 	rows := h.currentModelRows()
+	// rowsByID serves the in-request credential-list seam (D-1): the
+	// member's OWN row (never the claims-first lookup) carries its
+	// credential refs. Built from the SAME single GetModels read (W-3).
+	rowsByID := make(map[string]models.ModelConfig, len(rows))
+	for _, row := range rows {
+		rowsByID[row.ID] = row
+	}
 	baseServable := countBaseServableMembers(group.Members, rows, lane)
 	policy := buildGroupPolicy(&filtered, rows, lane)
+	// D-3: skipped = POLICY-skipped members (unservable at pick): the
+	// scope-admitted members the policy refused as candidates (vanished /
+	// disabled / wrong-kind). Scope-excluded members are NOT counted —
+	// they are a permission matter, handled by the 403 fork above.
+	skipped := len(filtered.Members) - len(policy.Members)
 	order := policy.order()
 	if len(order) == 0 {
 		// ARM#3 — "empty by scope" (403) vs "empty by unservability"
@@ -412,7 +426,7 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 			h.sendModelNotAllowedError(w, clientModel)
 			return
 		}
-		h.exhaustImageGenGroup(w, groupID, authToken, 0, 0, 0, startTime, "", false, false)
+		h.exhaustImageGenGroup(w, groupID, authToken, 0, skipped, 0, startTime, "", false, false)
 		return
 	}
 
@@ -426,7 +440,6 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 	triedMembers := make(map[string]bool, len(order))
 	triedPairs := make(map[string]bool, len(order))
 	attempted := 0
-	skipped := 0
 	membersAttempted := 0
 	consecutiveQuota := 0
 	var winner *memberAttempt
@@ -442,40 +455,75 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 		}
 		triedMembers[candidate.ID] = true
 
-		// The budget is checked BEFORE each member attempt.
+		// The budget is checked BEFORE each member attempt (the fresh
+		// per-attempt check below is authoritative — D-2).
 		remaining := time.Until(walkDeadline)
 		if remaining <= 0 {
 			budgetExhausted = true
 			break
 		}
 
-		// The member's own resilience: its credentials are attempted
-		// one by one (the rotation-eligible classes consume them
-		// BEFORE the walk advances).
-		for {
-			cred, credOK := h.safeResolveCredential(candidate.ID)
-			if !credOK {
-				// The member has no usable credential — its own
-				// resilience is consumed; the walk advances.
-				h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-					"outcome":         "credential_unresolved",
-					"model":           groupID,
-					"member":          candidate.ID,
-					"duration_ms":     time.Since(startTime).Milliseconds(),
-					"upstream_status": 0,
-				})
-				break
-			}
-			pairKey := candidate.ID + "|" + cred.CredentialID
-			if triedPairs[pairKey] {
-				// Every credential of this member was already
-				// attempted — the member's resilience is consumed.
-				break
-			}
-			triedPairs[pairKey] = true
+		// THE MEMBER'S OWN CREDENTIALS — the IN-REQUEST candidate list
+		// (D-1). Built from the member row's configured credential refs
+		// (flattened through the models seam), resolved into executable
+		// credentials. NO engine call, NO affinity binding, NO cooldown
+		// or mark write: rotation advances WITHIN this request, so the
+		// production (modelID, modelID) affinity binding cannot pin the
+		// member to one credential. F-3 (zero cross-request health
+		// writes) stays fully intact.
+		memberRow := rowsByID[candidate.ID]
+		candidates := h.memberCredentialCandidates(&memberRow)
+		if len(candidates) == 0 {
+			// No usable credential — the member's own resilience is
+			// consumed; the walk advances. D-6: an UNRESOLVED member
+			// has NO attempt and NO failure class, so it does NOT
+			// reset the consecutive-quota counter (documented at the
+			// counter below).
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+				"outcome":         "credential_unresolved",
+				"model":           groupID,
+				"member":          candidate.ID,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
+				"upstream_status": 0,
+			})
+			continue // the walk ADVANCES to the next member
+		}
 
-			// The per-attempt deadline = min(remaining walk budget,
-			// the per-member deadline).
+		memberAttempted := false
+		for {
+			// D-2: recompute remaining PER ATTEMPT (inside the
+			// credential loop, before this attempt grants its ctx) —
+			// not once per member. A rotating member's later attempts
+			// must see the SHRINKING outer budget; a stale per-member
+			// snapshot would let them overrun it.
+			remaining = time.Until(walkDeadline)
+			if remaining <= 0 {
+				budgetExhausted = true
+				stopWalk = true
+				break
+			}
+
+			// Each attempt uses the NEXT UNTRIED credential of this
+			// member (the in-request list's configured order).
+			var cred models.ResolvedCredential
+			found := false
+			for _, c := range candidates {
+				if triedPairs[candidate.ID+"|"+c.CredentialID] {
+					continue
+				}
+				cred = c
+				found = true
+				break
+			}
+			if !found {
+				// Every credential of this member was attempted —
+				// its own resilience is consumed.
+				break
+			}
+			triedPairs[candidate.ID+"|"+cred.CredentialID] = true
+
+			// The per-attempt deadline = min(FRESH remaining walk
+			// budget, the per-member deadline).
 			attemptBudget := remaining
 			if perMember := h.imageGenTimeout(); perMember < attemptBudget {
 				attemptBudget = perMember
@@ -487,7 +535,13 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 			}
 
 			attempted++
-			membersAttempted++
+			// D-3: membersAttempted counts DISTINCT members attempted
+			// (a member rotating across N credentials contributes N to
+			// attempted but only ONE here).
+			if !memberAttempted {
+				membersAttempted++
+				memberAttempted = true
+			}
 			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 				"outcome":         "member_attempted",
 				"model":           groupID,
@@ -511,6 +565,20 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 			failure := h.classifyAttemptFailure(attempt)
 			lastClass = failure.class
 
+			// D-5: exactly ONE authoritative terminal event per
+			// request. On the fail-fast path the per-attempt failure
+			// event is NOT published here — failFastImageGenGroup
+			// publishes the single terminal event (same outcome +
+			// member + provider + upstream_status, now with the
+			// accounting counters). Emitting both duplicated the
+			// meaning of the same failure twice.
+			if !failure.advance {
+				// Client-attributable failure: the walk stops (the
+				// upstream's own failure is the answer).
+				h.failFastImageGenGroup(w, groupID, authToken, candidate.ID, attempt, failure, attempted, skipped, membersAttempted, startTime)
+				return
+			}
+
 			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 				"outcome":         failure.outcome,
 				"model":           groupID,
@@ -520,18 +588,16 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 				"duration_ms":     time.Since(startTime).Milliseconds(),
 			})
 
-			if !failure.advance {
-				// Client-attributable failure: the walk stops (the
-				// upstream's own failure is the answer).
-				h.failFastImageGenGroup(w, groupID, authToken, candidate.ID, attempt, failure, attempted, skipped, membersAttempted, startTime)
-				return
-			}
-
 			// The W-8 short-circuit: N CONSECUTIVE quota-class
-			// failures stop the walk (the quota wall is
+			// FAILURE OUTCOMES stop the walk (the quota wall is
 			// account-wide — the remaining members would only re-prove
-			// it while burning the budget). Any non-quota outcome
-			// RESETS the counter.
+			// it while burning the budget).
+			//
+			// D-6 semantics (pinned both ways): the counter counts
+			// consecutive quota-class FAILURE OUTCOMES only. A non-quota
+			// FAILURE OUTCOME (e.g. a 5xx) RESETS it. An UNRESOLVED
+			// member (credential_unresolved — no attempt, no class)
+			// does NOT reach this code and therefore does NOT reset it.
 			if failure.class == quotaFailureClass {
 				consecutiveQuota++
 				if consecutiveQuota >= quotaShortCircuitThreshold {
@@ -772,6 +838,16 @@ func (h *Handler) failFastImageGenGroup(w http.ResponseWriter, groupID string, a
 		// future-proofing tripwire): a failure never relays a 200.
 		log.Printf("[imggen] member=%s returned RelayStatus=200 on a failure — clamping to 502", memberID)
 		status = http.StatusBadGateway
+	}
+	// D-4: copy the upstream response headers, parity with the
+	// standalone PromoteToError relay (handler.go:511). Hop-by-hop
+	// headers — including Content-Length — are skipped by the shared
+	// copier, so a rewritten/normalized body can never carry a stale
+	// length. The app-owned Content-Type below is set AFTER the copy
+	// so it stays authoritative.
+	copyResponseHeaders(w, attempt.headers)
+	if _, ok := attempt.provider.(ErrorBodyNormalizer); ok {
+		w.Header().Del("Content-Length")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

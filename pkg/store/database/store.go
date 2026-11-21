@@ -2681,24 +2681,13 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 // SHARED by the legacy 5-tuple path and the affinity struct path
 // (P2-5) so peak-hour substitution cannot drift between them.
 func resolveWithCredential(modelConfig *models.ModelConfig, cred *models.CredentialConfig) (provider, apiKey, baseURL, actualModel string) {
-	// Resolve provider: use credential provider
-	provider = cred.Provider
-
-	// Resolve baseURL: model override > credential
-	baseURL = modelConfig.InternalBaseURL
-	if baseURL == "" {
-		baseURL = cred.BaseURL
-	}
-
-	// Determine actual model: check peak hour first
-	actualModel = modelConfig.InternalModel
-	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
-		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
-			modelConfig.ID, peakModel, modelConfig.InternalModel)
-		actualModel = peakModel
-	}
-
-	return provider, cred.APIKey, baseURL, actualModel
+	// The composition lives in pkg/models.ResolveCredentialFor — the
+	// SINGLE source of truth shared with the image-gen group's in-request
+	// credential-list seam (ResolveCredentialFor composes a SPECIFIC
+	// credential ref exactly like this resolver does). Delegating here
+	// keeps the two paths from drifting (peak-hour + baseURL override).
+	resolved := models.ResolveCredentialFor(modelConfig, cred)
+	return resolved.Provider, resolved.APIKey, resolved.BaseURL, resolved.InternalModel
 }
 
 // ResolvedCredential is the return shape of ResolveInternalConfigWithAffinity
