@@ -189,3 +189,27 @@ Widen, don't fork. An image-gen group is **the same `models.kind="group"` row** 
 - **Live helm rev / primary generation** — context-of-record says daoduc helm rev 51 (post Phase-3 oauth2 cutover) and primary gen 44 @ v204 `abd61d7` digest `cfc34862` (as of 2026-11-20); the ship tail **captures at ship time** and never trusts these numbers (phase4-plan §6.3).
 - **9router latency/quota figures** (p50 17.68s / max 21.42s / quota-429 after 15-17s) — cited from project operating knowledge (POK `9router-imggen-latency-jpeg`, `9router-imggen-quota-wall`), not re-measured in this worktree.
 - **Phase 1-3 file lists, test ledgers, timeout numbers, FE container names** — owned by the parallel phase plans; this register records shapes and defaults, and marks them PROPOSED where the owning worker refines.
+
+---
+
+## D-19 — verification-fix iteration 1 (adjudicated D1–D6), 2026-11-20
+
+**Context.** Adversarial review of the landed range `5cf1ecdc..cda3aea` raised six defects. All six are adjudicated; this entry is the implementation record (no re-adjudication).
+
+**D-1 (BLOCKER) — rotation never fires in production.** Production wires the resolver to `ResolveInternalConfigWithAffinity(modelID, modelID)` (`cmd/main.go:343-349`): a NON-EMPTY conversation key, so the credentiallb engine binds one credential for 30m. Re-resolving after a rotation-eligible failure returns the SAME credential, `triedPairs` hits, and the member gets one attempt. The decision lane's escape (`ExcludeAndReselectForClass`) is a cross-request health write, forbidden here by F-3.
+
+- **Fix (option (a)):** an **IN-REQUEST credential-list seam** (`pkg/imggen/group_credentials.go`). Per member the walk builds the ordered candidate list from the member row's configured credential refs (`FlattenCredentialRefs` — group refs expand) and resolves each via `GetCredential` + `models.ResolveCredentialFor`; each attempt consumes the next untried entry. No engine call, no binding, no cooldown/mark write: zero cross-request state (F-3 intact).
+- **Interface/decorator surface: NONE needed.** Both accessors are already on `models.ModelsConfigInterface` and already implemented by the production decorator (`CachedModelsConfig.FlattenCredentialRefs` delegates to the inner store read-through; `GetCredential` serves the cached decrypted credential). Keeping the seam in pkg/imggen makes a decorator-forward gap structurally impossible. `models.ResolveCredentialFor` is the single source of the (provider, key, baseURL, wire model) composition — the store's `resolveWithCredential` and the JSON twin's `ResolveInternalConfig` now delegate to it, so the seam cannot drift from the resolver.
+- **Pins:** `TestServeImageGenGroup_RotationFiresUnderAffinityBinding` (the reworked stub models the affinity binding — same credential on every resolve — so a re-resolve-based rotation stalls) + `TestServeImageGenGroup_RotationThroughCachedConfig` (decorator-through: real SQLite store + real `CachedModelsConfig` + production resolver wiring, cred1 bad / cred2 healthy ⇒ 200 from cred2).
+
+**D-2 — budget overrun on rotation.** `remaining` was computed once per member and reused for every credential attempt. Now recomputed **per attempt** inside the credential loop before the ctx grant; the walk budget stays the outer bound, per-member ctx = `min(fresh remaining, ImageGenTimeout)`. Pin: `TestServeImageGenGroup_RotatingMember_RespectsWalkBudget`.
+
+**D-3 — degenerate counters.** `membersAttempted` now counts DISTINCT members attempted (a rotating member contributes 1, not N); `skipped` now counts POLICY-skipped members (scope-admitted members the policy refused as unservable at pick — vanished/disabled/wrong-kind), not scope-excluded members (a permission matter, handled by the 403 fork). Every counter in the terminal event now has a defined meaning. Pins: `TestServeImageGenGroup_DistinctMembersAttempted`, `TestServeImageGenGroup_SkippedCountsPolicySkipped`.
+
+**D-4 — fail-fast relay dropped upstream headers.** `failFastImageGenGroup` now calls `copyResponseHeaders(w, attempt.headers)` (parity with the standalone PromoteToError relay) with the ErrorBodyNormalizer Content-Length guard; the app-owned Content-Type is set after the copy. Pin: `TestServeImageGenGroup_FailFastCopiesUpstreamHeaders`.
+
+**D-5 — duplicate terminal event.** The fail-fast path emitted a per-attempt `client_attributable` event AND a second terminal event with the same outcome + member. Now exactly ONE authoritative terminal event (the accounting-carrying one from `failFastImageGenGroup`); the per-attempt publish is suppressed on the non-advancing path. Pin: `TestServeImageGenGroup_FailFast_SingleTerminalEvent`.
+
+**D-6 — quota counter semantics.** `consecutiveQuota` counts consecutive quota-class FAILURE OUTCOMES; a non-quota failure outcome (e.g. 5xx) RESETS it; an UNRESOLVED member (`credential_unresolved` — no attempt, no class) does NOT reset it. Documented at the constant and at the counter. Pins: the existing `TestServeImageGenGroup_QuotaShortCircuit_ResetsOnNonQuota` (quota,quota,5xx,quota,quota ⇒ no short-circuit) stays green + NEW `TestServeImageGenGroup_QuotaUnresolved_DoesNotResetShortCircuit` (quota,quota,unresolved,quota,quota ⇒ short-circuit at the third quota).
+
+**Fences held:** `pkg/decision/**` and `pkg/authz/**` untouched; FE `src/**` + `static/**` untouched; no migrations. The shared resolution helper is additive in `pkg/models`; the store's private helper was rewired to delegate (no behavior change). All P1+P2 pins green.
