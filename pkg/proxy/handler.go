@@ -80,6 +80,20 @@ import (
 // forbids it); the two must stay in sync by hand.
 const decisionMisrouteCode = "decision_misroute"
 
+// imageGenMisrouteCode is the machine-readable code for a CHAT-family
+// misroute to an image-gen model or an image-gen-lane GROUP (the
+// imggen-groups commission / D-15).
+//
+// It is a DIFFERENT string from the image-gen lane's own
+// "image_misroute" (pkg/imggen — the packages do not import each
+// other, the import guard forbids it): the CHAT family says
+// image_gen_misroute, the image-gen lane says image_misroute. Two
+// distinct machine codes, never one shared string.
+//
+// The pkg/imggen package carries its own copy of the lane's code (the
+// same by-hand sync as decisionMisrouteCode above).
+const imageGenMisrouteCode = "image_gen_misroute"
+
 // The compile-time proof that the PRODUCTION models binding satisfies
 // the group-lane seam (the decorator-forward trap): a removed forward
 // must break the BUILD, not silently no-op in production.
@@ -412,19 +426,22 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	// OpenAI-compatible chat pickers (Decision Models / §3.1 site 6).
 	//
 	// Decision-groups commission: a group whose inferred lane is
-	// DECISION is excluded too (it is served by /v1/decisions). The
-	// lane derivation folds over ALL models (not the enabled-only
-	// list): a disabled decision member still counts toward the
-	// group's unanimity, so a group with a disabled decision member
-	// is still a decision group.
+	// DECISION is excluded too (it is served by /v1/decisions).
+	// imggen-groups commission: the exclusion widens to EVERY
+	// NON-CHAT lane — an image-gen-lane group is served by
+	// /v1/image_generation and must not appear in the chat pickers
+	// either. The lane derivation folds over ALL models (not the
+	// enabled-only list): a disabled member still counts toward the
+	// group's unanimity, so a group with a disabled decision or
+	// image-gen member is still a non-chat group.
 	allModels := cfg.ModelsConfig.GetModels()
-	decisionGroups := map[string]bool{}
+	nonChatGroups := map[string]bool{}
 	for _, g := range allModels {
 		if !g.IsGroup() {
 			continue
 		}
-		if lane, ok := groupLaneOf(cfg.ModelsConfig, g.ID); ok && lane == models.GroupLaneDecision {
-			decisionGroups[g.ID] = true
+		if lane, ok := groupLaneOf(cfg.ModelsConfig, g.ID); ok && lane != models.GroupLaneChat {
+			nonChatGroups[g.ID] = true
 		}
 	}
 	models := make([]map[string]interface{}, 0, len(enabledModels))
@@ -432,8 +449,8 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		if m.IsImageGen() || m.IsDecision() {
 			continue
 		}
-		if decisionGroups[m.ID] {
-			continue // a decision-lane group — served by /v1/decisions
+		if nonChatGroups[m.ID] {
+			continue // a non-chat-lane group — served by its own lane
 		}
 		if claimedIDs[m.ID] {
 			continue // shadowed by an enabled group — hidden
@@ -677,7 +694,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[imggen] rejecting chat misroute to image-gen model=%s (model is served by /v1/image_generation only)", rc.resolvedModel.ID)
 		h.sendError(w, http.StatusBadRequest,
 			"image-gen models are served by /v1/image_generation only",
-			models.ErrorTypeServerError, "image_gen_misroute")
+			models.ErrorTypeServerError, imageGenMisrouteCode)
 		return
 	}
 
@@ -718,6 +735,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.sendError(w, http.StatusBadRequest,
 				"decision models are served by /v1/decisions only",
 				models.ErrorTypeServerError, decisionMisrouteCode)
+			return
+		case laneOK && lane == models.GroupLaneImageGen:
+			// imggen-groups commission / D-15: an image-gen-lane
+			// GROUP is served by /v1/image_generation only. The arm
+			// is ADDITIVE and lane-gated (a chat group is
+			// unaffected) and it runs BEFORE the group rewrite, so
+			// the misroute is structurally impossible.
+			log.Printf("[imggen] rejecting chat misroute to image-gen group=%s (the group is served by /v1/image_generation only)", groupID)
+			h.sendError(w, http.StatusBadRequest,
+				"image-gen models are served by /v1/image_generation only",
+				models.ErrorTypeServerError, imageGenMisrouteCode)
 			return
 		case laneOK && lane == models.GroupLaneChat && groupHasDecisionMember(rc.conf.ModelsConfig.GetModels(), groupID):
 			log.Printf("[decision] refusing chat group=%s — the group carries a decision-kind member (the mixed shape must never be served on the chat lane)", groupID)

@@ -111,3 +111,28 @@
 ### Headless coverage gap (permanent, happy-dom)
 
 Late height materialization (ResizeObserver on real layout) is structurally untestable headless — symptom-2's production trigger needs manual smoke (checklist in RESULTS §8).
+
+---
+
+## 2026-11-21 — imggen-groups full gate (@ 42c04f8, base 5cf1ecdc) — +53 Go tests, +5 FE suites, all green
+
+### Added Go coverage (all PASS, anti-vacuous 53/53: RUN=1/PASS=1 each)
+
+| Area | Test File(s) | Tests | Status |
+|------|-------------|-------|--------|
+| Config walk-budget knob | `pkg/config/imggen_group_walk_timeout_test.go` (NEW) | 4 (default 240s, clamp [60s,10m], HOT read, JSON roundtrip) | ✅ PASS |
+| ImgGen authz/scope battery | `pkg/imggen/authz_group_test.go` (NEW) | 11 (403 zero-attempts + zero-engine-state, allowed_groups/wildcard 200, 403-vs-502 both directions, exclusion, no-leak, cached-config, misroute precedence, 404-vs-403, client-string quoting) | ✅ PASS |
+| ImgGen group walk + kind gate | `pkg/imggen/group_test.go` (NEW) | 24 (kind-gate misroute ×5, winner/metering, quota rotation + short-circuit, exhaustion envelope, walk budget, rotation ×2, headers, terminal event) | ✅ PASS |
+| ImgGen import contract | `pkg/imggen/import_guard_test.go` (+1) | 1 (import set == doc contract) | ✅ PASS |
+| Chat-route misroute pins | `pkg/proxy/imggen_group_misroute_test.go` (NEW) | 6 (/v1/models empty id-set diff, both chat routes ×2, code-string distinctness) | ✅ PASS |
+| Lane vocabulary | `pkg/models/group_rules_test.go` (+2) | 2 (MemberLane image-gen, unanimous-lane unrepresentable) | ✅ PASS |
+| Store lane boundary | `pkg/store/database/store_group_test.go` (+4) | 4 (lane inference, text-sweep refusal ×2, sweep-kind parameterization) | ✅ PASS |
+| FE parity gate | `pkg/ui/kind_rules_parity_test.go` (+1) | 1 (image-gen lane, 6 arms) | ✅ PASS |
+
+### Added FE coverage (63 it() tokens, each ×1; 53 files/569 tests total, ×0 fail)
+
+NEW suites: `TextModelsContainer` (16), `ImgGenModelsContainer` (13), `GroupModelsTab.imageGenLane` (8), `GroupModelForm.imageGenLane` (8), `GroupMemberEditor.imageGenLane` (7). MODIFIED: `SettingsPage.tabs` (11→10 retirement pins P3T1-P3T7), `groupLane.test.ts` (E9-E12). Three-lane container coverage: Text / Image Gen / Decision each hold a container suite + lane-scoped group trio + form suite.
+
+### Race coverage
+
+Full G11 scope green, ZERO data races: imggen 142/142 · store/database 231/231 (complement-tail split) · proxy 644/644 (complement-tail split) · light set 528/528 (authz/auth/modelscache/decision/store-root).

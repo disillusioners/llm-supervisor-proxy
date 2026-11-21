@@ -88,3 +88,53 @@ func TestPackage_ImportGuard_TransitiveClosure(t *testing.T) {
 		}
 	}
 }
+
+// TestPackage_ImportSet_MatchesTheDocContract — the doc.go import
+// contract is a PIN, not a comment.
+//
+// The package's NON-TEST sources import exactly the documented set
+// ({pkg/models, pkg/auth, pkg/authz, pkg/usage, pkg/events,
+// pkg/modelscache}); every other repo package is banned there. A new
+// repo dependency must update doc.go AND this pin in the same commit —
+// the alternative is a doc that quietly lies about the import law (and
+// a reviewer cannot see the drift).
+//
+// The TEST sources are exempt: they may use the usage counter's SQLite
+// test double (pkg/store/database).
+func TestPackage_ImportSet_MatchesTheDocContract(t *testing.T) {
+	const projectPrefix = "github.com/disillusioners/llm-supervisor-proxy/"
+	allowed := map[string]bool{
+		projectPrefix + "pkg/auth":        true,
+		projectPrefix + "pkg/authz":       true,
+		projectPrefix + "pkg/events":      true,
+		projectPrefix + "pkg/models":      true,
+		projectPrefix + "pkg/modelscache": true,
+		projectPrefix + "pkg/usage":       true,
+	}
+	importRe := regexp.MustCompile(`"(` + regexp.QuoteMeta(projectPrefix) + `[^"]+)"`)
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		scanned++
+		src, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		for _, m := range importRe.FindAllStringSubmatch(string(src), -1) {
+			imp := m[1]
+			if !allowed[imp] {
+				t.Errorf("%s imports %q — the pkg/imggen import set is EXHAUSTIVE and documented in doc.go; a new dependency must update doc.go + this pin in the same commit", e.Name(), imp)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("no non-test source files scanned — the pin would be vacuous")
+	}
+}

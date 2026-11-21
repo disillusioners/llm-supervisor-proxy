@@ -4,8 +4,8 @@ import type { Model, GroupModel, GroupLane } from '../../types';
 // WARNING — normalizeKind (below) is the LEGACY-KIND normalisation, NOT the
 // lane fold. It must NOT be used to decide a member's lane: it maps an
 // unrecognised kind to the chat default, while the server's
-// models.MemberLane (pkg/models/group_lane.go :46-55) returns ok=false
-// for such a kind and models.GroupLanesOf (:67-71) IGNORES the member
+// models.MemberLane (pkg/models/group_lane.go :53-62) returns ok=false
+// for such a kind and models.GroupLanesOf (:72-94) IGNORES the member
 // (it is unservable, not a lane vote). The lane fold therefore decides
 // FROM THE RAW KIND — buildKindIndex stores the raw kind for exactly
 // this reason, and memberLane (below) applies the server's rule.
@@ -46,18 +46,24 @@ export function normalizeKind(kind?: string): ModelKind {
 }
 
 // The lane a member kind votes for — the FE's mirror of the server's
-// models.MemberLane (pkg/models/group_lane.go :46-55):
+// models.MemberLane (pkg/models/group_lane.go :53-62):
 //
 //   '' / 'chat'   → chat     (the legacy "" kind IS chat)
 //   'decision'    → decision
-//   anything else → null     (image-gen / group belong to NO lane —
-//                              they are not members in either lane)
+//   'image-gen'   → image-gen (the imggen-groups commission: the
+//                              image-gen kind is a LANE of its own —
+//                              the lane value mirrors the server
+//                              constant literally)
+//   anything else → null     (a group row / an unknown kind belongs
+//                              to NO lane — it is not a member in any
+//                              lane)
 //
 // A null lane is "no lane evidence", NOT a vote for the other lane:
-// the server ignores such a member (models.GroupLanesOf :67-71).
-function memberLane(kind: string): 'chat' | 'decision' | null {
+// the server ignores such a member (models.GroupLanesOf :72-94).
+function memberLane(kind: string): GroupLane | null {
   if (kind === '' || kind === 'chat') return 'chat';
   if (kind === 'decision') return 'decision';
+  if (kind === 'image-gen') return 'image-gen';
   return null;
 }
 
@@ -122,19 +128,19 @@ export function buildKindIndex(sources: KindIndexSources): Map<string, string> {
 // The server's fold (pkg/store/database/store_group_rewrite.go
 // inferGroupLane :369-385) folds over the group's member rows and
 // hands the kinds to models.UnanimousGroupLane
-// (pkg/models/group_lane.go :95-101):
+// (pkg/models/group_lane.go :103-109):
 //
 //   - a member with an EMPTY id → skipped, no lane evidence
 //     (server :375-377)
 //   - a member id that resolves to NO row (a VANISHED member) →
 //     skipped, no lane evidence (server :378-381; the
 //     collection-shaped twin pkg/models/group_lane.go :147-150)
-//   - a member whose kind belongs to NO lane (image-gen, group) →
-//     skipped, no lane evidence: models.MemberLane :46-55 returns
-//     ok=false for such a kind and models.GroupLanesOf :67-71
+//   - a member whose kind belongs to NO lane (a group row, an unknown
+//     kind) → skipped, no lane evidence: models.MemberLane :53-62
+//     returns ok=false for such a kind and models.GroupLanesOf :72-94
 //     ignores it (an unservable member is not a lane vote)
 //   - the SURVIVING members then vote: exactly ONE lane → that
-//     lane (server :96-99); ZERO surviving lanes (an EMPTY surviving
+//     lane (server :103-109); ZERO surviving lanes (an EMPTY surviving
 //     set) or TWO lanes (a MIXED surviving set) → unknown.
 //
 // null means "unknown lane": the row is not silently dropped — it
@@ -147,22 +153,26 @@ export function inferGroupLane(
   kindIndex: Map<string, string>,
 ): GroupLane | null {
   const members = group.members ?? [];
-  const lanes = new Set<'chat' | 'decision'>();
+  const lanes = new Set<GroupLane>();
 
   for (const member of members) {
     if (member.model_id === '') continue; // server :375-377 — an unpicked row carries no lane evidence
     const raw = kindIndex.get(member.model_id);
     if (raw === undefined) continue; // server :378-381 — a vanished member carries no lane evidence
     const lane = memberLane(raw);
-    if (lane === null) continue; // server :67-71 — a member of no lane is ignored, not a vote
+    if (lane === null) continue; // server :72-94 — a member of no lane is ignored, not a vote
     lanes.add(lane);
   }
 
-  if (lanes.size !== 1) return null; // server :96-99 — empty (0) or mixed (2) surviving set → unknown
-  return lanes.has('decision') ? 'decision' : 'chat';
+  if (lanes.size !== 1) return null; // server :103-109 — empty (0) or mixed (2+) surviving set → unknown
+  return lanes.has('decision')
+    ? 'decision'
+    : lanes.has('image-gen')
+      ? 'image-gen'
+      : 'chat';
 }
 
-// The three buckets the parent hands to the two group surfaces.
+// The four buckets the parent hands to the three group surfaces.
 //
 // The buckets are typed as the ACTUAL INPUT (Model[]), not as
 // GroupModel[]: splitGroupsByLane receives Model[] and Model.kind is
@@ -173,15 +183,19 @@ export function inferGroupLane(
 export interface GroupLaneSplit {
   chat: Model[];
   decision: Model[];
+  // The image-gen bucket (imggen-groups): the ImgGen container's Group
+  // child receives THIS bucket and nothing else.
+  'image-gen': Model[];
   unknown: Model[];
 }
 
 // splitGroupsByLane buckets the group list by the inferred lane.
 //
-// NO ROW IS EVER INVISIBLE IN BOTH TABS: the text lane receives
-// chat + unknown, the decision lane receives decision only. A group
-// the FE cannot classify stays in the text tab — next to its
-// historical home, where the operator can repair it.
+// NO ROW IS EVER INVISIBLE: every group lands in exactly ONE bucket —
+// the text lane receives chat + unknown, the decision lane receives
+// decision only, the image-gen lane receives image-gen only. A group the
+// FE cannot classify stays in the text lane — next to its historical
+// home, where the operator can repair it.
 //
 // "Unknown" is the FE's mirror of the server's UNRESOLVED lane
 // (pkg/store/database/store_group_rewrite.go :162-166 — the server
@@ -195,7 +209,7 @@ export function splitGroupsByLane(
   groups: Model[],
   kindIndex: Map<string, string>,
 ): GroupLaneSplit {
-  const split: GroupLaneSplit = { chat: [], decision: [], unknown: [] };
+  const split: GroupLaneSplit = { chat: [], decision: [], 'image-gen': [], unknown: [] };
   for (const group of groups) {
     const lane = inferGroupLane(group, kindIndex);
     // The row is a Model — Model.kind is OPTIONAL, so the old
@@ -206,6 +220,11 @@ export function splitGroupsByLane(
     const row: Model = group;
     if (lane === 'decision') split.decision.push(row);
     else if (lane === 'chat') split.chat.push(row);
+    // The image-gen lane has its OWN home now (imggen-groups, phase 3):
+    // an image-gen group leaves the unknown bucket and appears ONLY in
+    // the ImgGen container's Group child — the single-home invariant
+    // (no row is invisible, no row is double-listed).
+    else if (lane === 'image-gen') split['image-gen'].push(row);
     else split.unknown.push(row);
   }
   return split;

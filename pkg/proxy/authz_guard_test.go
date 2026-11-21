@@ -315,6 +315,22 @@ func TestPackage_ImportGuard_NoScopeInHotLoop(t *testing.T) {
 		t.Error("pkg/decision/group.go calls .Allows( inside the attempt loop — the member filter must run on the COPY before buildGroupPolicy, never at attempt time")
 	}
 
+	// The image-gen lane's attempt loop: the SAME law. The member filter
+	// runs on the COPY before buildGroupPolicy, never inside the loop
+	// (imggen-groups commission / phase2-plan §4.3 / S5).
+	imggenGroupSrc, err := os.ReadFile(filepath.Join(root, "pkg", "imggen", "group.go"))
+	if err != nil {
+		t.Fatalf("read pkg/imggen/group.go: %v", err)
+	}
+	imggenGroupCode := stripGoComments(string(imggenGroupSrc))
+	imggenLoopIdx := strings.Index(imggenGroupCode, "for idx := range order {")
+	if imggenLoopIdx < 0 {
+		t.Fatal("could not locate the imggen attempt loop (`for idx := range order {`) — the pin would be vacuous")
+	}
+	if tail := imggenGroupCode[imggenLoopIdx:]; strings.Contains(tail, ".Allows(") {
+		t.Error("pkg/imggen/group.go calls .Allows( inside the attempt loop — the member filter must run on the COPY before buildGroupPolicy, never at attempt time")
+	}
+
 	// NEGATIVE CONTROL — must FIRE on the banned shapes.
 	if !strings.Contains("if !scope.Allows(id) {", ".Allows(") {
 		t.Error("negative control did not fire — the guard misses an attempt-time scope check")
@@ -366,8 +382,35 @@ func TestLaneContract_ReachResolutionOnlyViaAuthz(t *testing.T) {
 
 	// The lanes must actually USE the resolver (a guard that passes
 	// because nobody resolves anything would be vacuous).
-	if totalResolveCalls < 3 {
-		t.Fatalf("found only %d authz.Resolve( call(s) across the lanes — the four entry sites must resolve their scope through the ONE resolver", totalResolveCalls)
+	//
+	// W-1 (leader ruling): the floor is the FINAL post-fold count — 5
+	// verified census sites (pkg/proxy/handler.go, pkg/proxy/
+	// handler_anthropic.go, pkg/decision/group.go, pkg/decision/handler.go,
+	// pkg/imggen/handler.go) + EXACTLY ONE added by the imggen group arm
+	// = 6. The old `>= 3` passed with 5 and would not notice the arm's
+	// removal; `>= 6` is non-vacuous.
+	if totalResolveCalls < 6 {
+		t.Fatalf("found only %d authz.Resolve( call(s) across the lanes — expected >= 6 (5 census sites + the imggen group arm)", totalResolveCalls)
+	}
+
+	// W-1 (leader ruling): STRING-PIN the imggen group arm's OWN resolve.
+	// The entry gate (pkg/imggen/handler.go) also calls authz.Resolve for
+	// PLAIN models — so a bare string pin of `authz.Resolve(` would be
+	// satisfied by the entry gate even with the arm deleted. Bound the
+	// search to the ARM block (its opening marker) so a removed arm fails
+	// the guard BY NAME, not by a count drift.
+	imggenGroupRaw, err := os.ReadFile(filepath.Join(root, "pkg", "imggen", "group.go"))
+	if err != nil {
+		t.Fatalf("read pkg/imggen/group.go: %v", err)
+	}
+	const armOpenMarker = "ARM#1 (bypass-closed): the GROUP itself must be in reach."
+	armIdx := strings.Index(string(imggenGroupRaw), armOpenMarker)
+	if armIdx < 0 {
+		t.Fatalf("pkg/imggen/group.go is missing the group-arm scope marker %q — the arm's own resolve cannot be pinned (W-1)", armOpenMarker)
+	}
+	armBlock := string(imggenGroupRaw)[armIdx:]
+	if !strings.Contains(armBlock, "scope := authz.Resolve(authToken, h.membersOf())") {
+		t.Error("pkg/imggen/group.go ARM#1 does not resolve its OWN scope — the entry gate's resolve cannot satisfy the group arm's bypass-closed obligation (W-1)")
 	}
 
 	// NEGATIVE CONTROL — must FIRE on a raw-axis read.

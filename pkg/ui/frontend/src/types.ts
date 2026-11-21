@@ -179,9 +179,11 @@ export interface Model {
   // Group membership + ID-space claim (load-balance-groups commission /
   // migration 031): kind=='group' rows only, mirroring the Go
   // Model.Members / ShadowModelID wire tags (both omitempty). Members
-  // are PROXY MODEL IDs of existing chat-kind models (flat — no
-  // group-as-member); shadow_model_id optionally claims one existing
-  // chat model's ID so requests for it route to the group (plan §3.4).
+  // are PROXY MODEL IDs of existing models OF THE GROUP'S LANE
+  // (chat-kind, decision-kind or image-gen-kind — the lane is inferred
+  // from the members, never persisted; flat — no group-as-member);
+  // shadow_model_id optionally claims one existing lane model's ID so
+  // requests for it route to the group (plan §3.4).
   members?: GroupMember[];
   shadow_model_id?: string;
 }
@@ -201,14 +203,17 @@ export type DecisionModel = Model & { kind: 'decision' };
 // GroupLane — which lane a group (and therefore each of its members)
 // belongs to. 'chat' is the legacy default lane: a model row with an
 // absent / "" kind IS chat (the server's legacy-kind normalisation).
-// 'decision' is the decision-model lane.
+// 'decision' is the decision-model lane. 'image-gen' is the
+// image-generation lane (the imggen-groups commission — the lane
+// vocabulary mirrors the server's models.GroupLane constants
+// literally, so the lane VALUE equals the model-kind value).
 //
 // Additive only — no existing type changes. The lane is NEVER
 // persisted and NEVER travels on the wire (ruling D-2): it is
 // INFERRED at display time from the group's current member rows (see
 // components/config/groupLane.ts), and the server stays authoritative
 // on every write.
-export type GroupLane = 'chat' | 'decision';
+export type GroupLane = 'chat' | 'decision' | 'image-gen';
 
 // GroupMember — one (model, weight) entry of a group's flat member list
 // (load-balance-groups / Round-2 membership pivot). JSON tags mirror the

@@ -1419,6 +1419,178 @@ func TestGroup_RewriteGroupEntries_DecisionGroupInChatChain_BoundaryRefusal(t *t
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// imggen-groups commission — the IMAGE-GEN lane at the rewrite boundary.
+//
+// The image-gen lane is the THIRD lane of the ONE shared group entity
+// (the lane is inferred from the members — ADR-19). The text lane must
+// never serve an image-gen member: the chat executor would hand an
+// image-gen row to a chat pipeline. The refusal below is the LAST line
+// of defence (the route-level misroute guard lands in a later step of
+// the commission).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// seedImageGenMembers seeds the IMAGE-GEN-lane member rows (the
+// image-gen provider vocabulary is {minimax, 9router} — the minimax
+// credential qualifies).
+func seedImageGenMembers(t *testing.T, mgr *ModelsManager) {
+	t.Helper()
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"}); err != nil {
+		t.Fatalf("add minimax credential: %v", err)
+	}
+	for _, m := range []models.ModelConfig{
+		{ID: "img-a", Name: "Image A", Enabled: true, Kind: models.KindImageGen, Internal: true, InternalModel: "image-01", Credentials: models.TestRefs("minimax-cred")},
+		{ID: "img-b", Name: "Image B", Enabled: true, Kind: models.KindImageGen, Internal: true, InternalModel: "image-02", Credentials: models.TestRefs("minimax-cred")},
+	} {
+		if err := mgr.AddModel(m); err != nil {
+			t.Fatalf("seed image-gen member %s: %v", m.ID, err)
+		}
+	}
+}
+
+// imageGenGroup returns a valid image-gen-lane group row.
+func imageGenGroup() models.ModelConfig {
+	return models.ModelConfig{
+		ID:       "image-gen-group",
+		Name:     "Image Gen Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members: []models.GroupMember{
+			{ModelID: "img-a", Weight: 2},
+			{ModelID: "img-b", Weight: 1},
+		},
+	}
+}
+
+// TestGroup_GroupLane_InfersImageGen — an image-gen-member group's
+// lane is image-gen (the third lane of the shared group entity).
+func TestGroup_GroupLane_InfersImageGen(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedImageGenMembers(t, mgr)
+	if err := mgr.AddModel(imageGenGroup()); err != nil {
+		t.Fatalf("save image-gen group: %v", err)
+	}
+	lane, ok := mgr.GroupLane("image-gen-group")
+	if !ok || lane != models.GroupLaneImageGen {
+		t.Fatalf("GroupLane(image-gen-group) = (%q, %v), want (image-gen, true)", lane, ok)
+	}
+}
+
+// TestGroup_RewriteGroupEntries_ImageGenGroup_RefusedOnTextSweep — the
+// text-lane sweep REFUSES an image-gen-lane group: no image-gen member
+// is ever offered to the chat path.
+func TestGroup_RewriteGroupEntries_ImageGenGroup_RefusedOnTextSweep(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedImageGenMembers(t, mgr)
+	if err := mgr.AddModel(imageGenGroup()); err != nil {
+		t.Fatalf("save image-gen group: %v", err)
+	}
+	res := mgr.RewriteGroupEntries([]string{"image-gen-group"}, "")
+	if res.MemberID != "" {
+		t.Fatalf("the text sweep must not serve an image-gen member, got %q", res.MemberID)
+	}
+	if res.FailedGroupID != "image-gen-group" {
+		t.Fatalf("FailedGroupID = %q, want %q (the direct-named refusal)", res.FailedGroupID, "image-gen-group")
+	}
+	for _, id := range res.ModelList {
+		if id == "img-a" || id == "img-b" {
+			t.Fatalf("the execution list must not carry an image-gen member, got %v", res.ModelList)
+		}
+	}
+}
+
+// TestGroup_RewriteGroupEntries_ImageGenGroupInChatChain_BoundaryRefusal
+// — a chat model's fallback_chain naming an image-gen group: the group
+// is never served on the chat lane (no image-gen member in the
+// execution list) and the HEALTHY primary still serves (the request
+// does NOT fail). The direct-named case still fails closed.
+func TestGroup_RewriteGroupEntries_ImageGenGroupInChatChain_BoundaryRefusal(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedImageGenMembers(t, mgr)
+	if err := mgr.AddModel(imageGenGroup()); err != nil {
+		t.Fatalf("save image-gen group: %v", err)
+	}
+	// The chat main carries the image-gen group in its fallback chain.
+	// The WRITE-TIME rule rejects that shape (the write-time half of
+	// the rewrite-boundary lane check — ValidateFallbackChainLanes).
+	main := models.ModelConfig{ID: "chat-main", Name: "Chat Main", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "glm-5", Credentials: models.TestRefs("cred-openai")}
+	if err := mgr.AddModel(main); err != nil {
+		t.Fatalf("save chat main: %v", err)
+	}
+	main.FallbackChain = []string{"image-gen-group"}
+	if err := mgr.UpdateModel("chat-main", main); err == nil {
+		t.Fatal("the write-time rule must reject a chat model whose chain names an image-gen-lane group")
+	}
+	// The runtime net (defence in depth): a HAND-EDITED row (the shape
+	// the write-time rule cannot stop) is still refused at the rewrite
+	// boundary — the image-gen group never enters the chat execution
+	// list, and the healthy primary still serves.
+	chainJSON, err := json.Marshal([]string{"image-gen-group"})
+	if err != nil {
+		t.Fatalf("marshal chain: %v", err)
+	}
+	mgr.mu.Lock()
+	if _, err := mgr.store.DB.ExecContext(context.Background(), "UPDATE models SET fallback_chain_json = ? WHERE id = ?", string(chainJSON), "chat-main"); err != nil {
+		mgr.mu.Unlock()
+		t.Fatalf("raw chat main chain: %v", err)
+	}
+	mgr.mu.Unlock()
+
+	res := mgr.RewriteGroupEntries([]string{"chat-main", "image-gen-group"}, "")
+	if res.FailedGroupID != "" {
+		t.Fatalf("the healthy primary must not fail: FailedGroupID = %q", res.FailedGroupID)
+	}
+	for _, id := range res.ModelList {
+		if id == "img-a" || id == "img-b" {
+			t.Fatalf("the execution list must not carry an image-gen member, got %v", res.ModelList)
+		}
+	}
+	if len(res.ModelList) == 0 || res.ModelList[0] != "chat-main" {
+		t.Fatalf("the chat primary must stay the execution head, got %v", res.ModelList)
+	}
+}
+
+// TestGroup_SweepKindParameterization_ImageGenLane — the candidate
+// predicate consults the EXPECTED lane: an image-gen member is
+// servable when the expected lane is image-gen and NOT servable on the
+// chat lane (the mutation control — a kind-agnostic predicate would
+// serve an image-gen member on the chat lane).
+func TestGroup_SweepKindParameterization_ImageGenLane(t *testing.T) {
+	imgRow := &models.ModelConfig{ID: "img-a", Enabled: true, Kind: models.KindImageGen}
+	chatRow := &models.ModelConfig{ID: "coding", Enabled: true, Kind: models.KindChat}
+	decRow := &models.ModelConfig{ID: "dec-a", Enabled: true, Kind: models.KindDecision}
+	legacyRow := &models.ModelConfig{ID: "coding-alt", Enabled: true, Kind: ""}
+
+	if !isServableGroupMemberBase(imgRow, models.GroupLaneImageGen) {
+		t.Error("an image-gen member must be servable when the expected lane is image-gen")
+	}
+	if isServableGroupMemberBase(imgRow, models.GroupLaneChat) {
+		t.Error("an image-gen member must NOT be servable when the expected lane is chat")
+	}
+	if isServableGroupMemberBase(imgRow, models.GroupLaneDecision) {
+		t.Error("an image-gen member must NOT be servable when the expected lane is decision")
+	}
+	// The other lanes keep their historical shape: the chat arm accepts
+	// the legacy "" normalization only, the decision arm the decision
+	// kind only.
+	if !isServableGroupMemberBase(chatRow, models.GroupLaneChat) {
+		t.Error("a chat member must be servable when the expected lane is chat")
+	}
+	if isServableGroupMemberBase(chatRow, models.GroupLaneImageGen) {
+		t.Error("a chat member must NOT be servable when the expected lane is image-gen")
+	}
+	if isServableGroupMemberBase(decRow, models.GroupLaneImageGen) {
+		t.Error("a decision member must NOT be servable when the expected lane is image-gen")
+	}
+	if isServableGroupMemberBase(legacyRow, models.GroupLaneImageGen) {
+		t.Error("the legacy \"\" kind must NEVER be servable on the image-gen lane")
+	}
+}
+
 // TestGroup_SweepKindParameterization_MutationControl — the candidate
 // predicate consults the EXPECTED kind: a decision member is servable
 // when the expected kind is decision and NOT servable when it is chat

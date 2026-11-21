@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,12 +119,13 @@ const (
 	// triples). A group row carries a flat Members list
 	// ([]GroupMember{ModelID, Weight}, 1..16 entries, each an
 	// existing model ID of the group's LANE — chat-kind for a chat
-	// group, decision-kind for a decision group) and an optional
-	// single ID-space claim (ShadowModelID). Groups are served by
-	// the lane their members belong to (chat or decision — the lane
-	// is inferred from the members, never persisted): one thin layer
-	// rewrites the request's modelList to the sticky-picked member,
-	// after which the member's existing pipeline runs unchanged.
+	// group, decision-kind for a decision group, image-gen-kind for an
+	// image-gen group) and an optional single ID-space claim
+	// (ShadowModelID). Groups are served by the lane their members
+	// belong to (chat, decision or image-gen — the lane is inferred
+	// from the members, never persisted): one thin layer rewrites the
+	// request's modelList to the sticky-picked member, after which the
+	// member's existing pipeline runs unchanged.
 	// Groups carry no credentials, no fallback_chain, no
 	// secondary_upstream_model, and no peak_hour_* or
 	// release_stream_chunk_deadline (G6).
@@ -404,8 +404,10 @@ type ModelConfig struct {
 
 	// Members is the flat member list of a kind=="group" row
 	// (load-balance-groups commission / §3.2, Round-2 membership
-	// pivot). Each entry references an EXISTING text (chat-kind)
-	// model by its proxy model ID plus a positive weight; the
+	// pivot). Each entry references an EXISTING model OF THE GROUP'S
+	// LANE (chat-kind, decision-kind or image-gen-kind — the lane is
+	// inferred from the members, never persisted) by its proxy model
+	// ID plus a positive weight; the
 	// group is one thin layer that rewrites the request's model
 	// list to the sticky-picked member, after which the member's
 	// own pipeline (race, retry, credential LB, fallback) runs
@@ -419,7 +421,7 @@ type ModelConfig struct {
 	// the group is enabled), requests for that model ID resolve to
 	// the GROUP row via claim-first GetModel, and the claimed row
 	// is hidden from /v1/models. The target must be an existing
-	// chat-kind model (G8); claiming one of the group's own
+	// model OF THE GROUP'S LANE (G8); claiming one of the group's own
 	// members is LEGAL (self-shadow — the canonical day-1
 	// `coding[coding]` onboarding); claiming the group's own ID is
 	// not. Strict twins and GetModelNative bypass claims.
@@ -1255,25 +1257,14 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
-	// Provider comes from credential only
-	provider = cred.Provider
-
-	// Resolve baseURL: model override > credential
-	baseURL = modelConfig.InternalBaseURL
-	if baseURL == "" {
-		baseURL = cred.BaseURL
-	}
-
-	// Determine actual model: check peak hour first
-	actualModel := modelConfig.InternalModel
-
-	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
-		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
-			modelConfig.ID, peakModel, modelConfig.InternalModel)
-		actualModel = peakModel
-	}
-
-	return provider, cred.APIKey, baseURL, actualModel, true
+	// Provider comes from the credential only.
+	// baseURL: model override > credential; model: peak-hour override.
+	// ALL THREE are composed by the single shared helper so a lane that
+	// resolves a SPECIFIC credential ref (the image-gen group's in-request
+	// rotation seam) composes the credential byte-identically to this
+	// resolver — no drift between the two paths.
+	resolved := ResolveCredentialFor(modelConfig, cred)
+	return resolved.Provider, resolved.APIKey, resolved.BaseURL, resolved.InternalModel, true
 }
 
 // ResolveInternalConfigWithAffinity (Phase 3 / Task 16 + Tasks 4/8/9 /

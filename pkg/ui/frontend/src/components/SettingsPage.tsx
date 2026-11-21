@@ -3,9 +3,9 @@ import { route } from 'preact-router';
 import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig } from '../types';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
-import { ImgGenModelsTab } from './config/ImgGenModelsTab';
+import { TextModelsContainer } from './config/TextModelsContainer';
+import { ImgGenModelsContainer } from './config/ImgGenModelsContainer';
 import { DecisionModelsContainer } from './config/DecisionModelsContainer';
-import { GroupModelsTab } from './config/GroupModelsTab';
 import { buildKindIndex, splitGroupsByLane } from './config/groupLane';
 import { CredentialsContainer } from './config/CredentialsContainer';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
@@ -76,7 +76,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'imggen_models' | 'decision_models' | 'group_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
+type TabType = 'proxy' | 'models' | 'imggen_models' | 'decision_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -120,6 +120,14 @@ export function SettingsPage({
   // from a ModelsTab row, consumed by the GroupModelsTab once it has
   // opened the pre-filled add-form.
   const [wrapTarget, setWrapTarget] = useState<Model | null>(null);
+
+  // The TEXT container's child (models | group). The parent OWNS it
+  // (imggen-groups phase 3): the one-click wrap flow must be able to
+  // COMMAND the container onto its group child while the container
+  // stays mounted — a purely internal child state cannot be commanded
+  // from outside. The container is the CONTROLLED half of the shared
+  // core's both-or-neither seam (activeChild + onChildChange).
+  const [textChild, setTextChild] = useState<'models' | 'group'>('models');
 
   // Helper to add a toast
   const addToast = useCallback((type: ToastData['type'], message: string, restartRequired?: boolean) => {
@@ -293,11 +301,20 @@ export function SettingsPage({
     }
   };
 
-  // One-click wrap (Am30): switch to the Group tab with the chat model
-  // pre-loaded into the add-form (form pre-fill convenience ONLY).
+  // One-click wrap (Am30): switch to the Group child with the chat
+  // model pre-loaded into the add-form (form pre-fill convenience ONLY).
+  //
+  // imggen-groups phase 3: the top-level "Group Models" tab RETIRED —
+  // the chat lane's group surface is the TEXT container's Group child.
+  // The container is already mounted (the operator is on its models
+  // child), so the parent must COMMAND the child: setTextChild('group')
+  // mounts the GroupModelsTab, whose wrap effect fires exactly as it
+  // did when the group surface had a top-level tab of its own (mount +
+  // consume-once via onWrapConsumed).
   const handleWrapAsGroup = (model: Model) => {
     setWrapTarget(model);
-    setActiveTab('group_models');
+    setActiveTab('models');
+    setTextChild('group');
   };
 
   // Chat-kind models (client filter over the unfiltered useModels
@@ -338,10 +355,12 @@ export function SettingsPage({
     imgGenModels,
   });
   const groupLaneSplit = splitGroupsByLane(groupModels, kindIndex);
-  // The text tab keeps chat + unknown — NO row is ever invisible in
-  // both tabs: a group the FE cannot classify (a mixed or empty
-  // surviving member set) stays in the text tab, where the operator
-  // can repair it.
+  // The text container's group child keeps chat + unknown — NO row is
+  // ever invisible: a group the FE cannot classify (a mixed or empty
+  // surviving member set) stays in the text lane, where the operator
+  // can repair it. The image-gen lane has its OWN home (the ImgGen
+  // container's group child) and the decision lane has its own (the
+  // Decision container's group child).
   const chatLaneGroups = [...groupLaneSplit.chat, ...groupLaneSplit.unknown];
 
   // Loop Detection handler
@@ -556,25 +575,6 @@ export function SettingsPage({
           >
             🔌 MCP Servers
           </button>
-          {/* load-balance-groups 2026-10-16 (plan §6.1 / Q10) — 11th
-              tab. 🔀 prefix glyph (shuffle = load balancing; mirrors
-              🖼️/🎯); aria-hidden on the emoji so SRs only announce the
-              binding literal "Group Models". Positioned last (slot 11
-              of 11) so the pinned Decision→Credentials adjacency from
-              the Decision commission's tab tests is preserved. */}
-          <button
-            type="button"
-            class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'group_models'
-              ? 'text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-              }`}
-            onClick={() => setActiveTab('group_models')}
-            data-tab-id="group_models"
-            aria-label="Group Models"
-          >
-            <span aria-hidden="true">🔀</span>
-            Group Models
-          </button>
         </div>
       </div>
 
@@ -620,16 +620,44 @@ export function SettingsPage({
           )}
 
           {activeTab === 'models' && (
-            <ModelsTab
-              models={models}
-              onAddModel={onAddModel}
-              onUpdateModel={onUpdateModel}
-              onDeleteModel={onDeleteModel}
-              onCopyModel={onCopyModel}
-              onToggleModel={handleToggleModel}
+            // imggen-groups phase 3: the chat lane's two top-level tabs
+            // (Models + Group Models) collapsed into ONE container with
+            // vertical sub-tabs [Models | Group]. The models panel is
+            // mounted here (the parent) and handed over as a node — the
+            // container is a pass-through and never filters a prop; see
+            // TextModelsContainer's header note for why the mount stays
+            // in this file. The group child is the chat lane's group
+            // surface (chat + unknown groups), with the one-click-wrap
+            // pre-fill pair (Am30). The parent owns the child state
+            // (the controlled-child seam).
+            <TextModelsContainer
+              modelsPanel={
+                <ModelsTab
+                  models={models}
+                  onAddModel={onAddModel}
+                  onUpdateModel={onUpdateModel}
+                  onDeleteModel={onDeleteModel}
+                  onCopyModel={onCopyModel}
+                  onToggleModel={handleToggleModel}
+                  setStatus={setStatusWrapper}
+                  onNavigateToCredentials={() => setActiveTab('credentials')}
+                  onWrapAsGroup={handleWrapAsGroup}
+                />
+              }
+              groups={chatLaneGroups}
+              laneModels={chatKindModels}
+              kindIndex={kindIndex}
               setStatus={setStatusWrapper}
-              onNavigateToCredentials={() => setActiveTab('credentials')}
-              onWrapAsGroup={handleWrapAsGroup}
+              onAddGroupModel={onAddGroupModel}
+              onUpdateGroupModel={onUpdateGroupModel}
+              onDeleteGroupModel={onDeleteGroupModel}
+              onToggleGroupModel={handleToggleGroupModel}
+              groupFetchError={groupError}
+              groupOnRetry={onRetryGroupModels}
+              wrapPreloadModel={wrapTarget}
+              onWrapConsumed={() => setWrapTarget(null)}
+              activeChild={textChild}
+              onChildChange={setTextChild}
             />
           )}
 
@@ -641,7 +669,15 @@ export function SettingsPage({
               onRetry plumb the hook's error state for the alert-role banner
               (§2.7, A11Y-3). */}
           {activeTab === 'imggen_models' && (
-            <ImgGenModelsTab
+            // imggen-groups phase 3: the image-gen lane now hosts the
+            // SAME container shape as the text and decision lanes —
+            // vertical sub-tabs [Models | Group]. The group child is
+            // the IMAGE-GEN lane's group surface: the 'image-gen'
+            // bucket of the client-side lane split (a group whose
+            // members are image-gen models) and the lane's own model
+            // feed. The container is UNCONTROLLED — the image-gen lane
+            // has no cross-container navigation to command.
+            <ImgGenModelsContainer
               models={imgGenModels}
               onAddModel={onAddImgGenModel}
               onUpdateModel={onUpdateImgGenModel}
@@ -651,6 +687,15 @@ export function SettingsPage({
               onNavigateToCredentials={() => setActiveTab('credentials')}
               fetchError={imgGenError}
               onRetry={onRetryImgGenModels}
+              groups={groupLaneSplit['image-gen']}
+              laneModels={imgGenModels}
+              kindIndex={kindIndex}
+              onAddGroupModel={onAddGroupModel}
+              onUpdateGroupModel={onUpdateGroupModel}
+              onDeleteGroupModel={onDeleteGroupModel}
+              onToggleGroupModel={handleToggleGroupModel}
+              groupFetchError={groupError}
+              groupOnRetry={onRetryGroupModels}
             />
           )}
 
@@ -690,37 +735,6 @@ export function SettingsPage({
               onToggleGroupModel={handleToggleGroupModel}
               groupFetchError={groupError}
               groupOnRetry={onRetryGroupModels}
-            />
-          )}
-
-          {/* load-balance-groups (plan §6.1 / §6.5) — group list.
-              Same posture as the sibling tabs: parent receives
-              groupModels pre-filtered server-side via
-              /fe/api/models?kind=group. The form inside stamps
-              kind: 'group' + internal: true (G1) so a chat
-              row can never round-trip into this surface. laneModels
-              feeds the member + shadow pickers (the chat lane's
-              chat-kind rows); the list is the TEXT lane's slice of the
-              client-side lane split (chat + unknown — a group the FE
-              cannot classify stays here, where it can be repaired);
-              wrapPreloadModel carries the one-click-wrap pre-fill
-              (Am30, text lane only). fetchError + onRetry plumb the
-              hook's error state for the alert-role banner (A11Y-3). */}
-          {activeTab === 'group_models' && (
-            <GroupModelsTab
-              lane="chat"
-              models={chatLaneGroups}
-              laneModels={chatKindModels}
-              kindIndex={kindIndex}
-              onAddModel={onAddGroupModel}
-              onUpdateModel={onUpdateGroupModel}
-              onDeleteModel={onDeleteGroupModel}
-              onToggleModel={handleToggleGroupModel}
-              setStatus={setStatusWrapper}
-              fetchError={groupError}
-              onRetry={onRetryGroupModels}
-              wrapPreloadModel={wrapTarget}
-              onWrapConsumed={() => setWrapTarget(null)}
             />
           )}
 

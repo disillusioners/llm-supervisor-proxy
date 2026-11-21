@@ -110,6 +110,17 @@ function makeProps(overrides: Partial<{
   };
 }
 
+// The chat lane's top-level tab — the bar's own button carries no
+// data-tab-id (the house pattern: only the glyph-bearing tabs do), so
+// the walker finds it by its exact label.
+function modelsTab(container: Element): HTMLButtonElement {
+  const tab = Array.from(container.querySelectorAll('div.flex.overflow-x-auto > button')).find(
+    (b) => b.textContent && b.textContent.trim() === 'Models',
+  ) as HTMLButtonElement | undefined;
+  expect(tab).toBeDefined();
+  return tab as HTMLButtonElement;
+}
+
 describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decision Commission P3.5)', () => {
   it('renders the 9-tab bar with the 🖼️ ImgGen Models button at slot 3', () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
@@ -267,71 +278,157 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decisi
     });
   });
 
-  it('load-balance-groups P3.6 — renders the 🔀 Group Models button as the 11th (last) tab', () => {
-    // Plan §6.1 / Q10: label "Group Models", glyph 🔀, data-tab-id
-    // "group_models". Positioned as the 11th tab (last, after MCP
-    // Servers) so the Decision commission's pinned Decision→Credentials
-    // adjacency test (above) is preserved.
+  // imggen-groups (phase 3) — the chat lane's two top-level tabs
+  // (Models + Group Models) collapsed into ONE container with vertical
+  // sub-tabs [Models | Group]; the top-level "Group Models" tab
+  // RETIRED (bar 11 -> 10). The four "load-balance-groups P3.6" cases
+  // that pinned the retired tab are RETIRED with it (anti-vacuous
+  // accounting: they are listed in the gate log, not silently dropped).
+  it('P3T1 — the settings bar shows exactly 10 top-level tabs and the retired group_models tab is gone', () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
 
-    const groupTab = container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement;
-    expect(groupTab).not.toBeNull();
-    expect(groupTab.textContent).toContain('🔀');
-    expect(groupTab.textContent).toContain('Group Models');
-    expect(groupTab.getAttribute('aria-label')).toBe('Group Models');
-
-    // Position: 11th of 11 — the button immediately preceding it is
-    // MCP Servers; nothing follows it.
     const tabs = Array.from(
       container.querySelectorAll('div.flex.overflow-x-auto > button'),
     ) as HTMLButtonElement[];
-    expect(tabs.length).toBe(11);
-    const groupIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'group_models');
-    expect(groupIdx).toBe(10);
-    expect(tabs[groupIdx - 1].textContent).toContain('MCP Servers');
-    // The Decision→Credentials adjacency survives (P3.6 constraint).
+    // 10 buttons — the retired "Group Models" tab is the eleventh that
+    // no longer exists.
+    expect(tabs.length).toBe(10);
+    // The retired tab is GONE (the value, the button and its testid).
+    expect(container.querySelector('[data-tab-id="group_models"]')).toBeNull();
+    expect(container.textContent).not.toContain('Group Models');
+
+    // The Decision→Credentials adjacency survives (the retired tab was
+    // deliberately LAST, so removing it cannot break the adjacency).
     const decisionIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'decision_models');
     expect(tabs[decisionIdx + 1].textContent).toContain('Credentials');
+    // The MCP Servers tab is now the last one.
+    expect(tabs[tabs.length - 1].textContent).toContain('MCP Servers');
   });
 
-  it('load-balance-groups P3.6 — clicking the 🔀 Group Models tab mounts the GroupModelsTab empty state', async () => {
+  it('P3T2 — the Models tab hosts the Text container with its models child mounted by default', async () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
 
-    // Default active tab is 'proxy' — the GroupModelsTab content
-    // markers are absent until the tab is clicked.
-    expect(container.textContent).not.toContain('No group models configured');
+    // The container is NOT mounted until the Models tab is clicked.
+    expect(container.querySelector('[data-testid="text-models-container"]')).toBeNull();
 
-    fireEvent.click(container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement);
+    fireEvent.click(modelsTab(container));
 
     await waitFor(() => {
+      expect(container.querySelector('[data-testid="text-models-container"]')).not.toBeNull();
+    });
+    // The nav rail with its two children, in the text namespace.
+    const nav = container.querySelector('[data-testid="text-container-nav"]') as HTMLElement;
+    expect(nav.getAttribute('aria-label')).toBe('Text Models sections');
+    expect(nav.querySelectorAll('button').length).toBe(2);
+    // The models child is the default (the chat lane's models panel).
+    expect(container.querySelector('[data-testid="text-container-tab-models"]')?.getAttribute('aria-current')).toBe('true');
+    expect(container.textContent).toContain('Available Models');
+  });
+
+  it('P3T3 — the Text container\'s Group child hosts the chat lane\'s group surface', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    fireEvent.click(modelsTab(container));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="text-models-container"]')).not.toBeNull();
+    });
+
+    fireEvent.click(container.querySelector('[data-testid="text-container-tab-group"]') as HTMLButtonElement);
+
+    await waitFor(() => {
+      // The CHAT lane's group surface (its own heading + empty state).
+      expect(container.textContent).toContain('Group Models');
       expect(container.textContent).toContain('No group models configured');
     });
-    // The "Add Group Model" button is the binding CTA label.
-    expect(container.textContent).toContain('Add Group Model');
+    // The models child is unmounted (mount/unmount semantics).
+    expect(container.querySelector('[data-testid="text-container-tab-models"]')?.getAttribute('aria-current')).toBeNull();
   });
 
-  it('load-balance-groups P3.6 — clicking back to Models tab hides the GroupModelsTab content', async () => {
+  it('P3T4 — the ImgGen Models tab hosts the ImgGen container with its models child mounted by default', async () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
 
-    fireEvent.click(container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement);
-    await waitFor(() => expect(container.textContent).toContain('No group models configured'));
+    expect(container.querySelector('[data-testid="imggen-models-container"]')).toBeNull();
 
-    const modelsTab = Array.from(container.querySelectorAll('div.flex.overflow-x-auto > button'))
-      .find((b) => b.textContent && b.textContent.trim() === 'Models') as HTMLButtonElement;
-    expect(modelsTab).toBeDefined();
-    fireEvent.click(modelsTab);
+    fireEvent.click(container.querySelector('[data-tab-id="imggen_models"]') as HTMLButtonElement);
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Available Models');
-      expect(container.textContent).not.toContain('No group models configured');
+      expect(container.querySelector('[data-testid="imggen-models-container"]')).not.toBeNull();
+    });
+    const nav = container.querySelector('[data-testid="imggen-container-nav"]') as HTMLElement;
+    expect(nav.getAttribute('aria-label')).toBe('Image-Gen Models sections');
+    expect(nav.querySelectorAll('button').length).toBe(2);
+    expect(container.textContent).toContain('Image-Gen Models');
+    expect(container.textContent).toContain('No image-gen models configured');
+  });
+
+  it('P3T5 — the ImgGen container\'s Group child hosts the image-gen lane\'s group surface', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    fireEvent.click(container.querySelector('[data-tab-id="imggen_models"]') as HTMLButtonElement);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="imggen-models-container"]')).not.toBeNull();
+    });
+
+    fireEvent.click(container.querySelector('[data-testid="imggen-container-tab-group"]') as HTMLButtonElement);
+
+    await waitFor(() => {
+      // The IMAGE-GEN lane's group surface (its own heading + the
+      // lane's empty state).
+      expect(container.textContent).toContain('Image-Gen Groups');
+      expect(container.textContent).toContain('No image-gen groups configured');
     });
   });
 
-  it('load-balance-groups P3.6 — A11Y: the 🔀 emoji span carries aria-hidden="true"', () => {
+  it('P3T6 — the Decision Models tab still hosts the decision container (the adjacency is unchanged)', async () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
-    const groupEmoji = container.querySelector('[data-tab-id="group_models"] span[aria-hidden="true"]');
-    expect(groupEmoji).not.toBeNull();
-    expect((groupEmoji as HTMLElement).textContent).toBe('🔀');
+
+    fireEvent.click(container.querySelector('[data-tab-id="decision_models"]') as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="decision-models-container"]')).not.toBeNull();
+    });
+    expect(container.querySelector('[data-testid="decision-container-nav"]')).not.toBeNull();
+  });
+
+  it('P3T7 — the one-click wrap affordance lands on the Text container\'s Group child with the add-form pre-filled', async () => {
+    const chatModel: Model = {
+      id: 'chat-1',
+      name: 'Chat One',
+      enabled: true,
+      fallback_chain: [],
+    };
+    const { container } = render(<SettingsPage {...makeProps({ models: [chatModel] })} />);
+
+    // Land on the Models tab: the chat lane's models panel mounts and
+    // the row carries the wrap affordance.
+    fireEvent.click(modelsTab(container));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="wrap-as-group-button"]')).not.toBeNull();
+    });
+    // The group child is NOT mounted yet (the models child is).
+    expect(container.querySelector('[data-testid="group-form-id-input"]')).toBeNull();
+
+    fireEvent.click(container.querySelector('[data-testid="wrap-as-group-button"]') as HTMLButtonElement);
+
+    // The wrap COMMANDS the container onto its group child: the group
+    // surface mounts and the add-form opens PRE-FILLED for the wrapped
+    // model (the canonical `id[id]` group shape).
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="group-form-id-input"]')).not.toBeNull();
+    });
+    expect(
+      (container.querySelector('[data-testid="group-form-id-input"]') as HTMLInputElement).value,
+    ).toBe('chat-1[chat-1]');
+    expect(
+      (container.querySelector('[data-testid="group-form-name-input"]') as HTMLInputElement).value,
+    ).toBe('Chat One group');
+    // The group child is the active one (the nav marker moved).
+    expect(container.querySelector('[data-testid="text-container-tab-group"]')?.getAttribute('aria-current')).toBe('true');
+    // The pre-fill SURVIVES the consume-once re-render (the panel
+    // captures the wrap target into its own state).
+    expect(
+      (container.querySelector('[data-testid="group-form-id-input"]') as HTMLInputElement).value,
+    ).toBe('chat-1[chat-1]');
   });
 
   // credential-groups commission 2026-11-16 (F5) — the credentials tab

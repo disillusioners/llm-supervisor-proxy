@@ -101,6 +101,16 @@ func (m *MockConfigManager) GetImageGenTimeout() time.Duration {
 	return time.Duration(m.Config.ImageGenTimeout)
 }
 
+// GetImageGenGroupWalkTimeout returns the TOTAL walk budget of an
+// image-gen GROUP request (imggen-groups commission / F-1 / D-17).
+// 0 means "use the package default" (the imggen handler's own
+// default, applied at the handler seam).
+func (m *MockConfigManager) GetImageGenGroupWalkTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.Config.ImageGenGroupWalkTimeout)
+}
+
 // GetDecisionTimeout returns the configured per-request deadline
 // for /v1/decisions (Decision Models commission / §3.7 / §8.1).
 // 0 means "use the package default" (the decision handler's own
