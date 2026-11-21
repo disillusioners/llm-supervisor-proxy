@@ -125,11 +125,40 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 			wantErrSub: "exceeds max of 16 entries",
 		},
 		{
+			// G3 member existence — the clause is LANE-AWARE from the
+			// SURVIVING members (G3 lane-aware follow-up). This fixture leaves
+			// the dangling member as the ONLY entry, so no lane is
+			// derivable and the LANE-NEUTRAL clause is pinned here.
 			name: "G3_member_must_exist",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
 				m.Members = []GroupMember{{ModelID: "no-such-model", Weight: 1}}
 			},
-			wantErrSub: "does not exist",
+			wantErrSub: "does not exist (members must reference existing models of the group's lane)",
+		},
+		{
+			// G3 member existence on a CHAT group with a surviving
+			// chat member: the historical chat wording is preserved
+			// byte-for-byte. (Deliberate pin: the chat lane's copy is
+			// frozen.)
+			name: "G3_member_must_exist_chat_lane",
+			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
+				m.Members = []GroupMember{{ModelID: "coding", Weight: 1}, {ModelID: "no-such-model", Weight: 1}}
+			},
+			wantErrSub: "does not exist (members must reference existing chat-kind models)",
+		},
+		{
+			// G3 member existence on an IMAGE-GEN group with a
+			// surviving image-gen member: the clause names the
+			// IMAGE-GEN lane (the wrong-lane wording this follow-up
+			// removes — an operator on this lane was told to reference
+			// chat-kind models).
+			name: "G3_member_must_exist_image_gen_lane",
+			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
+				img := ModelConfig{ID: "img-member", Name: "Img Member", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}}
+				*coll = append(*coll, img)
+				m.Members = []GroupMember{{ModelID: "img-member", Weight: 1}, {ModelID: "no-such-model", Weight: 1}}
+			},
+			wantErrSub: "does not exist (members must reference existing image-gen-kind models)",
 		},
 		{
 			name: "G3_member_weight_must_be_positive",

@@ -1175,7 +1175,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if target == nil {
-					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (members must reference existing chat-kind models)`, member.ModelID))
+					// The clause is LANE-AWARE from the SURVIVING
+					// members (the dangling one carries no kind
+					// evidence) — the shared helper's wording, so the
+					// three sites can never drift.
+					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (%s)`, member.ModelID, models.MemberExistenceClause(models.SurvivingMemberKinds(newModel.Members, existingModels))))
 					return
 				}
 				if target.Kind == models.KindGroup {
@@ -1732,7 +1736,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if target == nil {
-					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (members must reference existing chat-kind models)`, member.ModelID))
+					// The clause is LANE-AWARE from the SURVIVING
+					// members (the dangling one carries no kind
+					// evidence) — the shared helper's wording, so the
+					// three sites can never drift.
+					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (%s)`, member.ModelID, models.MemberExistenceClause(models.SurvivingMemberKinds(updatedModel.Members, existingModels))))
 					return
 				}
 				if target.Kind == models.KindGroup {

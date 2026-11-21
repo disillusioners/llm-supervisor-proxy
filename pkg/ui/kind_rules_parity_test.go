@@ -544,10 +544,36 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 			},
 		},
 		{
+			// G3 member existence — the clause is LANE-AWARE from the
+			// SURVIVING members (G3 lane-aware follow-up; the dangling member
+			// carries no kind evidence). A chat-lane group keeps the
+			// historical chat wording BYTE-IDENTICAL.
 			name:   "G3_member_must_exist",
 			substr: "does not exist (members must reference existing chat-kind models)",
 			mutate: func(m *models.ModelConfig) {
 				m.Members = []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "ghost", Weight: 1}}
+			},
+		},
+		{
+			// G3 member existence on an IMAGE-GEN-lane group: the
+			// clause names the IMAGE-GEN lane. Before this follow-up
+			// the operator on this lane was told to reference
+			// CHAT-kind models — misleading copy on the member ref
+			// they had just typed.
+			name:   "G3_member_must_exist_image_gen_lane",
+			substr: "does not exist (members must reference existing image-gen-kind models)",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-img", Weight: 1}, {ModelID: "ghost", Weight: 1}}
+			},
+		},
+		{
+			// G3 member existence with NO derivable lane (the only
+			// member is the dangling one): the LANE-NEUTRAL clause is
+			// used — precise, and never a wrong-lane promise.
+			name:   "G3_member_must_exist_lane_neutral",
+			substr: "does not exist (members must reference existing models of the group's lane)",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "ghost", Weight: 1}}
 			},
 		},
 		{
@@ -868,6 +894,19 @@ func TestKindRules_Parity_Group_DecisionLane(t *testing.T) {
 				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
 				Kind: models.KindGroup, Internal: true,
 				Members: []models.GroupMember{{ModelID: "chat-member-x", Weight: 1}, {ModelID: "dec-member-a", Weight: 1}},
+			},
+		},
+		{
+			// G3 member existence on a DECISION-lane group: the clause
+			// names the DECISION lane (G3 lane-aware follow-up — the clause is
+			// derived from the SURVIVING members, and the three sites
+			// must render the same text).
+			name:   "decision_member_must_exist",
+			substr: "does not exist (members must reference existing decision-kind models)",
+			group: models.ModelConfig{
+				ID: "decision-group-1", Name: "Decision Group One", Enabled: true,
+				Kind: models.KindGroup, Internal: true,
+				Members: []models.GroupMember{{ModelID: "dec-member-a", Weight: 1}, {ModelID: "ghost", Weight: 1}},
 			},
 		},
 		{

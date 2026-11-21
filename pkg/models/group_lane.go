@@ -76,9 +76,11 @@ func MemberLane(kind string) (GroupLane, bool) {
 // lane evidence.
 //
 // len(result) > 1 means the group is MIXED (write-time rejection /
-// request-time fail-closed); len(result) == 0 means every member is
-// invalid (the write-time validator words the error with the chat
-// lane by convention — the chat wording is the historical default).
+// request-time fail-closed); len(result) == 0 means no member carries
+// valid lane evidence (mixed with the kind check, the write-time
+// validator reports the invalid member; the member-EXISTENCE wording
+// then falls back to its lane-NEUTRAL clause rather than guessing a
+// lane).
 func GroupLanesOf(kinds []string) []GroupLane {
 	var chat, decision, imageGen bool
 	for _, kind := range kinds {
@@ -206,6 +208,54 @@ func MixedGroupMembersError(groupID, memberID, kind string) string {
 // chat wording stays byte-identical.
 func InvalidMemberKindError(groupID, memberID, groupLane, kind string) string {
 	return fmt.Sprintf("model %s: kind %q member %q must be %s %s-kind model (got kind %q)", groupID, KindGroup, memberID, LaneArticle(groupLane), groupLane, kind)
+}
+
+// SurvivingMemberKinds returns the kinds of the group's members that
+// RESOLVE in the collection, in member order.
+//
+// It exists for the WORDING of the member-existence error only: a
+// dangling member carries NO kind evidence, so the lane named by that
+// error must be derived from the members that DO resolve. Kinds that
+// belong to no lane (group, unknown) ride along untouched —
+// UnanimousGroupLane ignores them, exactly as the lane fold does.
+//
+// Pure read: no error, no ordering, no validation decision rides on
+// this helper (zero behavior change to the G3 existence rule).
+func SurvivingMemberKinds(members []GroupMember, collection []ModelConfig) []string {
+	byID := make(map[string]ModelConfig, len(collection))
+	for _, row := range collection {
+		byID[row.ID] = row
+	}
+	kinds := make([]string, 0, len(members))
+	for _, member := range members {
+		if row, ok := byID[member.ModelID]; ok {
+			kinds = append(kinds, row.Kind)
+		}
+	}
+	return kinds
+}
+
+// MemberExistenceClause is the shared wording for the G3
+// member-existence rejection — the canonical validator and the
+// POST/PUT admin-API mirrors all use it (ONE vocabulary, parity law).
+//
+// The clause is LANE-AWARE when the group's SURVIVING members are
+// unanimous — "members must reference existing chat-kind models",
+// "... decision-kind models", "... image-gen-kind models" — and
+// LANE-NEUTRAL when no lane is derivable (every member dangling, or
+// mixed surviving kinds): "members must reference existing models of
+// the group's lane". The dangling member itself carries no kind
+// evidence, so a guess would be the wrong-lane bug this helper
+// removes.
+//
+// The CHAT wording is byte-identical to the historical text (the text
+// lane's messages are untouched).
+func MemberExistenceClause(survivingKinds []string) string {
+	lane, ok := UnanimousGroupLane(survivingKinds)
+	if !ok {
+		return "members must reference existing models of the group's lane"
+	}
+	return fmt.Sprintf("members must reference existing %s-kind models", lane)
 }
 
 // LaneArticle returns the INDEFINITE ARTICLE that reads correctly

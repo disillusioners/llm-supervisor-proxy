@@ -179,9 +179,11 @@ export interface Model {
   // Group membership + ID-space claim (load-balance-groups commission /
   // migration 031): kind=='group' rows only, mirroring the Go
   // Model.Members / ShadowModelID wire tags (both omitempty). Members
-  // are PROXY MODEL IDs of existing chat-kind models (flat — no
-  // group-as-member); shadow_model_id optionally claims one existing
-  // chat model's ID so requests for it route to the group (plan §3.4).
+  // are PROXY MODEL IDs of existing models OF THE GROUP'S LANE
+  // (chat-kind, decision-kind or image-gen-kind — the lane is inferred
+  // from the members, never persisted; flat — no group-as-member);
+  // shadow_model_id optionally claims one existing lane model's ID so
+  // requests for it route to the group (plan §3.4).
   members?: GroupMember[];
   shadow_model_id?: string;
 }

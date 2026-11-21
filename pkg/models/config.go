@@ -404,8 +404,10 @@ type ModelConfig struct {
 
 	// Members is the flat member list of a kind=="group" row
 	// (load-balance-groups commission / §3.2, Round-2 membership
-	// pivot). Each entry references an EXISTING text (chat-kind)
-	// model by its proxy model ID plus a positive weight; the
+	// pivot). Each entry references an EXISTING model OF THE GROUP'S
+	// LANE (chat-kind, decision-kind or image-gen-kind — the lane is
+	// inferred from the members, never persisted) by its proxy model
+	// ID plus a positive weight; the
 	// group is one thin layer that rewrites the request's model
 	// list to the sticky-picked member, after which the member's
 	// own pipeline (race, retry, credential LB, fallback) runs
@@ -419,7 +421,7 @@ type ModelConfig struct {
 	// the group is enabled), requests for that model ID resolve to
 	// the GROUP row via claim-first GetModel, and the claimed row
 	// is hidden from /v1/models. The target must be an existing
-	// chat-kind model (G8); claiming one of the group's own
+	// model OF THE GROUP'S LANE (G8); claiming one of the group's own
 	// members is LEGAL (self-shadow — the canonical day-1
 	// `coding[coding]` onboarding); claiming the group's own ID is
 	// not. Strict twins and GetModelNative bypass claims.

@@ -30,9 +30,10 @@ const MaxGroupMembers = 16
 //
 //   - ModelID: references models.id of an EXISTING model row of the
 //     group's LANE — chat-kind (or the legacy "" normalization) for a
-//     chat group, decision-kind for a decision group (app-level FK;
-//     G3 + the decision-groups lane rule). Group-as-member is
-//     forbidden (G5 — flat membership only, USER-DECIDED).
+//     chat group, decision-kind for a decision group, image-gen-kind
+//     for an image-gen group (app-level FK; G3 + the decision-groups /
+//     imggen-groups lane rule). Group-as-member is forbidden (G5 — flat
+//     membership only, USER-DECIDED).
 //   - Weight: positive float; the higher, the more often picked by
 //     the sticky weighted selector. Validation: must be > 0 (G3).
 //   - BackupOnly: group-backup-members (D2). When true, the member
@@ -184,8 +185,11 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 
 		target, exists := byID[member.ModelID]
 		if !exists {
-			// G3 — direct-ID existence check.
-			return fmt.Errorf("model %s: kind %q member %q does not exist (members must reference existing chat-kind models)", m.ID, KindGroup, member.ModelID)
+			// G3 — direct-ID existence check. The clause is
+			// LANE-AWARE from the SURVIVING members (the dangling
+			// one carries no kind evidence): an image-gen group must
+			// not be told to reference chat-kind models.
+			return fmt.Errorf("model %s: kind %q member %q does not exist (%s)", m.ID, KindGroup, member.ModelID, MemberExistenceClause(SurvivingMemberKinds(m.Members, collection)))
 		}
 		if target.Kind == KindGroup {
 			// G5 — flat membership only (USER-DECIDED).
