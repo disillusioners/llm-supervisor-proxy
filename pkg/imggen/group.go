@@ -568,14 +568,16 @@ func (h *Handler) serveImageGenGroup(w http.ResponseWriter, r *http.Request, gro
 				return
 			}
 
-			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+			event := map[string]interface{}{
 				"outcome":         failure.outcome,
 				"model":           groupID,
 				"member":          candidate.ID,
 				"provider":        cred.Provider,
 				"upstream_status": attempt.upstreamStatus,
 				"duration_ms":     time.Since(startTime).Milliseconds(),
-			})
+			}
+			mergeAttemptDetail(event, attempt.failure)
+			h.publishEvent(eventTypeImageGeneration, event)
 
 			// The W-8 short-circuit: N CONSECUTIVE quota-class
 			// FAILURE OUTCOMES stop the walk (the quota wall is
@@ -798,6 +800,20 @@ func (h *Handler) exhaustImageGenGroup(w http.ResponseWriter, groupID string, au
 	h.meter(authToken, groupID, 0)
 }
 
+// mergeAttemptDetail copies a pre-relay attempt's telemetry detail keys
+// (provider / error / max_bytes) into an event map — the group-lane mirror
+// of the standalone path's merge (handler.go). The detail is EVENT-ONLY:
+// it never changes the body's machine code. A nil failure (a classified
+// response, not a pre-relay failure) contributes nothing.
+func mergeAttemptDetail(event map[string]interface{}, f *attemptFailure) {
+	if f == nil {
+		return
+	}
+	for key, value := range f.detail {
+		event[key] = value
+	}
+}
+
 // failFastImageGenGroup relays a client-attributable upstream failure
 // (the walk stopped — the group did NOT exhaust).
 //
@@ -816,6 +832,7 @@ func (h *Handler) failFastImageGenGroup(w http.ResponseWriter, groupID string, a
 		"skipped":           skipped,
 		"members_attempted": membersAttempted,
 	}
+	mergeAttemptDetail(event, attempt.failure)
 	h.publishEvent(eventTypeImageGeneration, event)
 
 	status := failure.status
