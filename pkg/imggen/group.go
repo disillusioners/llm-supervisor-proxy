@@ -266,17 +266,6 @@ func (h *Handler) currentModelRows() []models.ModelConfig {
 	return h.modelsConfig.GetModels()
 }
 
-// safeResolveCredential resolves a member's credential through the
-// installed resolver. Nil-safe: a handler without a resolver has no
-// usable credential (the member is skipped, never a panic) — the
-// decision lane's safeResolveCredential, mirrored.
-func (h *Handler) safeResolveCredential(modelID string) (models.ResolvedCredential, bool) {
-	if h == nil || h.resolveCredential == nil {
-		return models.ResolvedCredential{}, false
-	}
-	return h.resolveCredential(modelID)
-}
-
 // countBaseServableMembers counts the members buildGroupPolicy WOULD have
 // admitted on the UNFILTERED row — the SAME candidacy predicate the policy
 // uses (the row exists AND is enabled AND the member's lane matches the
