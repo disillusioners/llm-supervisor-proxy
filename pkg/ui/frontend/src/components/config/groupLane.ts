@@ -60,7 +60,7 @@ export function normalizeKind(kind?: string): ModelKind {
 //
 // A null lane is "no lane evidence", NOT a vote for the other lane:
 // the server ignores such a member (models.GroupLanesOf :72-94).
-function memberLane(kind: string): 'chat' | 'decision' | 'image-gen' | null {
+function memberLane(kind: string): GroupLane | null {
   if (kind === '' || kind === 'chat') return 'chat';
   if (kind === 'decision') return 'decision';
   if (kind === 'image-gen') return 'image-gen';
@@ -153,7 +153,7 @@ export function inferGroupLane(
   kindIndex: Map<string, string>,
 ): GroupLane | null {
   const members = group.members ?? [];
-  const lanes = new Set<'chat' | 'decision' | 'image-gen'>();
+  const lanes = new Set<GroupLane>();
 
   for (const member of members) {
     if (member.model_id === '') continue; // server :375-377 — an unpicked row carries no lane evidence
