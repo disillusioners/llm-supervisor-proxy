@@ -268,9 +268,31 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// chat-side guard at handler.go:~462 so consumers can pattern-
 	// match the misroute class without parsing the error type.
 	//
-	// NOTE: a pre-existing image-gen gap on this same route is
-	// documented out-of-scope (decision commission does NOT
-	// backport the image-gen fix; that is a separate commission).
+	// imggen-groups commission / D-15: the SAME guard for the
+	// image-gen family. The image-gen gap on this route WAS
+	// documented out-of-scope for the decision commission ("that is a
+	// separate commission") — this commission IS it: an image-gen
+	// model posted to /v1/messages would otherwise reach the chat
+	// upstream and burn a real upstream call.
+	//
+	// The error envelope is the ROUTE'S family (Anthropic) and the
+	// code string is the CHAT family's "image_gen_misroute" (the same
+	// string the OpenAI chat route uses — the cross-route canonical
+	// naming, the decision_misroute pattern).
+	if resolvedModel != nil && resolvedModel.IsImageGen() {
+		log.Printf("[imggen] rejecting anthropic misroute to image-gen model=%s (model is served by /v1/image_generation only)", resolvedModel.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"invalid_request_error", imageGenMisrouteCode,
+			"image-gen models are served by /v1/image_generation only"))
+		h.publishEvent(imageGenMisrouteCode, map[string]interface{}{
+			"id":    reqID,
+			"model": originalModel,
+		})
+		return
+	}
+
 	if resolvedModel != nil && resolvedModel.IsDecision() {
 		log.Printf("[decision] rejecting anthropic misroute to decision model=%s (model is served by /v1/decisions only)", resolvedModel.ID)
 		w.Header().Set("Content-Type", "application/json")
@@ -305,6 +327,23 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 				"invalid_request_error", decisionMisrouteCode,
 				"decision models are served by /v1/decisions only"))
 			h.publishEvent(decisionMisrouteCode, map[string]interface{}{
+				"id":    reqID,
+				"model": originalModel,
+			})
+			return
+		case laneOK && lane == models.GroupLaneImageGen:
+			// imggen-groups commission / D-15: an image-gen-lane
+			// GROUP is served by /v1/image_generation only. The arm
+			// is ADDITIVE and lane-gated (a chat group is
+			// unaffected) and it runs BEFORE the group rewrite, so
+			// the misroute is structurally impossible.
+			log.Printf("[imggen] rejecting anthropic misroute to image-gen group=%s (the group is served by /v1/image_generation only)", groupID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+				"invalid_request_error", imageGenMisrouteCode,
+				"image-gen models are served by /v1/image_generation only"))
+			h.publishEvent(imageGenMisrouteCode, map[string]interface{}{
 				"id":    reqID,
 				"model": originalModel,
 			})

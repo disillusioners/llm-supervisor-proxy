@@ -20,14 +20,16 @@ import "fmt"
 //
 // The lane vocabulary:
 //
-//	chat     — members are chat-kind (or the legacy "" kind)
-//	decision — members are decision-kind
+//	chat      — members are chat-kind (or the legacy "" kind)
+//	decision  — members are decision-kind
+//	image-gen — members are image-gen-kind
 //
-// A member whose kind belongs to no lane (image-gen, group, unknown)
-// carries NO lane evidence: it is an unservable member, not a lane
-// vote. Two VALID lanes in one group (a chat member next to a
-// decision member) is a MIXED group — unrepresentable at write time,
-// unservable at request time (fail closed, never misrouted).
+// A member whose kind belongs to no lane (group, unknown) carries NO
+// lane evidence: it is an unservable member, not a lane vote. Two
+// VALID lanes in one group (a chat member next to a decision member, a
+// chat member next to an image-gen member) is a MIXED group —
+// unrepresentable at write time, unservable at request time (fail
+// closed, never misrouted).
 
 // GroupLane names the lane a group's members belong to.
 type GroupLane string
@@ -40,37 +42,47 @@ const (
 	// GroupLaneDecision is the decision lane: members are
 	// decision-kind models (kind "decision").
 	GroupLaneDecision GroupLane = "decision"
+
+	// GroupLaneImageGen is the image-gen lane: members are
+	// image-gen-kind models (kind "image-gen"). The group is served by
+	// /v1/image_generation only.
+	GroupLaneImageGen GroupLane = "image-gen"
 )
 
 // MemberLane normalizes a model kind into the lane its row belongs to.
 //
 // The legacy "" kind normalizes to CHAT — never to decision: a
 // chat-era row must not silently join a decision group (contract 3).
-// A kind that belongs to no lane (image-gen, group, unknown) returns
-// ok=false — the caller decides what an invalid member means (the
-// write-time validator rejects it; the request-time fold ignores it
-// as unservable).
+// A kind that belongs to no lane (group, unknown) returns ok=false —
+// the caller decides what an invalid member means (the write-time
+// validator rejects it; the request-time fold ignores it as
+// unservable).
 func MemberLane(kind string) (GroupLane, bool) {
 	switch kind {
 	case "", KindChat:
 		return GroupLaneChat, true
 	case KindDecision:
 		return GroupLaneDecision, true
+	case KindImageGen:
+		return GroupLaneImageGen, true
 	default:
 		return "", false
 	}
 }
 
 // GroupLanesOf returns the DISTINCT lanes present in kinds, in a
-// stable order (chat before decision). Kinds that belong to no lane
-// are ignored — they are unservable members, not lane evidence.
+// stable order (chat before decision before image-gen). Kinds that
+// belong to no lane are ignored — they are unservable members, not
+// lane evidence.
 //
 // len(result) > 1 means the group is MIXED (write-time rejection /
-// request-time fail-closed); len(result) == 0 means every member is
-// invalid (the write-time validator words the error with the chat
-// lane by convention — the chat wording is the historical default).
+// request-time fail-closed); len(result) == 0 means no member carries
+// valid lane evidence (mixed with the kind check, the write-time
+// validator reports the invalid member; the member-EXISTENCE wording
+// then falls back to its lane-NEUTRAL clause rather than guessing a
+// lane).
 func GroupLanesOf(kinds []string) []GroupLane {
-	var chat, decision bool
+	var chat, decision, imageGen bool
 	for _, kind := range kinds {
 		lane, ok := MemberLane(kind)
 		if !ok {
@@ -81,14 +93,19 @@ func GroupLanesOf(kinds []string) []GroupLane {
 			chat = true
 		case GroupLaneDecision:
 			decision = true
+		case GroupLaneImageGen:
+			imageGen = true
 		}
 	}
-	lanes := make([]GroupLane, 0, 2)
+	lanes := make([]GroupLane, 0, 3)
 	if chat {
 		lanes = append(lanes, GroupLaneChat)
 	}
 	if decision {
 		lanes = append(lanes, GroupLaneDecision)
+	}
+	if imageGen {
+		lanes = append(lanes, GroupLaneImageGen)
 	}
 	return lanes
 }
@@ -180,23 +197,89 @@ func DeriveGroupLane(memberKinds []string) GroupLane {
 // mixed-kind group (the canonical validator + the POST/PUT mirrors
 // all use it — ONE vocabulary).
 func MixedGroupMembersError(groupID, memberID, kind string) string {
-	return fmt.Sprintf("model %s: kind %q members must all share one kind (chat or decision) — member %q has kind %q", groupID, KindGroup, memberID, kind)
+	return fmt.Sprintf("model %s: kind %q members must all share one kind (chat, decision or image-gen) — member %q has kind %q", groupID, KindGroup, memberID, kind)
 }
 
 // InvalidMemberKindError is the shared rejection message for a member
 // whose kind belongs to no lane.
+//
+// The article is lane-aware (W-5): "a chat-kind model", "a
+// decision-kind model" but "an image-gen-kind model" — the historical
+// chat wording stays byte-identical.
 func InvalidMemberKindError(groupID, memberID, groupLane, kind string) string {
-	return fmt.Sprintf("model %s: kind %q member %q must be a %s-kind model (got kind %q)", groupID, KindGroup, memberID, groupLane, kind)
+	return fmt.Sprintf("model %s: kind %q member %q must be %s %s-kind model (got kind %q)", groupID, KindGroup, memberID, LaneArticle(groupLane), groupLane, kind)
+}
+
+// SurvivingMemberKinds returns the kinds of the group's members that
+// RESOLVE in the collection, in member order.
+//
+// It exists for the WORDING of the member-existence error only: a
+// dangling member carries NO kind evidence, so the lane named by that
+// error must be derived from the members that DO resolve. Kinds that
+// belong to no lane (group, unknown) ride along untouched —
+// UnanimousGroupLane ignores them, exactly as the lane fold does.
+//
+// Pure read: no error, no ordering, no validation decision rides on
+// this helper (zero behavior change to the G3 existence rule).
+func SurvivingMemberKinds(members []GroupMember, collection []ModelConfig) []string {
+	byID := make(map[string]ModelConfig, len(collection))
+	for _, row := range collection {
+		byID[row.ID] = row
+	}
+	kinds := make([]string, 0, len(members))
+	for _, member := range members {
+		if row, ok := byID[member.ModelID]; ok {
+			kinds = append(kinds, row.Kind)
+		}
+	}
+	return kinds
+}
+
+// MemberExistenceClause is the shared wording for the G3
+// member-existence rejection — the canonical validator and the
+// POST/PUT admin-API mirrors all use it (ONE vocabulary, parity law).
+//
+// The clause is LANE-AWARE when the group's SURVIVING members are
+// unanimous — "members must reference existing chat-kind models",
+// "... decision-kind models", "... image-gen-kind models" — and
+// LANE-NEUTRAL when no lane is derivable (every member dangling, or
+// mixed surviving kinds): "members must reference existing models of
+// the group's lane". The dangling member itself carries no kind
+// evidence, so a guess would be the wrong-lane bug this helper
+// removes.
+//
+// The CHAT wording is byte-identical to the historical text (the text
+// lane's messages are untouched).
+func MemberExistenceClause(survivingKinds []string) string {
+	lane, ok := UnanimousGroupLane(survivingKinds)
+	if !ok {
+		return "members must reference existing models of the group's lane"
+	}
+	return fmt.Sprintf("members must reference existing %s-kind models", lane)
+}
+
+// LaneArticle returns the INDEFINITE ARTICLE that reads correctly
+// before a lane word: "a chat-kind model", "a decision-kind model",
+// "an image-gen-kind model".
+//
+// It exists so that NO lane-worded message carries the grammatical bug
+// ("a image-gen-kind model"). The chat and decision wording is
+// byte-identical to the historical text.
+func LaneArticle(lane string) string {
+	if lane == string(GroupLaneImageGen) {
+		return "an"
+	}
+	return "a"
 }
 
 // ValidateFallbackChainLanes refuses a model's fallback chain that
-// names a DECISION-lane group.
+// names a DECISION-lane or an IMAGE-GEN-lane group.
 //
 // The write-time half of the rewrite-boundary lane check: a chat lane
-// must never carry a decision group in its chain (the decision member
-// would enter the chat race list). The rule is lane-gated — a chain
-// target that is not a decision group is untouched (the historical
-// existence-only check still applies).
+// must never carry a decision group or an image-gen group in its chain
+// (the foreign member would enter the chat race list). The rule is
+// lane-gated — a chain target that is not a decision / image-gen group
+// is untouched (the historical existence-only check still applies).
 func ValidateFallbackChainLanes(m *ModelConfig, collection []ModelConfig) error {
 	if m == nil || len(m.FallbackChain) == 0 {
 		return nil
@@ -210,10 +293,15 @@ func ValidateFallbackChainLanes(m *ModelConfig, collection []ModelConfig) error 
 				continue
 			}
 			lane, ok := GroupLaneFromCollection(row, collection)
-			if !ok || lane != GroupLaneDecision {
-				continue // an unknown / chat-lane group — untouched
+			if !ok {
+				continue // an unknown / mixed-lane group — untouched
 			}
-			return fmt.Errorf("model %s: fallback_chain must not reference the decision-lane group %q (a decision group is served by /v1/decisions only)", m.ID, targetID)
+			switch lane {
+			case GroupLaneDecision:
+				return fmt.Errorf("model %s: fallback_chain must not reference the decision-lane group %q (a decision group is served by /v1/decisions only)", m.ID, targetID)
+			case GroupLaneImageGen:
+				return fmt.Errorf("model %s: fallback_chain must not reference the image-gen-lane group %q (an image-gen group is served by /v1/image_generation only)", m.ID, targetID)
+			}
 		}
 	}
 	return nil

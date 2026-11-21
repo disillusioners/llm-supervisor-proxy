@@ -771,6 +771,11 @@ type imgGenParityConfig struct{ timeout time.Duration }
 
 func (c imgGenParityConfig) GetImageGenTimeout() time.Duration { return c.timeout }
 
+// GetImageGenGroupWalkTimeout is the imggen-groups walk-budget
+// getter (F-1 / D-17) — the imggen handler's configGetter widened,
+// so this stub must carry it or the package stops compiling.
+func (c imgGenParityConfig) GetImageGenGroupWalkTimeout() time.Duration { return 0 }
+
 // TestHandleImgGenTest_CrossPathParity_RealVsTestButton — (d) the
 // MACHINERY-REUSE proof: the REAL /v1/image_generation path and the
 // TEST BUTTON path are driven against ONE scriptable fake MiniMax

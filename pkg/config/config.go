@@ -166,6 +166,24 @@ type Config struct {
 	// "DORMANT" note).
 	ImageGenTimeout Duration `json:"image_gen_timeout,omitempty"`
 
+	// imggen-groups commission / F-1 / D-17: ImageGenGroupWalkTimeout
+	// is the TOTAL walk budget of an image-gen GROUP request — the
+	// outer bound over the whole member walk (the per-member
+	// ImageGenTimeout above stays the INNER bound: a member attempt's
+	// ctx = min(remaining walk budget, ImageGenTimeout)).
+	//
+	// Default 240s (= 2 × the per-member default), clamp [60s, 10min].
+	// The budget exists because the naive worst case (16 members ×
+	// 120s = 32 min) dies at the ingress first, producing an
+	// unclassifiable client-side timeout instead of an honest
+	// envelope.
+	//
+	// HOT: the value is read per request through the ConfigSnapshot
+	// class getter (GetImageGenGroupWalkTimeout) — PUT /fe/api/config
+	// applies it without a restart. No boot-owned value, no migration:
+	// the knob rides the existing config blob.
+	ImageGenGroupWalkTimeout Duration `json:"image_gen_group_walk_timeout,omitempty"`
+
 	// Decision Models commission / §3.7 / §8.1 — DecisionTimeout
 	// is the per-request deadline for /v1/decisions. Defaults
 	// to 30s with clamp [10s, 60s] (Q14 / amendment 8 — vendor
@@ -205,6 +223,12 @@ type ManagerInterface interface {
 	// accessor. 0 means "use the package default" (the imggen
 	// handler's own default).
 	GetImageGenTimeout() time.Duration
+	// imggen-groups commission / F-1 / D-17: the TOTAL walk budget
+	// of an image-gen GROUP request. 0 means "use the package
+	// default" (the imggen handler's own default, applied at the
+	// handler seam). HOT: a per-request ConfigSnapshot-class read —
+	// PUT /fe/api/config applies it without a restart.
+	GetImageGenGroupWalkTimeout() time.Duration
 	// Decision Models commission / §3.7 / §8.1: decision
 	// deadline accessor. 0 means "use the package default"
 	// (the decision handler's own default, applied at the
@@ -307,6 +331,14 @@ var Defaults = Config{
 	// per BE-T1; clamp [30s, 4min] enforced in Validate.
 	ImageGenTimeout: Duration(120 * time.Second),
 
+	// imggen-groups commission / F-1: the image-gen GROUP walk
+	// budget. 240s (= 2 × the per-member default) bounds the
+	// pathological walk (16 members × 120s = 32 min would die at
+	// the ingress first). Clamp [60s, 10min] enforced in Validate.
+	// 0 falls back to the default (applied at the imggen handler
+	// seam).
+	ImageGenGroupWalkTimeout: Duration(240 * time.Second),
+
 	// Decision Models commission / §3.7 / §8.1 — decision
 	// deadline. 30s default with clamp [10s, 60s] enforced in
 	// Validate. Both vendors return synchronously; the tight
@@ -347,6 +379,22 @@ func (c *Config) Validate() error {
 		}
 		if c.ImageGenTimeout > Duration(4*time.Minute) {
 			return errors.New("image_gen_timeout must be at most 4m when set")
+		}
+	}
+	// imggen-groups commission / F-1: ImageGenGroupWalkTimeout clamp
+	// [60s, 10min]. The lower bound keeps a group walk from
+	// expiring before a single honest member attempt could finish
+	// (the per-member ImageGenTimeout floor is 30s); the upper bound
+	// keeps the whole walk under the 5-min server WriteTimeout floor
+	// (main.go:279-285). 0 falls back to the default (applied at the
+	// imggen handler seam — config.go:Default sets the 240s default
+	// in Defaults{}, so 0 here only happens on a hand-edited config).
+	if c.ImageGenGroupWalkTimeout > 0 {
+		if c.ImageGenGroupWalkTimeout < Duration(60*time.Second) {
+			return errors.New("image_gen_group_walk_timeout must be at least 60s when set")
+		}
+		if c.ImageGenGroupWalkTimeout > Duration(10*time.Minute) {
+			return errors.New("image_gen_group_walk_timeout must be at most 10m when set")
 		}
 	}
 	// Decision Models commission / §3.7 / §8.1: DecisionTimeout
@@ -803,6 +851,17 @@ func (m *Manager) GetImageGenTimeout() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.ImageGenTimeout.Duration()
+}
+
+// GetImageGenGroupWalkTimeout returns the TOTAL walk budget of an
+// image-gen GROUP request (imggen-groups commission / F-1 / D-17).
+// 0 means "use the package default" (the imggen handler's own
+// default, applied at the handler seam). HOT: a per-request read of
+// the live config — PUT /fe/api/config applies it without a restart.
+func (m *Manager) GetImageGenGroupWalkTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ImageGenGroupWalkTimeout.Duration()
 }
 
 // GetDecisionTimeout returns the configured per-request deadline

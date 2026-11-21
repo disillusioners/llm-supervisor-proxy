@@ -1,13 +1,20 @@
-import { useState } from 'preact/hooks';
 import type { Model } from '../../types';
 import { DecisionModelsTab } from './DecisionModelsTab';
 import { GroupModelsTab } from './GroupModelsTab';
+import { SubTabContainer, type SubTabItem } from './SubTabContainer';
 
 // The container owns the VERTICAL LEFT NAV and the child-tab state.
 // It has NO page-level heading of its own: each child panel owns its
 // own heading (the models panel says "Decision Models", the group
 // panel says "Decision Groups") — that is what lets DecisionModelsTab
 // stay BYTE-UNCHANGED (wrap, never refactor).
+//
+// The nav + the child state now live in the SHARED core
+// (SubTabContainer.tsx) — this file is the decision lane's thin wrapper
+// over it: the SAME nav items, the SAME testids, the SAME accessible
+// names and the SAME panels as before the extraction. The wrapper stays
+// UNCONTROLLED (the decision lane never needs an outside party to
+// command the child).
 type ChildTab = 'models' | 'group';
 
 interface DecisionModelsContainerProps {
@@ -46,7 +53,7 @@ interface DecisionModelsContainerProps {
 // Models). The accessible names are unambiguous against the top-level
 // "Models" and "Group Models" tabs: aria-label="Decision Models" /
 // aria-label="Decision Groups".
-const NAV_ITEMS: { child: ChildTab; label: string; ariaLabel: string; testId: string }[] = [
+const NAV_ITEMS: SubTabItem<ChildTab>[] = [
   {
     child: 'models',
     label: 'Models',
@@ -60,21 +67,6 @@ const NAV_ITEMS: { child: ChildTab; label: string; ariaLabel: string; testId: st
     testId: 'decision-container-tab-group',
   },
 ];
-
-// The active/inactive class pair is the top bar's pair
-// (SettingsPage.tsx) TRANSLATED from the bottom edge to the left edge:
-// `border-b-2 border-blue-400` → `border-l-2 border-l-blue-400`.
-// `border-l-transparent` on the inactive item keeps the geometry
-// constant, so activating a nav item does not shift the labels.
-//
-// The nav is the FE's FIRST nested-tab / vertical nav — everything
-// else (the colour pair, the weight, the transition, the hover, the
-// typography scale, the border-r divider) is lifted from an existing
-// site.
-const ACTIVE_CLASS =
-  'px-3 py-2 text-left font-medium transition-colors whitespace-nowrap border-l-2 text-blue-400 border-l-blue-400';
-const INACTIVE_CLASS =
-  'px-3 py-2 text-left font-medium transition-colors whitespace-nowrap border-l-2 text-gray-400 hover:text-white border-l-transparent';
 
 export function DecisionModelsContainer({
   models,
@@ -96,49 +88,19 @@ export function DecisionModelsContainer({
   groupFetchError,
   groupOnRetry,
 }: DecisionModelsContainerProps) {
-  // The `models` child is the default — the panel the operator came
-  // for is the decision-models list.
-  const [child, setChild] = useState<ChildTab>('models');
-
   return (
-    <div class="flex gap-4" data-testid="decision-models-container">
-      {/* Vertical LEFT nav. Plain native buttons + a class-driven
-          active state: NO role="tablist" / role="tab" / role="tabpanel",
-          NO aria-selected, NO roving tabindex, NO arrow-key handling.
-          `aria-current="true"` marks the ACTIVE button only — the
-          inactive button OMITS the attribute entirely (never
-          aria-current="false"). `type="button"` on every button so an
-          Enter inside a form mounted in the panel can never submit
-          through a nav button. */}
-      <nav
-        class="shrink-0 w-40 flex flex-col gap-1 border-r border-gray-700 pr-2"
-        data-testid="decision-container-nav"
-        aria-label="Decision Models sections"
-      >
-        {NAV_ITEMS.map((item) => {
-          const active = child === item.child;
-          return (
-            <button
-              key={item.child}
-              type="button"
-              class={active ? ACTIVE_CLASS : INACTIVE_CLASS}
-              data-testid={item.testId}
-              aria-label={item.ariaLabel}
-              aria-current={active ? 'true' : undefined}
-              onClick={() => setChild(item.child)}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
-      {/* Conditional render (mount/unmount) — the same shape as every
-          top-level tab branch. Switching away DISCARDS the models
-          panel's local state (an in-flight probe's rendered result
-          goes with it; the probe REQUEST itself is not aborted — the
-          FE never sends an AbortSignal). */}
-      <div class="flex-1 min-w-0" data-testid="decision-container-panel">
-        {child === 'models' ? (
+    // The shared core — the decision lane's nav, its child state and its
+    // panel switch. The `models` child is the default — the panel the
+    // operator came for is the decision-models list.
+    <SubTabContainer<ChildTab>
+      items={NAV_ITEMS}
+      navAriaLabel="Decision Models sections"
+      containerTestId="decision-models-container"
+      navTestId="decision-container-nav"
+      panelTestId="decision-container-panel"
+      defaultChild="models"
+      renderPanel={(child) =>
+        child === 'models' ? (
           <DecisionModelsTab
             models={models}
             onAddModel={onAddModel}
@@ -164,8 +126,8 @@ export function DecisionModelsContainer({
             fetchError={groupFetchError}
             onRetry={groupOnRetry}
           />
-        )}
-      </div>
-    </div>
+        )
+      }
+    />
   );
 }

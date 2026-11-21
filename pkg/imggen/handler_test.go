@@ -236,6 +236,12 @@ type stubConfig struct{ timeout time.Duration }
 
 func (s stubConfig) GetImageGenTimeout() time.Duration { return s.timeout }
 
+// GetImageGenGroupWalkTimeout is the imggen-groups walk-budget
+// getter (F-1 / D-17). The stub returns 0 — the handler seam then
+// applies the package default (240s), which is what every
+// standalone-path test expects.
+func (s stubConfig) GetImageGenGroupWalkTimeout() time.Duration { return 0 }
+
 // newEnv constructs a handler test env with a fake MiniMax
 // upstream, an in-memory usage counter, and a fake token store.
 // By default the env installs a valid token ("sk-test-token")

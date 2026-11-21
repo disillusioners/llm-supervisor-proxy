@@ -28,11 +28,18 @@ const HARDCODED_INTERNAL = true as const;
 const SHADOW_TARGET_MISSING: Record<GroupLane, string> = {
   chat: 'does not exist (must reference an existing chat-kind model)',
   decision: 'does not exist (must reference an existing decision-kind model)',
+  'image-gen': 'does not exist (must reference an existing image-gen-kind model)',
 };
 
 const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
   chat: 'Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.',
   decision: 'Decision group — kind: group · internal: true · backup-only members are recourse-tier candidates (served only after every default member has failed). No fallback chain and no racing on this lane.',
+  // The image-gen lane (imggen-groups) states what the lane ACTUALLY
+  // builds: the members fail over across the group and each member
+  // rotates through its own credentials. No fallback chain and no
+  // racing on this lane.
+  'image-gen':
+    'Image-gen group — kind: group · internal: true · backup-only members are recourse-tier candidates (served only after every default member has failed). Members fail over across the group, each rotating through its own credentials. No fallback chain and no racing on this lane.',
 };
 
 // The lane-consistency block message — it NAMES THE OTHER SURFACE so the
@@ -40,7 +47,20 @@ const FIXED_CONSTANTS_COPY: Record<GroupLane, string> = {
 // client-side inference, so a group can be mis-filed for a while).
 const LANE_GUARD_MESSAGE: Record<GroupLane, string> = {
   chat: 'This is a decision group — edit it under Decision Models → Group.',
-  decision: 'This is a chat group — edit it under Group Models.',
+  // imggen-groups (phase 3): the top-level "Group Models" tab RETIRED
+  // — the chat lane's group surface is now the Text container's Group
+  // child (Models → Group). A navigation pointer to a tab that no
+  // longer exists changes the operator's ability to act, so this ONE
+  // decision-lane string is reworded to the post-consolidation home.
+  // It mirrors the chat arm's established "Decision Models → Group"
+  // shape. This is the ONLY user-facing string delta in the phase (the
+  // chat-lane copy is frozen absolutely).
+  decision: 'This is a chat group — edit it under Models → Group.',
+  // The image-gen surface can host EITHER of the two older lanes (the
+  // lane is inferred from the members), so the static string routes
+  // BOTH homes.
+  'image-gen':
+    'This is a chat or decision group — edit it under Models → Group (chat) or Decision Models → Group (decision).',
 };
 
 // Wire payload emitted by the form on submit (mirrors the BE Model DTO

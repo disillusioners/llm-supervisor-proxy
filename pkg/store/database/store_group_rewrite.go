@@ -110,9 +110,10 @@ func (m *ModelsManager) rewriteGroupEntries(modelList []string, conversationKey 
 		}
 		res.AnyGroup = true
 		// The rewrite-boundary LANE check (decision-groups
-		// commission): a DECISION-lane group is never a candidate on
-		// this (text) lane — the lane is inferred from the group's
-		// CURRENT members, so a decision member can never enter the
+		// commission, widened by the imggen-groups commission): a
+		// DECISION-lane or an IMAGE-GEN-lane group is never a candidate
+		// on this (text) lane — the lane is inferred from the group's
+		// CURRENT members, so a foreign member can never enter the
 		// chat race list, not even as a fallback-position entry.
 		//
 		//   - direct-named entry (the requested model IS the group):
@@ -123,8 +124,8 @@ func (m *ModelsManager) rewriteGroupEntries(modelList []string, conversationKey 
 		//     with a loud log — a healthy chat primary still serves
 		//     (the whole-request failure of the naive shape would
 		//     preserve the very defect this check closes).
-		if lane, laneOK := m.inferGroupLane(row); laneOK && lane == models.GroupLaneDecision {
-			log.Printf("[grouplb] group=%s entry=%d — decision-lane group refused at the rewrite boundary (the text lane never serves a decision member)", row.ID, idx)
+		if lane, laneOK := m.inferGroupLane(row); laneOK && (lane == models.GroupLaneDecision || lane == models.GroupLaneImageGen) {
+			log.Printf("[grouplb] group=%s entry=%d — %s-lane group refused at the rewrite boundary (the text lane never serves a %s member)", row.ID, idx, lane, lane)
 			if idx == 0 {
 				res.FailedGroupID = row.ID
 			}
@@ -512,12 +513,14 @@ func (m *ModelsManager) memberDemotionExpiry(groupID string, row *models.ModelCo
 // isServableGroupMemberBase is the Am28 re-validation predicate: the
 // member row exists, is enabled, and belongs to the group's LANE.
 //
-// The lane is a PARAMETER (decision-groups commission): the chat arm
-// is unchanged (kind chat or the legacy "" normalization — not group /
-// image-gen / decision, the same text-kind rule as G3/G5 at write
-// time), and the decision arm accepts the decision kind ONLY — the
-// legacy "" kind is NEVER accepted as decision (contract 3: a
-// chat-era row must not silently serve the decision lane).
+// The lane is a PARAMETER (decision-groups commission, widened by the
+// imggen-groups commission): the chat arm is unchanged (kind chat or
+// the legacy "" normalization — not group / image-gen / decision, the
+// same text-kind rule as G3/G5 at write time), the decision arm
+// accepts the decision kind ONLY and the image-gen arm the image-gen
+// kind ONLY — the legacy "" kind is NEVER accepted as decision or
+// image-gen (contract 3: a chat-era row must not silently serve
+// another lane).
 //
 // The lane is re-checked at request time to cover member
 // disabled/deleted/retyped between group write and request.
@@ -530,6 +533,8 @@ func isServableGroupMemberBase(row *models.ModelConfig, lane models.GroupLane) b
 	switch lane {
 	case models.GroupLaneDecision:
 		return row.Kind == models.KindDecision
+	case models.GroupLaneImageGen:
+		return row.Kind == models.KindImageGen
 	default:
 		// Chat lane (and any unknown lane): the historical arm,
 		// byte-for-byte.

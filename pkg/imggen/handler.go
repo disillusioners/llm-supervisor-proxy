@@ -15,6 +15,17 @@
 // (Architect Amendment 17): a model that exists but is NOT in the
 // token's allowed_models returns 403; a model that does not exist
 // returns 404. Distinct conditions, the divergence is by design.
+//
+// SCOPE SURFACES (imggen-groups commission / P2): a PLAIN image-gen
+// model's scope is resolved at the entry gate; a GROUP's scope is
+// resolved INSIDE its serving branch (pkg/imggen/group.go). The group
+// arm owns group-id-in-reach, member exclusion on a copy, and the
+// 403-vs-502 discriminator. ADR O1 ("Image-gen has no group or chain
+// surfaces") is superseded by this commission.
+//
+// FILE SIZE (~1.25k lines): this file owns the entry gate, the shared
+// attempt mechanics (attemptImageGenMember, both surfaces), the group-arm
+// integration, and the response/count helpers; the member LOOP lives in group.go.
 package imggen
 
 import (
@@ -33,6 +44,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/authz"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
@@ -41,6 +53,12 @@ const (
 	// defaultImageGenTimeout is the package default applied when
 	// the config knob is zero. Mirrors config.Defaults.ImageGenTimeout.
 	defaultImageGenTimeout = 120 * time.Second
+
+	// defaultImageGenGroupWalkTimeout is the package default applied
+	// when the config knob is zero. Mirrors
+	// config.Defaults.ImageGenGroupWalkTimeout (= 2 × the per-member
+	// default — imggen-groups commission / F-1 / D-17).
+	defaultImageGenGroupWalkTimeout = 240 * time.Second
 
 	// maxRequestBodyBytes is the request body cap (BE-G1). Spec
 	// allows subject_reference < 10 MB; 16 MB has slack for the
@@ -105,9 +123,32 @@ type Handler struct {
 // configGetter is the slice of config.ManagerInterface this
 // handler actually uses. Defined locally so tests can substitute
 // a stub without depending on the full config surface.
+//
+// imggen-groups commission / F-1 / D-17: the GROUP walk budget
+// getter joins the per-member deadline getter here. BOTH are HOT
+// (per-request reads — PUT /fe/api/config applies them without a
+// restart); neither is boot-owned.
 type configGetter interface {
 	GetImageGenTimeout() time.Duration
+	GetImageGenGroupWalkTimeout() time.Duration
 }
+
+// groupLaneSeam is the OPTIONAL lane-query seam (the imggen-groups
+// commission). It lives OUTSIDE models.ModelsConfigInterface on
+// purpose: the optional-seam shape keeps the structural test fakes
+// and the JSON backend valid (the house pattern — the precedent:
+// ClearGroupMemberCooldown, groupLaneReader).
+type groupLaneSeam interface {
+	GroupLane(groupID string) (models.GroupLane, bool)
+}
+
+// The compile-time proof that the PRODUCTION models binding satisfies
+// the lane seam: the production conf.ModelsConfig is
+// *modelscache.CachedModelsConfig (CACHE_LAYER_ENABLED defaults ON),
+// so a REMOVED decorator forward must break the BUILD, not silently
+// no-op in production while the raw-manager tests stay green (the
+// modelscache-decorator-forward-trap, exact shape).
+var _ groupLaneSeam = (*modelscache.CachedModelsConfig)(nil)
 
 // NewHandler constructs the /v1/image_generation handler. The
 // usage counter may be nil (metering silently skipped) and the
@@ -136,6 +177,24 @@ func (h *Handler) imageGenTimeout() time.Duration {
 	return d
 }
 
+// imageGenGroupWalkTimeout returns the TOTAL walk budget of an
+// image-gen GROUP request (imggen-groups commission / F-1 / D-17),
+// falling back to the package default when the config knob is zero
+// (e.g., a hand-edited config or a test stub).
+//
+// HOT: the read goes through the config manager's per-request getter,
+// so PUT /fe/api/config applies a new budget without a restart.
+func (h *Handler) imageGenGroupWalkTimeout() time.Duration {
+	if h.configMgr == nil {
+		return defaultImageGenGroupWalkTimeout
+	}
+	d := h.configMgr.GetImageGenGroupWalkTimeout()
+	if d <= 0 {
+		return defaultImageGenGroupWalkTimeout
+	}
+	return d
+}
+
 // HandleImageGeneration is the POST /v1/image_generation entry
 // point (BE-R3 / T1.4.4-1.4.6). It is registered in cmd/main.go
 // as a sibling of the chat routes.
@@ -154,17 +213,19 @@ func (h *Handler) imageGenTimeout() time.Duration {
 //     (modelID, modelID) — synthetic stable key (BE-A3 /
 //     Amendment 18). nil-engine degrades to single-credential
 //     resolution. Resolve failure ⇒ 502 (OpenAI envelope).
-//  6. Upstream URL + body via UpstreamProvider.BuildUpstream.
-//     Build failure (invalid JSON) ⇒ 400 (OpenAI envelope).
-//  7. Single upstream POST with ImageGenTimeout (default 120s,
-//     clamp [30s, 4min] per BE-T1). Exactly ONE upstream call
-//     (no retry, no fallback — Amendment 14 / T1.4.5).
-//  8. Response read via io.LimitReader(64 MB + 1). Over-cap ⇒ 502
-//     (openAI envelope), abort. Single read; classification +
-//     metering + event reuse the same []byte (Amendment 12).
-//  9. InspectResponse for EVERY upstream response (single-
-//     classifier seam, Amendment 3). PassAsIs ⇒ relay verbatim;
-//     PromoteToError ⇒ write RelayStatus + upstream body.
+//     6-9. THE ATTEMPT (the shared attempt mechanics —
+//     attemptImageGenMember; imggen-groups commission / T1.6 — the
+//     standalone path AND the group walk call the SAME function):
+//     upstream URL + body via UpstreamProvider.BuildUpstream (build
+//     failure ⇒ 400); a single upstream POST under the caller's
+//     deadline (ImageGenTimeout — default 120s, clamp [30s, 4min] per
+//     BE-T1; exactly ONE upstream call, no retry, no fallback —
+//     Amendment 14 / T1.4.5); the response read via
+//     io.LimitReader(64 MB + 1) (over-cap ⇒ 502, abort; single read —
+//     classification + metering + event reuse the same []byte,
+//     Amendment 12); InspectResponse for EVERY upstream response
+//     (single-classifier seam, Amendment 3). PassAsIs ⇒ relay
+//     verbatim; PromoteToError ⇒ write RelayStatus + upstream body.
 //  10. Meter: IncrementTokenImages + IncrementModelImages with
 //     request_count=1, image_count=BillableImages(body) (0 on
 //     error-in-200). Documented divergence from chat's success-
@@ -283,7 +344,68 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 4) THE SCOPE PREDICATE (the shared entry gate).
+	// 4) THE KIND / LANE GATE (imggen-groups commission / T1.5).
+	//
+	// PRECEDENCE (the decision lane's law, pkg/decision/handler.go:
+	// "kind/lane BEFORE scope"): the gate runs BEFORE the scope
+	// predicate below, so a misroute answer is TOKEN-INDEPENDENT — it
+	// can never leak the lane configuration through a permission
+	// answer.
+	//
+	// Three arms:
+	//   - a GROUP whose lane is image-gen ⇒ the group serving branch
+	//     (the walk);
+	//   - a GROUP whose lane is NOT image-gen (chat / decision /
+	//     unknown) ⇒ 400 image_misroute;
+	//   - a NON-group row that is not image-gen ⇒ 400 image_misroute.
+	//     This closes a REAL pre-existing gap: ANY model id used to
+	//     resolve here, pass the scope check, resolve a credential and
+	//     die at the provider lookup as a 502 unsupported_provider —
+	//     and a chat model whose provider happened to be minimax would
+	//     even be SERVED on this lane.
+	//   - a plain image-gen row ⇒ today's path, unchanged.
+	if row.IsGroup() {
+		if !h.groupIsImageGenLane(row.ID) {
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+				"outcome":         imggenMisrouteCode,
+				"model":           modelID,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
+				"upstream_status": 0,
+			})
+			h.openAIErrorWithCode(w, http.StatusBadRequest,
+				fmt.Sprintf("image-generation models are served by /v1/image_generation only (group %q is not an image-gen group)", row.ID),
+				imggenMisrouteCode)
+			return
+		}
+	} else if !row.IsImageGen() {
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+			"outcome":         imggenMisrouteCode,
+			"model":           modelID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIErrorWithCode(w, http.StatusBadRequest,
+			fmt.Sprintf("image-generation models are served by /v1/image_generation only (model %q is kind %q)", row.ID, row.Kind),
+			imggenMisrouteCode)
+		return
+	}
+
+	// 5) THE GROUP BRANCH (an image-gen-lane group). It dispatches BEFORE
+	//    the entry-gate scope predicate below (the v203 bypass-closed
+	//    pattern, mirroring pkg/decision/handler.go:324-329): the group
+	//    arm resolves its OWN scope and owns the whole group scope
+	//    surface — group-id-in-reach, member exclusion, and the
+	//    403-vs-502 discriminator (pkg/imggen/group.go ARM#1/2/3).
+	//    The entry gate must NOT authorize the group id here: doing so
+	//    would make ARM#1 unreachable and answer with the resolved id.
+	//    The kind/lane gate above already ran, so a misroute stays a
+	//    token-independent 400.
+	if row.IsGroup() {
+		h.serveImageGenGroup(w, r, row, authToken, modelID, bodyBytes, startTime)
+		return
+	}
+
+	// 6) THE SCOPE PREDICATE (the shared entry gate) — PLAIN models only.
 	//
 	// ADR D8: the four entry sites collapse into ONE predicate — the
 	// scope resolved by pkg/authz (the ONE resolver). A lane may not
@@ -295,13 +417,19 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// to today's allow-list check.
 	//
 	// PRECEDENCE (T2.13): 401 (auth) -> 400 missing_model ->
-	// 404 (unknown model) -> 403 (scope) -> 502. The scope check runs
-	// AFTER the 404, so an unknown id is never answered with a
-	// permission error.
+	// 404 (unknown model) -> 400 image_misroute (kind/lane) ->
+	// 403 (scope) -> 502. The scope check runs AFTER the 404 and
+	// AFTER the kind/lane gate, so an unknown id is never answered
+	// with a permission error and a misroute is never answered with
+	// a permission error.
 	//
-	// NOTE: this lane has NO candidate list — an image-generation
-	// model has no FallbackChain (pkg/imggen/handler.go's header), so
-	// the entry check is the WHOLE scope obligation on this lane.
+	// NOTE: this entry check covers PLAIN image-generation models (no
+	// candidate list — an image-gen model has no FallbackChain). A
+	// GROUP's scope is resolved INSIDE its serving branch (the three
+	// arms in pkg/imggen/group.go, mirroring pkg/decision/group.go:
+	// 117-208): the group arm owns its scope — resolve-inside-arm,
+	// member exclusion on a copy, and the empty-order fork. ADR O1
+	// ("Image-gen has no group or chain surfaces") is superseded.
 	scope := authz.Resolve(authToken, h.membersOf())
 	if scope != nil && !scope.Allows(row.ID) {
 		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
@@ -315,7 +443,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 5) Credential resolution. We use the chat-side helper
+	// 7) Credential resolution. We use the chat-side helper
 	// through the ModelsConfigInterface so the existing
 	// affinity engine (Phase 3 / pkg/credentiallb) participates
 	// when wired. Stable key (modelID, modelID) per BE-A3 +
@@ -333,199 +461,55 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 6) Look up the per-provider UpstreamProvider. Phase 1
-	// ships minimax only; unknown providers ⇒ 502 (the handler
-	// does not silently fall back to a different provider).
-	provider, ok := lookup(cred.Provider)
-	if !ok {
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         "unsupported_provider",
-			"model":           modelID,
-			"provider":        cred.Provider,
-			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": 0,
-		})
-		h.openAIError(w, http.StatusBadGateway,
-			fmt.Sprintf("no image-generation adapter registered for provider %q", cred.Provider))
-		return
-	}
-
-	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, bodyBytes)
-	if err != nil {
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         "build_failed",
-			"model":           modelID,
-			"error":           err.Error(),
-			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": 0,
-		})
-		h.openAIError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// 7) Single upstream POST with ImageGenTimeout (BE-T1 /
-	// T1.4.5). No retry, no fallback, no MonitoredReader (BE-T2 /
-	// Exclusions table). The pooled client is the module-level
-	// sharedHTTPClient with ResponseHeaderTimeout: 0 explicit
-	// (Amendment 10).
+	// 8-12) THE ATTEMPT (imggen-groups commission / T1.6): the
+	// provider lookup, the upstream build, the single POST, the
+	// bounded read and the classification live in ONE shared
+	// function — the standalone path and the GROUP walk call the
+	// SAME code, so the two can never drift.
+	//
+	// The deadline is the CALLER's: the standalone path passes the
+	// per-request ImageGenTimeout; the group walk passes
+	// min(remaining walk budget, ImageGenTimeout). The attempt
+	// mechanics themselves are identical.
 	ctx, cancel := context.WithTimeout(r.Context(), h.imageGenTimeout())
 	defer cancel()
 
-	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
-	if err != nil {
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         "request_build_failed",
+	attempt := h.attemptImageGenMember(ctx, cred, bodyBytes, r)
+	if attempt.failure != nil {
+		// A pre-relay failure: the attempt never produced a
+		// classified response, so the envelope is the CALLER's.
+		// The detail keys (provider / error / max_bytes) travel in
+		// the failure so the telemetry payload keeps the exact key
+		// set this path published before the extraction.
+		f := attempt.failure
+		event := map[string]interface{}{
+			"outcome":         f.outcome,
 			"model":           modelID,
-			"provider":        cred.Provider,
-			"error":           err.Error(),
 			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": 0,
-		})
-		h.openAIError(w, http.StatusInternalServerError,
-			"failed to build upstream request")
+			"upstream_status": attempt.upstreamStatus,
+		}
+		for key, value := range f.detail {
+			event[key] = value
+		}
+		h.publishEvent(eventTypeImageGeneration, event)
+		h.openAIError(w, f.status, f.message)
+		if f.meter {
+			h.meterFailure(authToken, modelID, f.outcome)
+		}
 		return
 	}
 
-	// Headers. Content-Type + credential bearer. Copy remaining
-	// client headers EXCEPT hop-by-hop (Host, Content-Length,
-	// Transfer-Encoding) AND EXCEPT client auth headers
-	// (Authorization, X-API-Key, x-api-key) — the proxy's sk-
-	// token must never reach MiniMax (BE-A2). Also EXCEPT the
-	// client Content-Type (the app-owned application/json above
-	// is authoritative — Add-ing the client's CT duplicates the
-	// header upstream) AND the client Accept-Encoding: Go's
-	// http.Transport only transparently decompresses a gzip
-	// response when IT added Accept-Encoding itself; a copied
-	// header (cloudflared injects "Accept-Encoding: gzip" toward
-	// origin) disables auto-decompression and a gzipped body
-	// reaches the JSON parser ⇒ 502. Excluding both lets the
-	// transport own encoding negotiation.
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
-	for key, values := range r.Header {
-		if isHopByHopHeader(key) || isClientAuthHeader(key) ||
-			strings.EqualFold(key, "Content-Type") ||
-			strings.EqualFold(key, "Accept-Encoding") {
-			continue
-		}
-		for _, value := range values {
-			upstreamReq.Header.Add(key, value)
-		}
-	}
+	provider := attempt.provider
+	outcome := attempt.outcome
+	respBody := attempt.body
+	respStatus := attempt.upstreamStatus
 
-	// 8) Single upstream call. Exactly ONE per request (T1.7.2
-	// "exactly-one-upstream-call" assertion; Amendment 14 — the
-	// chat path's race coordinator and fallback are NOT wired).
-	resp, err := sharedHTTPClient.Do(upstreamReq)
-	if err != nil {
-		// Deadline / context expiry surfaces here as well. 504
-		// on context.DeadlineExceeded; 502 on transport error.
-		status := http.StatusBadGateway
-		outcome := "upstream_transport_error"
-		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
-			status = http.StatusGatewayTimeout
-			outcome = "deadline"
-		}
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         outcome,
-			"model":           modelID,
-			"provider":        cred.Provider,
-			"error":           err.Error(),
-			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": 0,
-		})
-		h.openAIError(w, status, fmt.Sprintf("upstream request failed: %v", err))
-		h.meterFailure(authToken, modelID, outcome)
-		return
-	}
-	defer resp.Body.Close()
-
-	// 9) Response read bounded (BE-G2). io.LimitReader 64 MB + 1
-	// so the handler can detect over-cap distinctly (the +1 byte
-	// triggers a separate branch below; the over-cap body is
-	// never materialized into a second []byte — single read,
-	// single classification, single relay).
-	cap := int64(maxResponseBodyBytes)
-	if maxResponseBodyBytesForTest > 0 {
-		cap = maxResponseBodyBytesForTest
-	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
-	if err != nil {
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         "upstream_read_failed",
-			"model":           modelID,
-			"provider":        cred.Provider,
-			"error":           err.Error(),
-			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": resp.StatusCode,
-		})
-		h.openAIError(w, http.StatusBadGateway, "upstream read failed")
-		h.meterFailure(authToken, modelID, "upstream_read_failed")
-		return
-	}
-	if len(respBody) > int(cap) {
-		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-			"outcome":         "response_too_large",
-			"model":           modelID,
-			"provider":        cred.Provider,
-			"max_bytes":       cap,
-			"duration_ms":     time.Since(startTime).Milliseconds(),
-			"upstream_status": resp.StatusCode,
-		})
-		h.openAIError(w, http.StatusBadGateway,
-			fmt.Sprintf("upstream response exceeds %d MB cap (BE-G2)", cap>>20))
-		h.meterFailure(authToken, modelID, "response_too_large")
-		return
-	}
-
-	// 10) Classification (Amendment 3 — single-classifier seam).
-	// InspectResponse is called for EVERY upstream response; the
-	// handler never branches on resp.StatusCode directly. The
-	// Outcome carries the relay decision.
-	outcome := provider.InspectResponse(resp.StatusCode, respBody)
-
-	// 10b) Optional body-rewrite hook (the IO-conversion seam).
-	// Runs ONLY after InspectResponse returns PassAsIs, and only
-	// for adapters that implement ResponseRewriter. On a conversion
-	// failure the handler surfaces a 502 with an OpenAI envelope and
-	// bills the request as a failure (the upstream completed but its
-	// body could not be shaped into the existing IO format).
-	if outcome.RelayStatus == 0 {
-		if rw, ok := provider.(ResponseRewriter); ok {
-			converted, err := rw.RewriteResponse(respBody)
-			if err != nil {
-				h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
-					"outcome":         "response_conversion_failed",
-					"model":           modelID,
-					"provider":        cred.Provider,
-					"error":           err.Error(),
-					"duration_ms":     time.Since(startTime).Milliseconds(),
-					"upstream_status": resp.StatusCode,
-				})
-				h.openAIError(w, http.StatusBadGateway, "failed to convert upstream response: "+err.Error())
-				h.meterFailure(authToken, modelID, "response_conversion_failed")
-				return
-			}
-			respBody = converted
-		}
-	}
-
-	// 10c) Optional error-body normalizer (the promoted-error path
-	// only). Runs ONLY when InspectResponse promoted the response to
-	// an error, and only for adapters that implement
-	// ErrorBodyNormalizer. The success path is untouched.
-	if outcome.RelayStatus != 0 {
-		if nb, ok := provider.(ErrorBodyNormalizer); ok {
-			respBody = nb.NormalizeErrorBody(respBody)
-		}
-	}
-
-	// 11) Relay (T1.4.6 / write-first observe-after). On
+	// 13) Relay (T1.4.6 / write-first observe-after). On
 	// PassAsIs: copy headers, write upstream status, write body
 	// verbatim. On PromoteToError: 502 (or whatever RelayStatus
 	// is), preserve the upstream body verbatim (no envelope of
 	// our own — error-in-200 is MiniMax's own error shape).
-	copyResponseHeaders(w, resp)
+	copyResponseHeaders(w, attempt.headers)
 	// Content-Length is already stripped by isHopByHopHeader in
 	// copyResponseHeaders, so no stale upstream length can survive
 	// when a hook rewrites or normalizes the body. The Del calls
@@ -544,7 +528,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		// PassAsIs — covers upstream HTTP ≥400 passthrough AND
 		// 200-success. The handler relays the upstream status
 		// verbatim (Amendment 3; the seam owns the decision).
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(respStatus)
 	} else {
 		// PromoteToError. The upstream body is preserved verbatim
 		// (no envelope of our own on error-in-200 — BE-T3
@@ -569,7 +553,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		// unparseable-JSON / empty-body) so the API-drift signal
 		// this guard catches is not conflated.
 		log.Printf("[imggen] %s: %s (upstream_status=%d, model=%s, provider=%s)",
-			modelID, outcome.Reason, resp.StatusCode, modelID, cred.Provider)
+			modelID, outcome.Reason, respStatus, modelID, cred.Provider)
 	}
 	if _, err := w.Write(respBody); err != nil {
 		// The client disconnected; we still bill the request
@@ -577,7 +561,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[imggen] write to client failed: %v (model=%s, provider=%s)", err, modelID, cred.Provider)
 	}
 
-	// 12) Meter + event. Meter first (observe-after: even on
+	// 14) Meter + event. Meter first (observe-after: even on
 	// error-in-200, request_count+1, image_count=0 — Amendment
 	// 14 documented divergence from chat's success-only). Then
 	// publish the telemetry event with the final outcome.
@@ -612,10 +596,254 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		"provider":        cred.Provider,
 		"success_count":   successCount,
 		"failed_count":    failedCount,
-		"upstream_status": resp.StatusCode,
+		"upstream_status": respStatus,
 		"duration_ms":     time.Since(startTime).Milliseconds(),
 		"outcome":         eventOutcome,
 	})
+}
+
+// imgGenAttempt is the result of ONE upstream attempt (imggen-groups
+// commission / T1.6 — the shared attempt mechanics).
+//
+// The attempt performs NO client write: the caller relays (standalone
+// path) or classifies (group walk) the result.
+type imgGenAttempt struct {
+	// provider is the resolved adapter (nil when the lookup failed).
+	provider UpstreamProvider
+	// cred is the credential the attempt ran with.
+	cred models.ResolvedCredential
+	// outcome is the classifier verdict — the SINGLE-classifier seam
+	// (Architect Amendment 3: InspectResponse is called for EVERY
+	// upstream response; the handler never branches on
+	// resp.StatusCode directly).
+	outcome Outcome
+	// upstreamStatus is the RAW upstream HTTP status (0 when the
+	// attempt never reached the upstream).
+	upstreamStatus int
+	// body is the upstream body — read ONCE (classification,
+	// metering and the relay reuse the same []byte; Architect
+	// Amendment 12 single-materialization).
+	body []byte
+	// headers are the upstream response headers (the relay copies the
+	// non-hop-by-hop ones).
+	headers http.Header
+	// failure describes an attempt that produced NO classified
+	// response (build failure, transport error, over-cap body, a
+	// failed conversion). nil on a completed attempt.
+	failure *attemptFailure
+}
+
+// attemptFailure is a PRE-RELAY failure of one attempt: the attempt
+// never produced a classified response, so the caller owns the
+// envelope, the telemetry payload and the billing decision.
+type attemptFailure struct {
+	// outcome is the telemetry outcome for the failed attempt.
+	outcome string
+	// status is the HTTP status the standalone path answers with.
+	status int
+	// message is the standalone envelope's message.
+	message string
+	// detail carries the failure-class-specific telemetry keys
+	// (provider / error / max_bytes). The standalone path's event
+	// payload keeps the exact key set it published before the
+	// extraction.
+	detail map[string]interface{}
+	// meter reports whether the failure is billed (request_count=1,
+	// image_count=0 — the Amendment 14 bill-on-error continuity).
+	meter bool
+}
+
+// attemptImageGenMember performs ONE upstream attempt for one
+// credential and classifies the outcome.
+//
+// It is the SHARED attempt mechanics (imggen-groups commission /
+// T1.6): the standalone path and the group walk call the SAME
+// function, so the two can never drift. It performs NO client write.
+//
+// The caller's ctx carries the deadline: the standalone path passes
+// the per-request ImageGenTimeout; the group walk passes
+// min(remaining walk budget, ImageGenTimeout).
+func (h *Handler) attemptImageGenMember(ctx context.Context, cred models.ResolvedCredential, bodyBytes []byte, r *http.Request) imgGenAttempt {
+	res := imgGenAttempt{cred: cred}
+
+	// Look up the per-provider UpstreamProvider. Phase 1 ships
+	// minimax only; unknown providers ⇒ 502 (the handler does not
+	// silently fall back to a different provider).
+	provider, ok := lookup(cred.Provider)
+	if !ok {
+		res.failure = &attemptFailure{
+			outcome: "unsupported_provider",
+			status:  http.StatusBadGateway,
+			message: fmt.Sprintf("no image-generation adapter registered for provider %q", cred.Provider),
+			detail:  map[string]interface{}{"provider": cred.Provider},
+		}
+		return res
+	}
+	res.provider = provider
+
+	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, bodyBytes)
+	if err != nil {
+		res.failure = &attemptFailure{
+			outcome: "build_failed",
+			status:  http.StatusBadRequest,
+			message: err.Error(),
+			detail:  map[string]interface{}{"error": err.Error()},
+		}
+		return res
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		res.failure = &attemptFailure{
+			outcome: "request_build_failed",
+			status:  http.StatusInternalServerError,
+			message: "failed to build upstream request",
+			detail: map[string]interface{}{
+				"provider": cred.Provider,
+				"error":    err.Error(),
+			},
+		}
+		return res
+	}
+
+	// Headers. Content-Type + credential bearer. Copy remaining
+	// client headers EXCEPT hop-by-hop (Host, Content-Length,
+	// Transfer-Encoding) AND EXCEPT client auth headers
+	// (Authorization, X-API-Key, x-api-key) — the proxy's sk-
+	// token must never reach MiniMax (BE-A2). Also EXCEPT the
+	// client Content-Type (the app-owned application/json above
+	// is authoritative — Add-ing the client's CT duplicates the
+	// header upstream) AND the client Accept-Encoding: Go's
+	// http.Transport only transparently decompresses a gzip
+	// response when IT added Accept-Encoding itself; a copied
+	// header (cloudflared injects "Accept-Encoding: gzip" toward
+	// origin) disables auto-decompression and a gzipped body
+	// reaches the JSON parser ⇒ 502. Excluding both lets the
+	// transport own encoding negotiation.
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+	for key, values := range r.Header {
+		if isHopByHopHeader(key) || isClientAuthHeader(key) ||
+			strings.EqualFold(key, "Content-Type") ||
+			strings.EqualFold(key, "Accept-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			upstreamReq.Header.Add(key, value)
+		}
+	}
+
+	// Single upstream call. Exactly ONE per attempt (the standalone
+	// path: exactly one per request — Amendment 14; the group walk:
+	// one per member attempt).
+	resp, err := sharedHTTPClient.Do(upstreamReq)
+	if err != nil {
+		// Deadline / context expiry surfaces here as well. 504 on
+		// context.DeadlineExceeded; 502 on transport error.
+		status := http.StatusBadGateway
+		outcome := "upstream_transport_error"
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+			status = http.StatusGatewayTimeout
+			outcome = "deadline"
+		}
+		res.failure = &attemptFailure{
+			outcome: outcome,
+			status:  status,
+			message: fmt.Sprintf("upstream request failed: %v", err),
+			detail: map[string]interface{}{
+				"provider": cred.Provider,
+				"error":    err.Error(),
+			},
+			meter: true,
+		}
+		return res
+	}
+	defer resp.Body.Close()
+	res.upstreamStatus = resp.StatusCode
+	res.headers = resp.Header
+
+	// Response read bounded (BE-G2). io.LimitReader 64 MB + 1 so the
+	// handler can detect over-cap distinctly (the +1 byte triggers a
+	// separate branch below; the over-cap body is never materialized
+	// into a second []byte — single read, single classification,
+	// single relay).
+	cap := int64(maxResponseBodyBytes)
+	if maxResponseBodyBytesForTest > 0 {
+		cap = maxResponseBodyBytesForTest
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
+	if err != nil {
+		res.failure = &attemptFailure{
+			outcome: "upstream_read_failed",
+			status:  http.StatusBadGateway,
+			message: "upstream read failed",
+			detail: map[string]interface{}{
+				"provider": cred.Provider,
+				"error":    err.Error(),
+			},
+			meter: true,
+		}
+		return res
+	}
+	if len(respBody) > int(cap) {
+		res.failure = &attemptFailure{
+			outcome: "response_too_large",
+			status:  http.StatusBadGateway,
+			message: fmt.Sprintf("upstream response exceeds %d MB cap (BE-G2)", cap>>20),
+			detail: map[string]interface{}{
+				"provider":  cred.Provider,
+				"max_bytes": cap,
+			},
+			meter: true,
+		}
+		return res
+	}
+
+	// Classification (Amendment 3 — single-classifier seam).
+	// InspectResponse is called for EVERY upstream response; the
+	// handler never branches on resp.StatusCode directly. The
+	// Outcome carries the relay decision.
+	outcome := provider.InspectResponse(resp.StatusCode, respBody)
+
+	// Optional body-rewrite hook (the IO-conversion seam). Runs ONLY
+	// after InspectResponse returns PassAsIs, and only for adapters
+	// that implement ResponseRewriter. On a conversion failure the
+	// handler surfaces a 502 with an OpenAI envelope and bills the
+	// request as a failure (the upstream completed but its body could
+	// not be shaped into the existing IO format).
+	if outcome.RelayStatus == 0 {
+		if rw, ok := provider.(ResponseRewriter); ok {
+			converted, err := rw.RewriteResponse(respBody)
+			if err != nil {
+				res.failure = &attemptFailure{
+					outcome: "response_conversion_failed",
+					status:  http.StatusBadGateway,
+					message: "failed to convert upstream response: " + err.Error(),
+					detail: map[string]interface{}{
+						"provider": cred.Provider,
+						"error":    err.Error(),
+					},
+					meter: true,
+				}
+				return res
+			}
+			respBody = converted
+		}
+	}
+
+	// Optional error-body normalizer (the promoted-error path only).
+	// Runs ONLY when InspectResponse promoted the response to an
+	// error, and only for adapters that implement
+	// ErrorBodyNormalizer. The success path is untouched.
+	if outcome.RelayStatus != 0 {
+		if nb, ok := provider.(ErrorBodyNormalizer); ok {
+			respBody = nb.NormalizeErrorBody(respBody)
+		}
+	}
+
+	res.outcome = outcome
+	res.body = respBody
+	return res
 }
 
 // authenticate mirrors pkg/proxy/handler.go:288-308. tokenStore
@@ -732,6 +960,18 @@ func (h *Handler) openAIError(w http.ResponseWriter, code int, message string) {
 		models.ErrorTypeServerError, "", message))
 }
 
+// openAIErrorWithCode threads the supplied errorCode into the
+// envelope (image_misroute / imggen_all_members_failed / similar
+// typed codes). Mirrors the decision lane's helper (pkg/decision/
+// handler.go) — the packages do not import each other (the import
+// guard forbids it), so the helper is spelled twice.
+func (h *Handler) openAIErrorWithCode(w http.ResponseWriter, code int, message, errorCode string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(models.NewOpenAIError(
+		models.ErrorTypeServerError, errorCode, message))
+}
+
 // sendAuthError writes the OpenAI-envelope 401. Maps 401 to
 // "authentication_error" (matches pkg/proxy/handler.go:346-355 —
 // the public-surface decision the chat handler adopted so FE
@@ -816,6 +1056,37 @@ func (h *Handler) SetModelsConfig(cfg models.ModelsConfigInterface) {
 		return
 	}
 	h.modelsConfig = cfg
+}
+
+// groupLane resolves the group's lane through the OPTIONAL seam.
+// Nil-safe: a handler without the models config (or without the seam)
+// answers "no lane" — the group branch then fails CLOSED.
+func (h *Handler) groupLane(groupID string) (models.GroupLane, bool) {
+	if h == nil || h.modelsConfig == nil {
+		return "", false
+	}
+	gl, ok := h.modelsConfig.(groupLaneSeam)
+	if !ok {
+		return "", false
+	}
+	return gl.GroupLane(groupID)
+}
+
+// groupIsImageGenLane is the group branch's entry gate: the group
+// must be an IMAGE-GEN-lane group.
+//
+// The seam is OPTIONAL: an absent seam (or an unresolvable lane — a
+// mixed-kind group) fails CLOSED — the caller keeps the 400
+// image_misroute path — and the refusal is logged LOUDLY, because a
+// missing decorator forward would otherwise be a SILENT no-op in
+// production (the modelscache-decorator-forward-trap).
+func (h *Handler) groupIsImageGenLane(groupID string) bool {
+	lane, ok := h.groupLane(groupID)
+	if !ok {
+		log.Printf("[imggen] group=%s: the group-lane seam is absent or the lane is unresolvable — failing closed (a group is never served without a resolved lane)", groupID)
+		return false
+	}
+	return lane == models.GroupLaneImageGen
 }
 
 // SetModelResolver installs the model-lookup function. Called
@@ -907,8 +1178,12 @@ func isClientAuthHeader(h string) bool {
 // copyResponseHeaders copies non-hop-by-hop upstream response
 // headers onto the client response. Mirrors the header-copy
 // pattern used by the raw-passthrough handlers.
-func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
-	for key, values := range resp.Header {
+//
+// It takes the header MAP (not the response) so the shared attempt
+// (T1.6) can hand the headers over without carrying the whole
+// response around.
+func copyResponseHeaders(w http.ResponseWriter, header http.Header) {
+	for key, values := range header {
 		if isHopByHopHeader(key) {
 			continue
 		}
