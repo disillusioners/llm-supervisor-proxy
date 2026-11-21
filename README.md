@@ -563,4 +563,4 @@ For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detect
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0-only)**. See the [LICENSE](LICENSE) file for the full license text.
 
-Copyright (C) 2026 llm-supervisor-proxy contributors
+Copyright (C) 2026 disillusioners
